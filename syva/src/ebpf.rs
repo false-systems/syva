@@ -190,8 +190,9 @@ impl EnforceEbpf {
     ///
     /// Triggers a synthetic file open to ensure the hook fires, then polls the
     /// SELF_TEST map until the result is available.
-    pub fn verify_self_test(&self) -> anyhow::Result<()> {
+    pub async fn verify_self_test(&self) -> anyhow::Result<()> {
         use aya::maps::Array;
+        use std::time::Duration;
 
         // Trigger a file_open so the self-test fires.
         let _ = std::fs::File::open("/proc/self/status");
@@ -201,31 +202,32 @@ impl EnforceEbpf {
                 .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
         )?;
 
-        for attempt in 0..10 {
+        for attempt in 0..20 {
             let result = map.get(&0, 0)?;
             if result.helper_cgroup_id != 0 {
                 if result.helper_cgroup_id == result.offset_cgroup_id {
                     tracing::info!(
                         cgroup_id = result.helper_cgroup_id,
-                        "offset self-test passed"
+                        "self-test passed: kernel struct offsets verified"
                     );
                     return Ok(());
                 } else {
                     anyhow::bail!(
-                        "offset self-test FAILED: helper_cgroup_id={} offset_cgroup_id={}. \
-                         Kernel struct offsets are wrong — enforcement would be incorrect. \
-                         Install pahole for automatic offset resolution.",
+                        "kernel struct offset mismatch: helper_cgroup_id={} \
+                         offset_cgroup_id={} delta={} — run with pahole installed \
+                         or report this kernel version",
                         result.helper_cgroup_id,
                         result.offset_cgroup_id,
+                        result.helper_cgroup_id.abs_diff(result.offset_cgroup_id),
                     );
                 }
             }
-            if attempt < 9 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
-        anyhow::bail!("offset self-test did not complete after 1s — file_open hook may not be attached")
+        anyhow::bail!("self-test timed out after 1s — file_open hook may not be attached")
     }
 
     /// Allow cross-zone communication between two zones.
@@ -356,16 +358,20 @@ impl EnforceEbpf {
         Ok(count)
     }
 
-    /// Clean up pinned maps on shutdown.
-    pub fn cleanup(&self) {
+}
+
+impl Drop for EnforceEbpf {
+    fn drop(&mut self) {
         for &name in MAP_NAMES {
             let path = self.pin_path.join(name);
             if path.exists() {
                 let _ = fs::remove_file(&path);
             }
         }
-        let _ = fs::remove_dir(&self.pin_path);
-        tracing::info!("cleaned up BPF pin directory");
+        if self.pin_path.exists() {
+            let _ = fs::remove_dir(&self.pin_path);
+        }
+        tracing::info!("syva: BPF pins cleaned up");
     }
 }
 
