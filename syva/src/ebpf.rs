@@ -181,6 +181,53 @@ impl EnforceEbpf {
         Ok(results)
     }
 
+    /// Verify the eBPF offset self-test result.
+    ///
+    /// The file_open hook writes a SelfTestResult on first invocation, comparing
+    /// bpf_get_current_cgroup_id() (known-good) against the offset-chain-derived
+    /// value. If they differ, the kernel struct offsets are wrong and all hooks
+    /// that use the offset chain will produce incorrect zone lookups.
+    ///
+    /// Triggers a synthetic file open to ensure the hook fires, then polls the
+    /// SELF_TEST map until the result is available.
+    pub fn verify_self_test(&self) -> anyhow::Result<()> {
+        use aya::maps::Array;
+
+        // Trigger a file_open so the self-test fires.
+        let _ = std::fs::File::open("/proc/self/status");
+
+        let map = Array::<_, SelfTestResult>::try_from(
+            self.bpf.map("SELF_TEST")
+                .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
+        )?;
+
+        for attempt in 0..10 {
+            let result = map.get(&0, 0)?;
+            if result.helper_cgroup_id != 0 {
+                if result.helper_cgroup_id == result.offset_cgroup_id {
+                    tracing::info!(
+                        cgroup_id = result.helper_cgroup_id,
+                        "offset self-test passed"
+                    );
+                    return Ok(());
+                } else {
+                    anyhow::bail!(
+                        "offset self-test FAILED: helper_cgroup_id={} offset_cgroup_id={}. \
+                         Kernel struct offsets are wrong — enforcement would be incorrect. \
+                         Install pahole for automatic offset resolution.",
+                        result.helper_cgroup_id,
+                        result.offset_cgroup_id,
+                    );
+                }
+            }
+            if attempt < 9 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        anyhow::bail!("offset self-test did not complete after 1s — file_open hook may not be attached")
+    }
+
     /// Allow cross-zone communication between two zones.
     ///
     /// Writes both directions (src→dst and dst→src) into ZONE_ALLOWED_COMMS.

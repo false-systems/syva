@@ -84,6 +84,9 @@ async fn cmd_run(
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
     tracing::info!("eBPF programs loaded and attached");
 
+    // Validate kernel struct offsets via the eBPF self-test.
+    mgr.verify_self_test()?;
+
     // Load zone policies from disk.
     let policies = policy::load_policies(&policy_dir)?;
     tracing::info!(count = policies.len(), dir = %policy_dir.display(), "loaded zone policies");
