@@ -16,7 +16,7 @@ mod policy;
 pub mod types;
 mod watcher;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -100,6 +100,7 @@ async fn cmd_run(
     let mut cgroup_id_map: HashMap<String, u64> = HashMap::new();
     // Stable zone_id per zone_name — reuse across containers in the same zone.
     let mut zone_id_for_name: HashMap<String, u32> = HashMap::new();
+    let mut zone_policies_written: HashSet<u32> = HashSet::new();
 
     for assignment in &assignments {
         let zone_id = *zone_id_for_name
@@ -108,10 +109,10 @@ async fn cmd_run(
 
         mgr.add_zone_member(assignment.cgroup_id, zone_id, types::ZoneType::NonGlobal)?;
 
-        // Only write policy once per zone, not per container.
-        if !zone_id_for_name.contains_key(&assignment.zone_name) || zone_id_for_name[&assignment.zone_name] == zone_id {
+        if !zone_policies_written.contains(&zone_id) {
             if let Some(policy) = policies.get(&assignment.zone_name) {
                 mgr.set_zone_policy(zone_id, policy)?;
+                zone_policies_written.insert(zone_id);
             }
         }
 
@@ -206,16 +207,19 @@ async fn cmd_run(
                             tracing::error!(%e, "failed to add zone member");
                             continue;
                         }
-                        if let Some(policy) = policies_arc.get(&assignment.zone_name) {
-                            if let Err(e) = mgr.set_zone_policy(zone_id, policy) {
-                                tracing::error!(
-                                    %e,
-                                    container = assignment.container_id,
-                                    zone = assignment.zone_name,
-                                    "failed to set zone policy — rolling back membership"
-                                );
-                                let _ = mgr.remove_zone_member(assignment.cgroup_id);
-                                continue;
+                        if !zone_policies_written.contains(&zone_id) {
+                            if let Some(policy) = policies_arc.get(&assignment.zone_name) {
+                                if let Err(e) = mgr.set_zone_policy(zone_id, policy) {
+                                    tracing::error!(
+                                        %e,
+                                        container = assignment.container_id,
+                                        zone = assignment.zone_name,
+                                        "failed to set zone policy — rolling back membership"
+                                    );
+                                    let _ = mgr.remove_zone_member(assignment.cgroup_id);
+                                    continue;
+                                }
+                                zone_policies_written.insert(zone_id);
                             }
                         }
                         cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
