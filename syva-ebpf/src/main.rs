@@ -170,7 +170,12 @@ fn check_cross_zone_task_access(ctx: &LsmContext, hook: u8) -> Result<i32, i64> 
 
     let target = match unsafe { lookup_task_zone(target_ptr) } {
         Some(info) => info,
-        None => return Ok(0),
+        None => {
+            // Target is a host process (not in any zone).
+            // A zoned caller must not signal or ptrace host processes.
+            emit_deny_event(hook, caller.zone_id, syva_ebpf_common::ZONE_ID_HOST, 0);
+            return Ok(-1);
+        }
     };
 
     if is_cross_zone_allowed(caller.zone_id, target.zone_id) {
