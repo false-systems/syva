@@ -181,6 +181,22 @@ impl EnforceEbpf {
         Ok(results)
     }
 
+    /// Allow cross-zone communication between two zones.
+    ///
+    /// Writes both directions (src→dst and dst→src) into ZONE_ALLOWED_COMMS.
+    pub fn set_zone_allowed_comms(&mut self, src_zone_id: u32, dst_zone_id: u32) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        let fwd = ZoneCommKey { src_zone: src_zone_id, dst_zone: dst_zone_id };
+        let rev = ZoneCommKey { src_zone: dst_zone_id, dst_zone: src_zone_id };
+        map.insert(fwd, 1u8, 0)?;
+        map.insert(rev, 1u8, 0)?;
+        Ok(())
+    }
+
     /// Register file inodes as belonging to a zone.
     ///
     /// Scans the given filesystem paths and registers every inode found

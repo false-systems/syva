@@ -125,6 +125,36 @@ async fn cmd_run(
         );
     }
 
+    // Populate ZONE_ALLOWED_COMMS from policy network.allowed_zones.
+    // Strict symmetry: both zones must list each other. One-sided declarations
+    // are logged as warnings and neither direction is written.
+    for (zone_name, policy) in &policies {
+        if let Some(&src_id) = zone_id_for_name.get(zone_name.as_str()) {
+            for allowed_name in &policy.network.allowed_zones {
+                if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
+                    // Check if the other side also lists this zone.
+                    let other_allows_back = policies
+                        .get(allowed_name)
+                        .map(|p| p.network.allowed_zones.contains(zone_name))
+                        .unwrap_or(false);
+
+                    if other_allows_back {
+                        if let Err(e) = mgr.set_zone_allowed_comms(src_id, dst_id) {
+                            tracing::warn!(src = zone_name, dst = allowed_name, %e, "failed to set allowed comms");
+                        } else {
+                            tracing::info!(src = zone_name, dst = allowed_name, "allowed cross-zone communication");
+                        }
+                    } else {
+                        tracing::warn!(
+                            src = zone_name, dst = allowed_name,
+                            "one-sided allowed_zones declaration — both zones must list each other. Skipping."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Populate INODE_ZONE_MAP from zone filesystem policies.
     for (zone_name, policy) in &policies {
         if let Some(&zone_id) = zone_id_for_name.get(zone_name.as_str()) {
