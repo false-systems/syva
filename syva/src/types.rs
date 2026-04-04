@@ -140,6 +140,7 @@ impl Default for ResourcePolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     Isolated,
     Bridged,
@@ -167,6 +168,7 @@ impl Default for NetworkPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemPolicy {
+    #[serde(default)]
     pub root: String,
     pub shared_layers: bool,
     pub writable_paths: Vec<String>,
@@ -270,5 +272,32 @@ mod tests {
         struct T { memory_limit: MemoryLimit }
         let t: T = toml::from_str(toml_str).unwrap();
         assert_eq!(t.memory_limit.bytes(), 536870912);
+    }
+
+    #[test]
+    fn standard_toml_deserializes() {
+        // The canonical example policy must always deserialize.
+        // serde ignores unknown sections ([zone]) by default.
+        let content = include_str!("../../policies/standard.toml");
+        let policy: ZonePolicy = toml::from_str(content).unwrap();
+        assert_eq!(policy.resources.cpu_shares, 1024);
+        assert_eq!(policy.network.mode, NetworkMode::Bridged);
+        assert_eq!(policy.resources.memory_limit.bytes(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn network_mode_lowercase_deserialize() {
+        #[derive(Deserialize)]
+        struct T { mode: NetworkMode }
+        assert_eq!(toml::from_str::<T>("mode = \"bridged\"").unwrap().mode, NetworkMode::Bridged);
+        assert_eq!(toml::from_str::<T>("mode = \"isolated\"").unwrap().mode, NetworkMode::Isolated);
+        assert_eq!(toml::from_str::<T>("mode = \"host\"").unwrap().mode, NetworkMode::Host);
+    }
+
+    #[test]
+    fn network_mode_rejects_pascalcase() {
+        #[derive(Deserialize)]
+        struct T { mode: NetworkMode }
+        assert!(toml::from_str::<T>("mode = \"Bridged\"").is_err());
     }
 }
