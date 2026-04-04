@@ -239,11 +239,20 @@ async fn handle_task_start(
     };
     let container_id = start.container_id;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let zone_name = match read_container_zone_label(&container_id) {
+    // Retry loop: OCI config.json may not exist immediately after task start.
+    let mut zone_name = None;
+    for attempt in 0..10 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+        }
+        if let Some(z) = read_container_zone_label(&container_id) {
+            zone_name = Some(z);
+            break;
+        }
+    }
+    let zone_name = match zone_name {
         Some(z) => z,
-        None => return,
+        None => return, // No label after retries → global, skip.
     };
 
     if !policies.contains_key(&zone_name) {
