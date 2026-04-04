@@ -3,6 +3,10 @@
 //! All types are `#[repr(C)]` with fixed sizes for BPF map compatibility.
 //! No pointers, no heap, no padding surprises.
 
+/// Zone ID 0 represents the host (unzoned processes).
+/// Used in deny events when the target is a host process.
+pub const ZONE_ID_HOST: u32 = 0;
+
 /// Maximum number of zones the system can track.
 pub const MAX_ZONES: u32 = 4096;
 
