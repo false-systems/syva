@@ -43,8 +43,14 @@ spec:
             - name: cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
+            - name: containerd-state
+              mountPath: /run/containerd/io.containerd.runtime.v2.task
+              readOnly: true
             - name: policies
               mountPath: /etc/syva/policies
               readOnly: true
@@ -57,10 +63,18 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
         - name: containerd-sock
           hostPath:
             path: /run/containerd/containerd.sock
             type: Socket
+        - name: containerd-state
+          hostPath:
+            path: /run/containerd/io.containerd.runtime.v2.task
+            type: DirectoryOrCreate
         - name: policies
           configMap:
             name: syva-policies

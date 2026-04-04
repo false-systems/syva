@@ -13,7 +13,10 @@ use aya::maps::RingBuf;
 use aya::programs::Lsm;
 use aya::{Bpf, BpfLoader, Btf};
 use crate::types::{ZonePolicy, ZoneType, NetworkMode};
-use syva_ebpf_common::*;
+use syva_ebpf_common::{
+    ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, EnforcementCounters,
+    ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+};
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
 
@@ -146,7 +149,16 @@ impl EnforceEbpf {
 
     /// Set enforcement policy for a zone.
     pub fn set_zone_policy(&mut self, zone_id: u32, policy: &ZonePolicy) -> anyhow::Result<()> {
-        let kernel_policy = policy_to_kernel(policy);
+        let allow_ptrace = policy.capabilities.allowed.iter().any(|c| {
+            let u = c.to_uppercase();
+            u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
+        });
+        let allow_host_net = policy.network.mode == NetworkMode::Host;
+        let kernel_policy = ZonePolicyKernel::from_caps(
+            &policy.capabilities.allowed,
+            allow_ptrace,
+            allow_host_net,
+        );
 
         let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
             self.bpf.map_mut("ZONE_POLICY")
@@ -399,28 +411,6 @@ fn find_ebpf_object() -> anyhow::Result<PathBuf> {
     anyhow::bail!(
         "eBPF object not found — run `cargo xtask build-ebpf` or pass --ebpf-obj"
     )
-}
-
-fn policy_to_kernel(policy: &ZonePolicy) -> ZonePolicyKernel {
-    let caps_mask = caps_to_mask(&policy.capabilities.allowed);
-
-    let mut flags = 0u32;
-    if policy.capabilities.allowed.iter().any(|c| {
-        let upper = c.to_uppercase();
-        upper == "CAP_SYS_PTRACE" || upper == "SYS_PTRACE"
-    }) {
-        flags |= POLICY_FLAG_ALLOW_PTRACE;
-    }
-
-    if policy.network.mode == NetworkMode::Host {
-        flags |= POLICY_FLAG_ALLOW_HOST_NET;
-    }
-
-    ZonePolicyKernel {
-        caps_mask,
-        flags,
-        _pad: 0,
-    }
 }
 
 /// Offset definitions: (struct, field, global_name, default)

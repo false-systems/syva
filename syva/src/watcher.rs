@@ -162,7 +162,7 @@ pub fn resolve_cgroup_id(cgroup_path: &Path) -> u64 {
 /// Events emitted by the live container watcher.
 pub enum WatcherEvent {
     Add(ZoneAssignment),
-    Remove { container_id: String, cgroup_id: u64 },
+    Remove { container_id: String, cgroup_id: Option<u64> },
 }
 
 /// Watch containerd for container start/stop events.
@@ -304,7 +304,7 @@ async fn handle_task_delete(
     let _ = tx
         .send(WatcherEvent::Remove {
             container_id,
-            cgroup_id: 0,
+            cgroup_id: None,
         })
         .await;
 }
