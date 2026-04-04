@@ -85,7 +85,7 @@ async fn cmd_run(
     tracing::info!("eBPF programs loaded and attached");
 
     // Validate kernel struct offsets via the eBPF self-test.
-    mgr.verify_self_test()?;
+    mgr.verify_self_test().await?;
 
     // Load zone policies from disk.
     let policies = policy::load_policies(&policy_dir)?;
@@ -292,7 +292,7 @@ async fn cmd_run(
     }
 
     cancel.cancel();
-    mgr.cleanup();
+    drop(mgr); // Drop impl cleans up BPF pins
     tracing::info!("syva stopped");
     Ok(())
 }
