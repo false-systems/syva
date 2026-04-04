@@ -1,0 +1,25 @@
+[package]
+name = "syva-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# NOT a workspace member — targets bpfel-unknown-none.
+[workspace]
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+syva-ebpf-common = { path = "../syva-ebpf-common", default-features = false }
+
+[[bin]]
+name = "syva-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2
+debug = false
+overflow-checks = false
+
+[profile.release]
+lto = true
