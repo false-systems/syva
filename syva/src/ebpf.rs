@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use aya::maps::HashMap as AyaHashMap;
@@ -180,6 +181,181 @@ impl EnforceEbpf {
         Ok(results)
     }
 
+    /// Verify the eBPF offset self-test result.
+    ///
+    /// The file_open hook writes a SelfTestResult on first invocation, comparing
+    /// bpf_get_current_cgroup_id() (known-good) against the offset-chain-derived
+    /// value. If they differ, the kernel struct offsets are wrong and all hooks
+    /// that use the offset chain will produce incorrect zone lookups.
+    ///
+    /// Triggers a synthetic file open to ensure the hook fires, then polls the
+    /// SELF_TEST map until the result is available.
+    pub fn verify_self_test(&self) -> anyhow::Result<()> {
+        use aya::maps::Array;
+
+        // Trigger a file_open so the self-test fires.
+        let _ = std::fs::File::open("/proc/self/status");
+
+        let map = Array::<_, SelfTestResult>::try_from(
+            self.bpf.map("SELF_TEST")
+                .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
+        )?;
+
+        for attempt in 0..10 {
+            let result = map.get(&0, 0)?;
+            if result.helper_cgroup_id != 0 {
+                if result.helper_cgroup_id == result.offset_cgroup_id {
+                    tracing::info!(
+                        cgroup_id = result.helper_cgroup_id,
+                        "offset self-test passed"
+                    );
+                    return Ok(());
+                } else {
+                    anyhow::bail!(
+                        "offset self-test FAILED: helper_cgroup_id={} offset_cgroup_id={}. \
+                         Kernel struct offsets are wrong — enforcement would be incorrect. \
+                         Install pahole for automatic offset resolution.",
+                        result.helper_cgroup_id,
+                        result.offset_cgroup_id,
+                    );
+                }
+            }
+            if attempt < 9 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        anyhow::bail!("offset self-test did not complete after 1s — file_open hook may not be attached")
+    }
+
+    /// Allow cross-zone communication between two zones.
+    ///
+    /// Writes both directions (src→dst and dst→src) into ZONE_ALLOWED_COMMS.
+    pub fn set_zone_allowed_comms(&mut self, src_zone_id: u32, dst_zone_id: u32) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        let fwd = ZoneCommKey { src_zone: src_zone_id, dst_zone: dst_zone_id };
+        let rev = ZoneCommKey { src_zone: dst_zone_id, dst_zone: src_zone_id };
+        map.insert(fwd, 1u8, 0)?;
+        map.insert(rev, 1u8, 0)?;
+        Ok(())
+    }
+
+    /// Remove a zone's enforcement policy.
+    pub fn remove_zone_policy(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_POLICY")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
+        )?;
+        let _ = map.remove(&zone_id);
+        Ok(())
+    }
+
+    /// Remove all ZONE_ALLOWED_COMMS entries involving a zone.
+    pub fn remove_zone_comms(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        // Collect keys to remove (can't mutate while iterating).
+        let keys_to_remove: Vec<ZoneCommKey> = map
+            .keys()
+            .filter_map(|k| k.ok())
+            .filter(|k| k.src_zone == zone_id || k.dst_zone == zone_id)
+            .collect();
+
+        drop(map);
+
+        let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        for key in keys_to_remove {
+            let _ = map.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Remove all INODE_ZONE_MAP entries for a given zone.
+    pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        let keys_to_remove: Vec<u64> = map
+            .iter()
+            .filter_map(|r| r.ok())
+            .filter(|(_, &v)| v == zone_id)
+            .map(|(k, _)| k)
+            .collect();
+
+        drop(map);
+
+        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        for key in keys_to_remove {
+            let _ = map.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Register file inodes as belonging to a zone.
+    ///
+    /// Scans the given filesystem paths and registers every inode found
+    /// in the INODE_ZONE_MAP BPF map. This enables the file_open and
+    /// bprm_check hooks to detect cross-zone file access.
+    ///
+    /// Assumption: the paths are host-visible (e.g. container rootfs mounts
+    /// or host paths listed in the zone's writable_paths policy). Inodes
+    /// must be on the same filesystem visible to the kernel LSM hooks.
+    ///
+    /// Limitation: INODE_ZONE_MAP is keyed by inode number alone. Inode numbers
+    /// are only unique within a filesystem — different filesystems can share the
+    /// same i_ino. This matches the kernel-side eBPF map definition. Changing to
+    /// (dev, ino) would require updating the BPF map type and all kernel hooks.
+    pub fn populate_inode_zone_map(&mut self, zone_id: u32, paths: &[String]) -> anyhow::Result<usize> {
+        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        let mut count = 0usize;
+        for path_str in paths {
+            let path = Path::new(path_str);
+            if !path.exists() {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(path) {
+                let ino = meta.ino();
+                map.insert(ino, zone_id, 0)?;
+                count += 1;
+            }
+            // Scan directory contents one level deep.
+            if path.is_dir() {
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            let ino = meta.ino();
+                            map.insert(ino, zone_id, 0)?;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Clean up pinned maps on shutdown.
     pub fn cleanup(&self) {
         for &name in MAP_NAMES {
@@ -304,7 +480,7 @@ fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Resu
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if !trimmed.contains(field_name) {
+        if !is_field_match(trimmed, field_name) {
             continue;
         }
         if let Some(comment_start) = trimmed.rfind("/*") {
@@ -321,4 +497,79 @@ fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Resu
     }
 
     Err(format!("field '{field_name}' not found in pahole output for '{type_name}'"))
+}
+
+/// Match a pahole output line against a field name using word boundaries.
+///
+/// The field name must be followed by whitespace, `;`, `[`, or end-of-string
+/// to avoid substring matches (e.g. "file" matching "file_lock").
+fn is_field_match(line: &str, field_name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(field_name) {
+        let abs_pos = start + pos;
+        let after = abs_pos + field_name.len();
+
+        // Check left boundary: must be preceded by whitespace or `*` (pointer decl)
+        // or be at the start of the line.
+        let left_ok = abs_pos == 0 || {
+            let prev = bytes[abs_pos - 1];
+            prev == b' ' || prev == b'\t' || prev == b'*'
+        };
+
+        // Check right boundary: must be followed by whitespace, `;`, `[`, or end.
+        let right_ok = after >= line.len() || {
+            let next = bytes[after];
+            next == b' ' || next == b'\t' || next == b';' || next == b'['
+        };
+
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_field_match;
+
+    #[test]
+    fn field_match_exact() {
+        let line = "    struct file *              file;                 /* 168     8 */";
+        assert!(is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_rejects_substring() {
+        let line = "    struct file_lock *          file_lock;            /* 200     8 */";
+        assert!(!is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_with_array() {
+        let line = "    unsigned long               flags[2];             /* 32    16 */";
+        assert!(is_field_match(line, "flags"));
+    }
+
+    #[test]
+    fn field_match_rejects_similar_prefix() {
+        let line = "    struct file_ra_state        f_ra;                 /* 144    56 */";
+        assert!(!is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_rejects_left_substring() {
+        // "id" should not match "pid" — left boundary check.
+        let line = "    pid_t                       pid;                  /* 100     4 */";
+        assert!(!is_field_match(line, "id"));
+    }
+
+    #[test]
+    fn field_match_accepts_pointer_field() {
+        // Field after `*` pointer declaration.
+        let line = "    struct cgroup *             dfl_cgrp;             /* 48     8 */";
+        assert!(is_field_match(line, "dfl_cgrp"));
+    }
 }

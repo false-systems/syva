@@ -42,7 +42,7 @@ pub fn enumerate_cgroups(
             continue;
         }
 
-        scan_cgroup_dir(root_path, policies, &mut assignments)?;
+        scan_cgroup_dir(root_path, policies, &mut assignments, 0)?;
     }
 
     if assignments.is_empty() {
@@ -52,11 +52,19 @@ pub fn enumerate_cgroups(
     Ok(assignments)
 }
 
+/// Maximum recursion depth for cgroup directory scanning.
+/// Prevents unbounded recursion from malformed hierarchies or bind mount loops.
+const MAX_CGROUP_SCAN_DEPTH: usize = 8;
+
 fn scan_cgroup_dir(
     dir: &Path,
     policies: &HashMap<String, ZonePolicy>,
     assignments: &mut Vec<ZoneAssignment>,
+    depth: usize,
 ) -> anyhow::Result<()> {
+    if depth > MAX_CGROUP_SCAN_DEPTH {
+        return Ok(());
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Ok(()),
@@ -102,7 +110,7 @@ fn scan_cgroup_dir(
             }
         }
 
-        scan_cgroup_dir(&path, policies, assignments)?;
+        scan_cgroup_dir(&path, policies, assignments, depth + 1)?;
     }
 
     Ok(())
@@ -239,11 +247,20 @@ async fn handle_task_start(
     };
     let container_id = start.container_id;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let zone_name = match read_container_zone_label(&container_id) {
+    // Retry loop: OCI config.json may not exist immediately after task start.
+    let mut zone_name = None;
+    for attempt in 0..10 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+        }
+        if let Some(z) = read_container_zone_label(&container_id) {
+            zone_name = Some(z);
+            break;
+        }
+    }
+    let zone_name = match zone_name {
         Some(z) => z,
-        None => return,
+        None => return, // No label after retries → global, skip.
     };
 
     if !policies.contains_key(&zone_name) {
