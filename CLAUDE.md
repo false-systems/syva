@@ -13,7 +13,7 @@ Extracted from the [Rauha](https://github.com/yairfalse/rauha) container runtime
 ```bash
 cargo build -p syva-ebpf-common    # Build shared types (works on any OS)
 cargo build -p xtask               # Build the eBPF build helper
-cargo test -p syva-ebpf-common     # Run type-size tests (6 tests)
+cargo test -p syva-ebpf-common     # Run type-size + caps tests (8 tests)
 cargo test                         # All workspace tests
 
 # Full workspace build (Linux only — aya crate requires Linux libc)
@@ -31,13 +31,14 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 
 ## Architecture
 
-### How It Works
+### Startup Sequence
 
 1. **Load**: `EnforceEbpf::load()` reads BTF, resolves kernel struct offsets via pahole, injects them as globals into the eBPF object, loads 5 LSM programs via aya
-2. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation
-3. **Enforce**: For each labelled container, writes cgroup→zone mapping into `ZONE_MEMBERSHIP` BPF map and zone→policy into `ZONE_POLICY` map
-4. **Watch**: `watch_containerd_events()` subscribes to containerd's gRPC event stream for live container start/stop events, updating BPF maps in real time
-5. **Stream**: Ring buffer drains deny events every 100ms, logs them via tracing
+2. **Self-test**: `verify_self_test()` triggers a synthetic file open, then reads `SELF_TEST` map to verify offset chain correctness. Aborts if offsets are wrong — no silent enforcement failure.
+3. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (up to 10 attempts) for config availability.
+4. **Populate maps**: For each zone, writes `ZONE_MEMBERSHIP` (cgroup→zone), `ZONE_POLICY` (zone→policy), `ZONE_ALLOWED_COMMS` (cross-zone pairs from `allowed_zones`), `INODE_ZONE_MAP` (inodes from `writable_paths`)
+5. **Watch**: `watch_containerd_events()` subscribes to containerd's gRPC event stream for live container start/stop events, updating BPF maps in real time
+6. **Stream**: Ring buffer drains deny events every 100ms in `block_in_place`, capped at 1000 events/tick
 
 ### Crate Structure
 
@@ -50,12 +51,13 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 
 ### Key Files in `syva/src/`
 
-- **ebpf.rs** — `EnforceEbpf` struct: loads eBPF, manages BPF maps, resolves kernel offsets via pahole, mutual exclusion check on `/sys/fs/bpf/syva/`
-- **watcher.rs** — Containerd integration: cgroup enumeration, live event subscription via gRPC, cgroup_id resolution from `/proc/{pid}/cgroup`
-- **events.rs** — Ring buffer drain loop (100ms interval), `read_unaligned` for BPF ring buffer data
+- **ebpf.rs** — `EnforceEbpf` struct: loads eBPF, manages all BPF maps (membership, policy, comms, inodes), resolves kernel offsets via pahole with word-boundary matching, verifies self-test, mutual exclusion on `/sys/fs/bpf/syva/`
+- **watcher.rs** — Containerd integration: cgroup enumeration (depth-limited), live event subscription via gRPC, cgroup_id resolution from `/proc/{pid}/cgroup`, retry loop for OCI config availability
+- **events.rs** — Ring buffer drain via `block_in_place` (100ms interval, 1000 event cap), unzoned access debug logging
 - **policy.rs** — Scans a directory of `.toml` files, filename = zone name, deserializes directly into `ZonePolicy`
-- **types.rs** — Inlined policy types (`ZonePolicy`, `ZoneType`, `NetworkMode`, etc.) — no external dependency
+- **types.rs** — Inlined policy types (`ZonePolicy`, `ZoneType`, `MemoryLimit` newtype with human-readable deserialization)
 - **mapper.rs** — Annotation key constants (`syva.dev/zone`, `syva.dev/policy`)
+- **main.rs** — CLI, startup orchestration, zone refcounting, live event loop with BPF map cleanup on zone emptying
 
 ### eBPF Programs (`syva-ebpf/src/`)
 
@@ -63,17 +65,29 @@ Five LSM hooks, all using `bpf_probe_read_kernel` for verifier-safe kernel memor
 
 | File | LSM Hook | Blocks |
 |------|----------|--------|
-| `file_guard.rs` | `file_open` | Cross-zone file access |
-| `exec_guard.rs` | `bprm_check_security` | Cross-zone binary execution |
+| `file_guard.rs` | `file_open` | Cross-zone file access (via INODE_ZONE_MAP) |
+| `exec_guard.rs` | `bprm_check_security` | Cross-zone binary execution (via INODE_ZONE_MAP) |
 | `ptrace_guard.rs` | `ptrace_access_check` | Cross-zone debugging |
 | `signal_guard.rs` | `task_kill` | Cross-zone signals |
 | `cgroup_lock.rs` | `cgroup_attach_task` | Zone escape via cgroup manipulation |
 
-Kernel struct offsets are patched at load time via `BpfLoader::set_global()`. A one-shot self-test (`SELF_TEST` map) validates the offset chain on first `file_open`.
+Kernel struct offsets are patched at load time via `BpfLoader::set_global()`. A one-shot self-test (`SELF_TEST` map) validates the offset chain on first `file_open` and is verified by userspace at startup.
 
 ### BPF Maps
 
-7 maps defined in `syva-ebpf/src/main.rs`: `ZONE_MEMBERSHIP` (cgroup→zone), `ZONE_POLICY` (zone→policy), `INODE_ZONE_MAP` (inode→zone), `ZONE_ALLOWED_COMMS` (cross-zone pairs), `SELF_TEST` (offset validation), `ENFORCEMENT_COUNTERS` (per-hook per-CPU), `ENFORCEMENT_EVENTS` (ring buffer, 1MB).
+7 maps defined in `syva-ebpf/src/main.rs`: `ZONE_MEMBERSHIP` (cgroup→zone), `ZONE_POLICY` (zone→policy), `INODE_ZONE_MAP` (inode→zone for file/exec hooks), `ZONE_ALLOWED_COMMS` (cross-zone pairs, bidirectional), `SELF_TEST` (offset validation), `ENFORCEMENT_COUNTERS` (per-hook per-CPU), `ENFORCEMENT_EVENTS` (ring buffer, 1MB).
+
+### Zone Lifecycle
+
+- **Refcounting**: Each zone has a reference count tracking active containers. Zone BPF map entries are cleaned up when the last container leaves.
+- **allowed_zones symmetry**: Both zones must list each other in `network.allowed_zones`. One-sided declarations are logged as warnings and neither direction is written.
+- **Policy write-once**: `ZONE_POLICY` is written once per zone_id, tracked via `zone_policies_written: HashSet<u32>`.
+
+### Subcommands
+
+- `syva` (no subcommand) — main enforcement loop
+- `syva status` — reads pinned `ENFORCEMENT_COUNTERS` and prints per-hook allow/deny/error totals
+- `syva events --follow` — streams deny events from pinned `ENFORCEMENT_EVENTS` ring buffer to stdout
 
 ### Mutual Exclusion
 
@@ -82,15 +96,17 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 ## Conventions
 
 - Policies are TOML. See `policies/standard.toml` for the canonical example.
+- `memory_limit` in policies accepts both integers (bytes) and strings (`"4Gi"`, `"512Mi"`, `"1G"`).
 - The policy TOML is deserialized directly into `ZonePolicy` (no intermediate `PolicyFile` types).
-- Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement).
+- Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement). Debug-level log emitted if an unzoned process hits enforcement paths.
 - Policies are loaded once at startup. No hot-reload.
-- Network setup failures, missing containerd socket, etc. are logged as warnings — the agent keeps running.
 - Tests go in `#[cfg(test)]` modules within source files.
+- Pahole field matching uses word boundaries to avoid substring false matches.
 
 ## Platform Requirements
 
 - Linux 6.1+ with `CONFIG_BPF_LSM=y`, `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y`
 - Boot parameter: `lsm=lockdown,capability,bpf`
 - BTF at `/sys/kernel/btf/vmlinux`
+- `pahole` recommended (for kernel offset resolution; defaults correct for Linux 6.1+)
 - containerd socket at `/run/containerd/containerd.sock` (configurable via `--containerd-sock`)
