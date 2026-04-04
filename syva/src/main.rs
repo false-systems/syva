@@ -104,6 +104,8 @@ async fn cmd_run(
     // Stable zone_id per zone_name — reuse across containers in the same zone.
     let mut zone_id_for_name: HashMap<String, u32> = HashMap::new();
     let mut zone_policies_written: HashSet<u32> = HashSet::new();
+    let mut zone_refcount: HashMap<u32, usize> = HashMap::new();
+    let mut container_zone: HashMap<String, u32> = HashMap::new();
 
     for assignment in &assignments {
         let zone_id = *zone_id_for_name
@@ -111,6 +113,7 @@ async fn cmd_run(
             .or_insert_with(|| zone_counter.fetch_add(1, Ordering::SeqCst));
 
         mgr.add_zone_member(assignment.cgroup_id, zone_id, types::ZoneType::NonGlobal)?;
+        *zone_refcount.entry(zone_id).or_insert(0) += 1;
 
         if !zone_policies_written.contains(&zone_id) {
             if let Some(policy) = policies.get(&assignment.zone_name) {
@@ -120,6 +123,7 @@ async fn cmd_run(
         }
 
         cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
+        container_zone.insert(assignment.container_id.clone(), zone_id);
 
         tracing::info!(
             zone = assignment.zone_name,
@@ -225,7 +229,9 @@ async fn cmd_run(
                                 zone_policies_written.insert(zone_id);
                             }
                         }
+                        *zone_refcount.entry(zone_id).or_insert(0) += 1;
                         cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
+                        container_zone.insert(assignment.container_id.clone(), zone_id);
                         tracing::info!(
                             container = assignment.container_id,
                             zone = assignment.zone_name,
@@ -241,6 +247,21 @@ async fn cmd_run(
                         };
                         if resolved_cgroup_id != 0 {
                             let _ = mgr.remove_zone_member(resolved_cgroup_id);
+                        }
+                        // Decrement zone refcount; clean up zone maps when last container leaves.
+                        if let Some(zone_id) = container_zone.remove(&container_id) {
+                            if let Some(count) = zone_refcount.get_mut(&zone_id) {
+                                *count = count.saturating_sub(1);
+                                if *count == 0 {
+                                    zone_refcount.remove(&zone_id);
+                                    zone_policies_written.remove(&zone_id);
+                                    let _ = mgr.remove_zone_policy(zone_id);
+                                    let _ = mgr.remove_zone_comms(zone_id);
+                                    // Remove zone_id_for_name entry.
+                                    zone_id_for_name.retain(|_, &mut v| v != zone_id);
+                                    tracing::info!(zone_id, "zone emptied — cleaned up BPF maps");
+                                }
+                            }
                         }
                         tracing::info!(container = container_id, "live: container removed");
                     }

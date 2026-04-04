@@ -244,6 +244,43 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Remove a zone's enforcement policy.
+    pub fn remove_zone_policy(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_POLICY")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
+        )?;
+        let _ = map.remove(&zone_id);
+        Ok(())
+    }
+
+    /// Remove all ZONE_ALLOWED_COMMS entries involving a zone.
+    pub fn remove_zone_comms(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        // Collect keys to remove (can't mutate while iterating).
+        let keys_to_remove: Vec<ZoneCommKey> = map
+            .keys()
+            .filter_map(|k| k.ok())
+            .filter(|k| k.src_zone == zone_id || k.dst_zone == zone_id)
+            .collect();
+
+        drop(map);
+
+        let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+
+        for key in keys_to_remove {
+            let _ = map.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Register file inodes as belonging to a zone.
     ///
     /// Scans the given filesystem paths and registers every inode found
