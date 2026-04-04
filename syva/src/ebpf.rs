@@ -448,7 +448,7 @@ fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Resu
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if !trimmed.contains(field_name) {
+        if !is_field_match(trimmed, field_name) {
             continue;
         }
         if let Some(comment_start) = trimmed.rfind("/*") {
@@ -465,4 +465,54 @@ fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Resu
     }
 
     Err(format!("field '{field_name}' not found in pahole output for '{type_name}'"))
+}
+
+/// Match a pahole output line against a field name using word boundaries.
+///
+/// The field name must be followed by whitespace, `;`, `[`, or end-of-string
+/// to avoid substring matches (e.g. "file" matching "file_lock").
+fn is_field_match(line: &str, field_name: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(field_name) {
+        let abs_pos = start + pos;
+        let after = abs_pos + field_name.len();
+        if after >= line.len() {
+            return true;
+        }
+        let next_char = line.as_bytes()[after];
+        if next_char == b' ' || next_char == b'\t' || next_char == b';' || next_char == b'[' {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_field_match;
+
+    #[test]
+    fn field_match_exact() {
+        let line = "    struct file *              file;                 /* 168     8 */";
+        assert!(is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_rejects_substring() {
+        let line = "    struct file_lock *          file_lock;            /* 200     8 */";
+        assert!(!is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_with_array() {
+        let line = "    unsigned long               flags[2];             /* 32    16 */";
+        assert!(is_field_match(line, "flags"));
+    }
+
+    #[test]
+    fn field_match_rejects_similar_prefix() {
+        let line = "    struct file_ra_state        f_ra;                 /* 144    56 */";
+        assert!(!is_field_match(line, "file"));
+    }
 }
