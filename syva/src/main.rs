@@ -237,19 +237,15 @@ async fn cmd_run(
                         if resolved_cgroup_id != 0 {
                             let _ = mgr.remove_zone_member(resolved_cgroup_id);
                         }
-                        // Decrement zone refcount; clean up zone maps when last container leaves.
+                        // Decrement zone refcount. Policy-defined zones persist —
+                        // their ZONE_POLICY, ZONE_ALLOWED_COMMS, INODE_ZONE_MAP,
+                        // and zone_id_for_name entries are NOT removed when the
+                        // last container leaves, so new containers can join.
                         if let Some(zone_id) = container_zone.remove(&container_id) {
                             if let Some(count) = zone_refcount.get_mut(&zone_id) {
                                 *count = count.saturating_sub(1);
                                 if *count == 0 {
-                                    zone_refcount.remove(&zone_id);
-                                    zone_policies_written.remove(&zone_id);
-                                    let _ = mgr.remove_zone_policy(zone_id);
-                                    let _ = mgr.remove_zone_comms(zone_id);
-                                    let _ = mgr.remove_zone_inodes(zone_id);
-                                    // Remove zone_id_for_name entry.
-                                    zone_id_for_name.retain(|_, &mut v| v != zone_id);
-                                    tracing::info!(zone_id, "zone emptied — cleaned up BPF maps");
+                                    tracing::info!(zone_id, "zone has no active containers");
                                 }
                             }
                         }
