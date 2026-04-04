@@ -59,6 +59,16 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
 
                     for event in &events {
                         let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
+                        if event.caller_zone == 0 {
+                            // Process not in any zone triggered an enforcement path.
+                            // This can indicate a missing syva.dev/zone annotation.
+                            tracing::debug!(
+                                hook = hook,
+                                pid = event.pid,
+                                target_zone = event.target_zone,
+                                "unzoned process hit enforcement — possible missing annotation"
+                            );
+                        }
                         tracing::warn!(
                             hook = hook,
                             pid = event.pid,
