@@ -14,6 +14,10 @@ const HOOK_NAMES: [&str; 5] = [
     "cgroup_attach_task",
 ];
 
+/// Maximum events to drain per tick. Prevents the blocking task from
+/// holding the thread for too long under high deny rates.
+const MAX_EVENTS_PER_TICK: usize = 1000;
+
 pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken) {
     tokio::spawn(async move {
         let mut ring_buf = ring_buf;
@@ -27,13 +31,33 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
                     return;
                 }
                 _ = interval.tick() => {
-                    while let Some(item) = ring_buf.next() {
-                        if item.len() < std::mem::size_of::<EnforcementEvent>() {
-                            continue;
+                    // Drain ring buffer in a blocking context to avoid starving
+                    // the async executor under high deny rates.
+                    let events = tokio::task::block_in_place(|| {
+                        let mut events = Vec::new();
+                        while let Some(item) = ring_buf.next() {
+                            if item.len() < std::mem::size_of::<EnforcementEvent>() {
+                                continue;
+                            }
+                            let event: EnforcementEvent = unsafe {
+                                std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
+                            };
+                            events.push(event);
+                            if events.len() >= MAX_EVENTS_PER_TICK {
+                                break;
+                            }
                         }
-                        let event: EnforcementEvent = unsafe {
-                            std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
-                        };
+                        events
+                    });
+
+                    if events.len() >= MAX_EVENTS_PER_TICK {
+                        tracing::warn!(
+                            drained = events.len(),
+                            "ring buffer drain hit cap — events may be lost"
+                        );
+                    }
+
+                    for event in &events {
                         let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
                         tracing::warn!(
                             hook = hook,
