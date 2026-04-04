@@ -17,24 +17,29 @@ impl MemoryLimit {
         self.0
     }
 
+    fn checked_parse(n: &str, multiplier: u64) -> Result<u64, String> {
+        let value = n.parse::<u64>().map_err(|e| e.to_string())?;
+        value.checked_mul(multiplier).ok_or_else(|| "memory limit too large".to_string())
+    }
+
     fn parse(s: &str) -> Result<u64, String> {
         let s = s.trim();
         if let Some(n) = s.strip_suffix("Ti") {
-            n.parse::<u64>().map(|v| v * 1024 * 1024 * 1024 * 1024).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1024 * 1024 * 1024 * 1024)
         } else if let Some(n) = s.strip_suffix("Gi") {
-            n.parse::<u64>().map(|v| v * 1024 * 1024 * 1024).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1024 * 1024 * 1024)
         } else if let Some(n) = s.strip_suffix("Mi") {
-            n.parse::<u64>().map(|v| v * 1024 * 1024).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1024 * 1024)
         } else if let Some(n) = s.strip_suffix("Ki") {
-            n.parse::<u64>().map(|v| v * 1024).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1024)
         } else if let Some(n) = s.strip_suffix('T') {
-            n.parse::<u64>().map(|v| v * 1000 * 1000 * 1000 * 1000).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1000 * 1000 * 1000 * 1000)
         } else if let Some(n) = s.strip_suffix('G') {
-            n.parse::<u64>().map(|v| v * 1000 * 1000 * 1000).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1000 * 1000 * 1000)
         } else if let Some(n) = s.strip_suffix('M') {
-            n.parse::<u64>().map(|v| v * 1000 * 1000).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1000 * 1000)
         } else if let Some(n) = s.strip_suffix('K') {
-            n.parse::<u64>().map(|v| v * 1000).map_err(|e| e.to_string())
+            Self::checked_parse(n, 1000)
         } else {
             s.parse::<u64>().map_err(|e| e.to_string())
         }
@@ -251,6 +256,11 @@ mod tests {
         struct T { memory_limit: MemoryLimit }
         let t: T = toml::from_str(toml_str).unwrap();
         assert_eq!(t.memory_limit.bytes(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_overflow_returns_error() {
+        assert!(MemoryLimit::parse("99999999Ti").is_err());
     }
 
     #[test]

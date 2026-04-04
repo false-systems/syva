@@ -227,6 +227,22 @@ async fn cmd_run(
                                     continue;
                                 }
                                 zone_policies_written.insert(zone_id);
+
+                                // Populate inode map for the new zone.
+                                let _ = mgr.populate_inode_zone_map(zone_id, &policy.filesystem.writable_paths);
+
+                                // Populate allowed_comms if this zone has bilateral relationships.
+                                for allowed_name in &policy.network.allowed_zones {
+                                    if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
+                                        let other_allows_back = policies_arc
+                                            .get(allowed_name)
+                                            .map(|p| p.network.allowed_zones.contains(&assignment.zone_name))
+                                            .unwrap_or(false);
+                                        if other_allows_back {
+                                            let _ = mgr.set_zone_allowed_comms(zone_id, dst_id);
+                                        }
+                                    }
+                                }
                             }
                         }
                         *zone_refcount.entry(zone_id).or_insert(0) += 1;
@@ -257,6 +273,7 @@ async fn cmd_run(
                                     zone_policies_written.remove(&zone_id);
                                     let _ = mgr.remove_zone_policy(zone_id);
                                     let _ = mgr.remove_zone_comms(zone_id);
+                                    let _ = mgr.remove_zone_inodes(zone_id);
                                     // Remove zone_id_for_name entry.
                                     zone_id_for_name.retain(|_, &mut v| v != zone_id);
                                     tracing::info!(zone_id, "zone emptied — cleaned up BPF maps");

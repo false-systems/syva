@@ -281,6 +281,33 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Remove all INODE_ZONE_MAP entries for a given zone.
+    pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        let keys_to_remove: Vec<u64> = map
+            .iter()
+            .filter_map(|r| r.ok())
+            .filter(|(_, &v)| v == zone_id)
+            .map(|(k, _)| k)
+            .collect();
+
+        drop(map);
+
+        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        for key in keys_to_remove {
+            let _ = map.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Register file inodes as belonging to a zone.
     ///
     /// Scans the given filesystem paths and registers every inode found
@@ -290,6 +317,11 @@ impl EnforceEbpf {
     /// Assumption: the paths are host-visible (e.g. container rootfs mounts
     /// or host paths listed in the zone's writable_paths policy). Inodes
     /// must be on the same filesystem visible to the kernel LSM hooks.
+    ///
+    /// Limitation: INODE_ZONE_MAP is keyed by inode number alone. Inode numbers
+    /// are only unique within a filesystem — different filesystems can share the
+    /// same i_ino. This matches the kernel-side eBPF map definition. Changing to
+    /// (dev, ino) would require updating the BPF map type and all kernel hooks.
     pub fn populate_inode_zone_map(&mut self, zone_id: u32, paths: &[String]) -> anyhow::Result<usize> {
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
             self.bpf.map_mut("INODE_ZONE_MAP")
@@ -472,15 +504,26 @@ fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Resu
 /// The field name must be followed by whitespace, `;`, `[`, or end-of-string
 /// to avoid substring matches (e.g. "file" matching "file_lock").
 fn is_field_match(line: &str, field_name: &str) -> bool {
+    let bytes = line.as_bytes();
     let mut start = 0;
     while let Some(pos) = line[start..].find(field_name) {
         let abs_pos = start + pos;
         let after = abs_pos + field_name.len();
-        if after >= line.len() {
-            return true;
-        }
-        let next_char = line.as_bytes()[after];
-        if next_char == b' ' || next_char == b'\t' || next_char == b';' || next_char == b'[' {
+
+        // Check left boundary: must be preceded by whitespace or `*` (pointer decl)
+        // or be at the start of the line.
+        let left_ok = abs_pos == 0 || {
+            let prev = bytes[abs_pos - 1];
+            prev == b' ' || prev == b'\t' || prev == b'*'
+        };
+
+        // Check right boundary: must be followed by whitespace, `;`, `[`, or end.
+        let right_ok = after >= line.len() || {
+            let next = bytes[after];
+            next == b' ' || next == b'\t' || next == b';' || next == b'['
+        };
+
+        if left_ok && right_ok {
             return true;
         }
         start = abs_pos + 1;
@@ -514,5 +557,19 @@ mod tests {
     fn field_match_rejects_similar_prefix() {
         let line = "    struct file_ra_state        f_ra;                 /* 144    56 */";
         assert!(!is_field_match(line, "file"));
+    }
+
+    #[test]
+    fn field_match_rejects_left_substring() {
+        // "id" should not match "pid" — left boundary check.
+        let line = "    pid_t                       pid;                  /* 100     4 */";
+        assert!(!is_field_match(line, "id"));
+    }
+
+    #[test]
+    fn field_match_accepts_pointer_field() {
+        // Field after `*` pointer declaration.
+        let line = "    struct cgroup *             dfl_cgrp;             /* 48     8 */";
+        assert!(is_field_match(line, "dfl_cgrp"));
     }
 }
