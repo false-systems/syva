@@ -13,6 +13,11 @@ pub const MAX_ZONES: u32 = 4096;
 /// Maximum number of cgroups (zone memberships) tracked in BPF maps.
 pub const MAX_CGROUPS: u32 = 65536;
 
+/// Maximum directed zone communication pairs in ZONE_ALLOWED_COMMS.
+/// Each bidirectional relationship uses 2 entries (src→dst and dst→src).
+/// MAX_ZONES * 4 allows each zone to communicate with ~4 others.
+pub const MAX_ZONE_COMM_PAIRS: u32 = MAX_ZONES * 4; // 16384
+
 /// Maximum number of inodes tracked for file-zone ownership.
 /// 256K entries × ~76 bytes/entry ≈ 19MB pinned kernel memory.
 /// Covers most container rootfs scenarios (Alpine ~800, Ubuntu ~35K).

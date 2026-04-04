@@ -97,31 +97,77 @@ async fn cmd_run(
         events::spawn_event_reader(ring_buf, cancel.clone());
     }
 
-    // Enumerate existing containers and assign zones.
-    let assignments = watcher::enumerate_cgroups(&policies)?;
+    // Assign zone IDs from policy files — all zones get IDs regardless of
+    // whether they have running containers. This ensures ZONE_ALLOWED_COMMS
+    // and INODE_ZONE_MAP are populated for all zones at startup.
     let zone_counter = AtomicU32::new(1);
-    let mut cgroup_id_map: HashMap<String, u64> = HashMap::new();
-    // Stable zone_id per zone_name — reuse across containers in the same zone.
     let mut zone_id_for_name: HashMap<String, u32> = HashMap::new();
     let mut zone_policies_written: HashSet<u32> = HashSet::new();
     let mut zone_refcount: HashMap<u32, usize> = HashMap::new();
     let mut container_zone: HashMap<String, u32> = HashMap::new();
+    let mut cgroup_id_map: HashMap<String, u64> = HashMap::new();
 
-    for assignment in &assignments {
-        let zone_id = *zone_id_for_name
-            .entry(assignment.zone_name.clone())
-            .or_insert_with(|| zone_counter.fetch_add(1, Ordering::SeqCst));
+    for (zone_name, policy) in &policies {
+        let zone_id = zone_counter.fetch_add(1, Ordering::SeqCst);
+        zone_id_for_name.insert(zone_name.clone(), zone_id);
+        mgr.set_zone_policy(zone_id, policy)?;
+        zone_policies_written.insert(zone_id);
+        tracing::info!(zone = zone_name.as_str(), zone_id, "assigned zone ID from policy");
+    }
 
-        mgr.add_zone_member(assignment.cgroup_id, zone_id, types::ZoneType::NonGlobal)?;
-        *zone_refcount.entry(zone_id).or_insert(0) += 1;
-
-        if !zone_policies_written.contains(&zone_id) {
-            if let Some(policy) = policies.get(&assignment.zone_name) {
-                mgr.set_zone_policy(zone_id, policy)?;
-                zone_policies_written.insert(zone_id);
+    // Populate ZONE_ALLOWED_COMMS from policy network.allowed_zones.
+    // Strict bilateral symmetry: both zones must list each other.
+    for (zone_name, policy) in &policies {
+        let src_id = zone_id_for_name[zone_name.as_str()];
+        for allowed_name in &policy.network.allowed_zones {
+            if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
+                let other_allows_back = policies
+                    .get(allowed_name)
+                    .map(|p| p.network.allowed_zones.contains(zone_name))
+                    .unwrap_or(false);
+                if other_allows_back {
+                    if let Err(e) = mgr.set_zone_allowed_comms(src_id, dst_id) {
+                        tracing::warn!(src = zone_name.as_str(), dst = allowed_name.as_str(), %e, "failed to set allowed comms");
+                    } else {
+                        tracing::info!(src = zone_name.as_str(), dst = allowed_name.as_str(), "allowed cross-zone communication");
+                    }
+                } else {
+                    tracing::warn!(
+                        src = zone_name.as_str(), dst = allowed_name.as_str(),
+                        "one-sided allowed_zones declaration — both zones must list each other. Skipping."
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    zone = zone_name.as_str(), peer = allowed_name.as_str(),
+                    "allowed_zones references unknown zone — no policy file found"
+                );
             }
         }
+    }
 
+    // Populate INODE_ZONE_MAP from zone filesystem policies.
+    for (zone_name, policy) in &policies {
+        let zone_id = zone_id_for_name[zone_name.as_str()];
+        let paths = &policy.filesystem.writable_paths;
+        match mgr.populate_inode_zone_map(zone_id, paths) {
+            Ok(count) if count > 0 => {
+                tracing::info!(zone = zone_name.as_str(), inodes = count, "populated inode zone map");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(zone = zone_name.as_str(), %e, "failed to populate inode zone map");
+            }
+        }
+    }
+
+    // Enumerate existing containers and assign to pre-allocated zones.
+    let assignments = watcher::enumerate_cgroups(&policies)?;
+
+    for assignment in &assignments {
+        let zone_id = zone_id_for_name[&assignment.zone_name];
+        mgr.add_zone_member(assignment.cgroup_id, zone_id, types::ZoneType::NonGlobal)?;
+        *zone_refcount.entry(zone_id).or_insert(0) += 1;
         cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
         container_zone.insert(assignment.container_id.clone(), zone_id);
 
@@ -131,52 +177,6 @@ async fn cmd_run(
             zone_id,
             "enforcing container"
         );
-    }
-
-    // Populate ZONE_ALLOWED_COMMS from policy network.allowed_zones.
-    // Strict symmetry: both zones must list each other. One-sided declarations
-    // are logged as warnings and neither direction is written.
-    for (zone_name, policy) in &policies {
-        if let Some(&src_id) = zone_id_for_name.get(zone_name.as_str()) {
-            for allowed_name in &policy.network.allowed_zones {
-                if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
-                    // Check if the other side also lists this zone.
-                    let other_allows_back = policies
-                        .get(allowed_name)
-                        .map(|p| p.network.allowed_zones.contains(zone_name))
-                        .unwrap_or(false);
-
-                    if other_allows_back {
-                        if let Err(e) = mgr.set_zone_allowed_comms(src_id, dst_id) {
-                            tracing::warn!(src = zone_name, dst = allowed_name, %e, "failed to set allowed comms");
-                        } else {
-                            tracing::info!(src = zone_name, dst = allowed_name, "allowed cross-zone communication");
-                        }
-                    } else {
-                        tracing::warn!(
-                            src = zone_name, dst = allowed_name,
-                            "one-sided allowed_zones declaration — both zones must list each other. Skipping."
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Populate INODE_ZONE_MAP from zone filesystem policies.
-    for (zone_name, policy) in &policies {
-        if let Some(&zone_id) = zone_id_for_name.get(zone_name.as_str()) {
-            let paths = &policy.filesystem.writable_paths;
-            match mgr.populate_inode_zone_map(zone_id, paths) {
-                Ok(count) if count > 0 => {
-                    tracing::info!(zone = zone_name, inodes = count, "populated inode zone map");
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(zone = zone_name, %e, "failed to populate inode zone map");
-                }
-            }
-        }
     }
 
     print_status_summary(&policies, &assignments, &mgr);
@@ -203,47 +203,22 @@ async fn cmd_run(
             event = rx.recv() => {
                 match event {
                     Some(watcher::WatcherEvent::Add(assignment)) => {
-                        let zone_id = *zone_id_for_name
-                            .entry(assignment.zone_name.clone())
-                            .or_insert_with(|| zone_counter.fetch_add(1, Ordering::SeqCst));
+                        // Zone IDs are pre-allocated from policy files at startup.
+                        // Unknown zones (no policy file) are rejected by the watcher.
+                        let zone_id = match zone_id_for_name.get(&assignment.zone_name) {
+                            Some(&id) => id,
+                            None => {
+                                tracing::warn!(zone = assignment.zone_name, "no zone ID for zone — no policy loaded");
+                                continue;
+                            }
+                        };
                         if let Err(e) = mgr.add_zone_member(
                             assignment.cgroup_id,
                             zone_id,
                             types::ZoneType::NonGlobal,
                         ) {
-                            tracing::error!(%e, "failed to add zone member");
+                            tracing::error!(%e, zone = assignment.zone_name, "failed to add zone member");
                             continue;
-                        }
-                        if !zone_policies_written.contains(&zone_id) {
-                            if let Some(policy) = policies_arc.get(&assignment.zone_name) {
-                                if let Err(e) = mgr.set_zone_policy(zone_id, policy) {
-                                    tracing::error!(
-                                        %e,
-                                        container = assignment.container_id,
-                                        zone = assignment.zone_name,
-                                        "failed to set zone policy — rolling back membership"
-                                    );
-                                    let _ = mgr.remove_zone_member(assignment.cgroup_id);
-                                    continue;
-                                }
-                                zone_policies_written.insert(zone_id);
-
-                                // Populate inode map for the new zone.
-                                let _ = mgr.populate_inode_zone_map(zone_id, &policy.filesystem.writable_paths);
-
-                                // Populate allowed_comms if this zone has bilateral relationships.
-                                for allowed_name in &policy.network.allowed_zones {
-                                    if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
-                                        let other_allows_back = policies_arc
-                                            .get(allowed_name)
-                                            .map(|p| p.network.allowed_zones.contains(&assignment.zone_name))
-                                            .unwrap_or(false);
-                                        if other_allows_back {
-                                            let _ = mgr.set_zone_allowed_comms(zone_id, dst_id);
-                                        }
-                                    }
-                                }
-                            }
                         }
                         *zone_refcount.entry(zone_id).or_insert(0) += 1;
                         cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
