@@ -372,12 +372,49 @@ async fn cmd_status() -> anyhow::Result<()> {
 }
 
 async fn cmd_events(follow: bool) -> anyhow::Result<()> {
+    use aya::maps::RingBuf;
+    use syva_ebpf_common::EnforcementEvent;
+
     if !follow {
         println!("use --follow to stream events in real time");
         return Ok(());
     }
 
-    println!("streaming enforcement events (Ctrl+C to stop)...");
-    println!("(events are logged by the main syva process)");
+    let pin_path = std::path::Path::new("/sys/fs/bpf/syva/ENFORCEMENT_EVENTS");
+    if !pin_path.exists() {
+        anyhow::bail!("syva is not running (no pinned ENFORCEMENT_EVENTS map)");
+    }
+
+    let map_data = aya::maps::MapData::from_pin(pin_path)
+        .map_err(|e| anyhow::anyhow!("failed to open pinned ring buffer: {e}"))?;
+    let mut ring_buf = RingBuf::try_from(map_data)?;
+
+    let hook_names = ["file_open", "bprm_check", "ptrace_access_check", "task_kill", "cgroup_attach_task"];
+
+    eprintln!("streaming enforcement events (Ctrl+C to stop)...");
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                while let Some(item) = ring_buf.next() {
+                    if item.len() < std::mem::size_of::<EnforcementEvent>() {
+                        continue;
+                    }
+                    let event: EnforcementEvent = unsafe {
+                        std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
+                    };
+                    let hook = hook_names.get(event.hook as usize).copied().unwrap_or("unknown");
+                    println!(
+                        "DENY hook={} pid={} caller_zone={} target_zone={} context={}",
+                        hook, event.pid, event.caller_zone, event.target_zone, event.context
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
