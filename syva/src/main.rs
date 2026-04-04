@@ -231,11 +231,9 @@ async fn cmd_run(
                         );
                     }
                     Some(watcher::WatcherEvent::Remove { container_id, cgroup_id }) => {
-                        let resolved_cgroup_id = if cgroup_id != 0 {
-                            cgroup_id
-                        } else {
-                            cgroup_id_map.remove(&container_id).unwrap_or(0)
-                        };
+                        let resolved_cgroup_id = cgroup_id
+                            .or_else(|| cgroup_id_map.remove(&container_id))
+                            .unwrap_or(0);
                         if resolved_cgroup_id != 0 {
                             let _ = mgr.remove_zone_member(resolved_cgroup_id);
                         }

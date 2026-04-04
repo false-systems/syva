@@ -10,9 +10,13 @@ use serde::{Deserialize, Serialize};
 /// Supported suffixes: Ki/Mi/Gi/Ti (1024-base), K/M/G/T (1000-base).
 /// Bare integers are interpreted as bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoryLimit(pub u64);
+pub struct MemoryLimit(u64);
 
 impl MemoryLimit {
+    pub fn new(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
     pub fn bytes(self) -> u64 {
         self.0
     }
@@ -114,6 +118,22 @@ impl Default for ZonePolicy {
     }
 }
 
+impl ZonePolicy {
+    /// Validate policy values against kernel constraints.
+    pub fn validate(&self, zone_name: &str) -> anyhow::Result<()> {
+        if self.resources.cpu_shares == 0 {
+            anyhow::bail!("zone {zone_name}: cpu_shares must be > 0");
+        }
+        if self.resources.pids_max == 0 {
+            anyhow::bail!("zone {zone_name}: pids_max must be > 0");
+        }
+        if self.resources.io_weight == 0 {
+            anyhow::bail!("zone {zone_name}: io_weight must be > 0");
+        }
+        Ok(())
+    }
+}
+
 /// Allow-list only. Nothing not listed here is permitted.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CapabilityPolicy {
@@ -132,7 +152,7 @@ impl Default for ResourcePolicy {
     fn default() -> Self {
         Self {
             cpu_shares: 1024,
-            memory_limit: MemoryLimit(512 * 1024 * 1024), // 512Mi
+            memory_limit: MemoryLimit::new(512 * 1024 * 1024), // 512Mi
             io_weight: 100,
             pids_max: 256,
         }
