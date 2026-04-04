@@ -325,6 +325,9 @@ fn print_status_summary(
 }
 
 async fn cmd_status() -> anyhow::Result<()> {
+    use aya::maps::PerCpuArray;
+    use syva_ebpf_common::EnforcementCounters;
+
     let pin_path = std::path::Path::new("/sys/fs/bpf/syva");
     if !pin_path.exists() {
         println!("syva: NOT ACTIVE (no pinned BPF maps)");
@@ -333,7 +336,38 @@ async fn cmd_status() -> anyhow::Result<()> {
 
     println!("syva: ACTIVE");
     println!("  pin path: /sys/fs/bpf/syva");
-    println!("  (run syva without subcommand for full status)");
+
+    // Read enforcement counters from pinned maps.
+    let counter_path = pin_path.join("ENFORCEMENT_COUNTERS");
+    if counter_path.exists() {
+        match PerCpuArray::<_, EnforcementCounters>::try_from(
+            aya::maps::MapData::from_pin(&counter_path)
+                .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?,
+        ) {
+            Ok(map) => {
+                let hook_names = ["file_open", "bprm_check", "ptrace_check", "task_kill", "cgroup_attach"];
+                println!("  hooks:");
+                for (idx, &name) in hook_names.iter().enumerate() {
+                    if let Ok(per_cpu) = map.get(&(idx as u32), 0) {
+                        let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0 };
+                        for cpu_val in per_cpu.iter() {
+                            total.allow += cpu_val.allow;
+                            total.deny += cpu_val.deny;
+                            total.error += cpu_val.error;
+                        }
+                        println!(
+                            "    {:<16} allow={:<8} deny={:<8} error={}",
+                            name, total.allow, total.deny, total.error
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  counters: unavailable ({e})");
+            }
+        }
+    }
+
     Ok(())
 }
 
