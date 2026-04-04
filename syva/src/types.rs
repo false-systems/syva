@@ -5,6 +5,79 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Memory limit that accepts both bare integers and human-readable strings.
+///
+/// Supported suffixes: Ki/Mi/Gi/Ti (1024-base), K/M/G/T (1000-base).
+/// Bare integers are interpreted as bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLimit(pub u64);
+
+impl MemoryLimit {
+    pub fn bytes(self) -> u64 {
+        self.0
+    }
+
+    fn parse(s: &str) -> Result<u64, String> {
+        let s = s.trim();
+        if let Some(n) = s.strip_suffix("Ti") {
+            n.parse::<u64>().map(|v| v * 1024 * 1024 * 1024 * 1024).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix("Gi") {
+            n.parse::<u64>().map(|v| v * 1024 * 1024 * 1024).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix("Mi") {
+            n.parse::<u64>().map(|v| v * 1024 * 1024).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix("Ki") {
+            n.parse::<u64>().map(|v| v * 1024).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix('T') {
+            n.parse::<u64>().map(|v| v * 1000 * 1000 * 1000 * 1000).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix('G') {
+            n.parse::<u64>().map(|v| v * 1000 * 1000 * 1000).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix('M') {
+            n.parse::<u64>().map(|v| v * 1000 * 1000).map_err(|e| e.to_string())
+        } else if let Some(n) = s.strip_suffix('K') {
+            n.parse::<u64>().map(|v| v * 1000).map_err(|e| e.to_string())
+        } else {
+            s.parse::<u64>().map_err(|e| e.to_string())
+        }
+    }
+}
+
+impl Serialize for MemoryLimit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryLimit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MemoryLimitVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MemoryLimitVisitor {
+            type Value = MemoryLimit;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an integer (bytes) or a string like \"4Gi\", \"512Mi\"")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<MemoryLimit, E> {
+                Ok(MemoryLimit(v))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<MemoryLimit, E> {
+                if v < 0 {
+                    return Err(E::custom("memory_limit cannot be negative"));
+                }
+                Ok(MemoryLimit(v as u64))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<MemoryLimit, E> {
+                MemoryLimit::parse(v).map(MemoryLimit).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(MemoryLimitVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ZoneType {
     Global,
@@ -45,7 +118,7 @@ pub struct CapabilityPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcePolicy {
     pub cpu_shares: u64,
-    pub memory_limit: u64,
+    pub memory_limit: MemoryLimit,
     pub io_weight: u16,
     pub pids_max: u64,
 }
@@ -54,7 +127,7 @@ impl Default for ResourcePolicy {
     fn default() -> Self {
         Self {
             cpu_shares: 1024,
-            memory_limit: 512 * 1024 * 1024, // 512Mi
+            memory_limit: MemoryLimit(512 * 1024 * 1024), // 512Mi
             io_weight: 100,
             pids_max: 256,
         }
@@ -124,5 +197,68 @@ mod tests {
         assert!(policy.capabilities.allowed.is_empty());
         assert_eq!(policy.resources.cpu_shares, 1024);
         assert_eq!(policy.network.mode, NetworkMode::Isolated);
+    }
+
+    #[test]
+    fn memory_limit_parse_gi() {
+        assert_eq!(MemoryLimit::parse("4Gi").unwrap(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_parse_mi() {
+        assert_eq!(MemoryLimit::parse("512Mi").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_parse_ki() {
+        assert_eq!(MemoryLimit::parse("64Ki").unwrap(), 64 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_parse_ti() {
+        assert_eq!(MemoryLimit::parse("1Ti").unwrap(), 1024u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_parse_g_decimal() {
+        assert_eq!(MemoryLimit::parse("1G").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn memory_limit_parse_m_decimal() {
+        assert_eq!(MemoryLimit::parse("500M").unwrap(), 500_000_000);
+    }
+
+    #[test]
+    fn memory_limit_parse_k_decimal() {
+        assert_eq!(MemoryLimit::parse("100K").unwrap(), 100_000);
+    }
+
+    #[test]
+    fn memory_limit_parse_t_decimal() {
+        assert_eq!(MemoryLimit::parse("2T").unwrap(), 2_000_000_000_000);
+    }
+
+    #[test]
+    fn memory_limit_parse_bare_integer() {
+        assert_eq!(MemoryLimit::parse("1048576").unwrap(), 1048576);
+    }
+
+    #[test]
+    fn memory_limit_deserialize_string() {
+        let toml_str = r#"memory_limit = "4Gi""#;
+        #[derive(Deserialize)]
+        struct T { memory_limit: MemoryLimit }
+        let t: T = toml::from_str(toml_str).unwrap();
+        assert_eq!(t.memory_limit.bytes(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_limit_deserialize_integer() {
+        let toml_str = "memory_limit = 536870912";
+        #[derive(Deserialize)]
+        struct T { memory_limit: MemoryLimit }
+        let t: T = toml::from_str(toml_str).unwrap();
+        assert_eq!(t.memory_limit.bytes(), 536870912);
     }
 }
