@@ -33,10 +33,10 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 
 ### Startup Sequence
 
-1. **Load**: `EnforceEbpf::load()` reads BTF, resolves kernel struct offsets via pahole, injects them as globals into the eBPF object, loads 5 LSM programs via aya
-2. **Self-test**: `verify_self_test()` triggers a synthetic file open, then reads `SELF_TEST` map to verify offset chain correctness. Aborts if offsets are wrong — no silent enforcement failure.
-3. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (up to 10 attempts) for config availability.
-4. **Populate maps**: For each zone, writes `ZONE_MEMBERSHIP` (cgroup→zone), `ZONE_POLICY` (zone→policy), `ZONE_ALLOWED_COMMS` (cross-zone pairs from `allowed_zones`), `INODE_ZONE_MAP` (inodes from `writable_paths`)
+1. **Load**: `EnforceEbpf::load()` reads BTF, resolves kernel struct offsets via pahole, injects them as globals into the eBPF object, loads 5 LSM programs via aya. `Drop` impl cleans up pins on failure.
+2. **Self-test**: `verify_self_test()` (async) triggers a synthetic file open, then polls `SELF_TEST` map to verify offset chain correctness. Aborts if offsets are wrong — no silent enforcement failure.
+3. **Policy-driven zone setup**: All policy files get zone IDs, `ZONE_POLICY`, `ZONE_ALLOWED_COMMS`, and `INODE_ZONE_MAP` populated at startup — regardless of running containers. This ensures comms and inode maps are complete even for zones with no containers yet.
+4. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (up to 10 attempts) for config availability. Containers join pre-allocated zone IDs.
 5. **Watch**: `watch_containerd_events()` subscribes to containerd's gRPC event stream for live container start/stop events, updating BPF maps in real time
 6. **Stream**: Ring buffer drains deny events every 100ms in `block_in_place`, capped at 1000 events/tick
 
@@ -96,7 +96,10 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 ## Conventions
 
 - Policies are TOML. See `policies/standard.toml` for the canonical example.
-- `memory_limit` in policies accepts both integers (bytes) and strings (`"4Gi"`, `"512Mi"`, `"1G"`).
+- `memory_limit` in policies accepts both integers (bytes) and strings (`"4Gi"`, `"512Mi"`, `"1G"`). `MemoryLimit` inner field is private — use `MemoryLimit::new()`.
+- `ZonePolicy::validate()` checks resource bounds (cpu_shares, pids_max, io_weight > 0).
+- Zoned callers are denied access to host processes (target not in any zone) in ptrace and signal hooks. `ZONE_ID_HOST = 0` in deny events.
+- `POLICY_FLAG_ALLOW_PTRACE` only permits intra-zone ptrace, not cross-zone.
 - The policy TOML is deserialized directly into `ZonePolicy` (no intermediate `PolicyFile` types).
 - Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement). Debug-level log emitted if an unzoned process hits enforcement paths.
 - Policies are loaded once at startup. No hot-reload.
