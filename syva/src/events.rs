@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use aya::maps::{MapData, RingBuf};
-use syva_ebpf_common::EnforcementEvent;
+use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
 use tokio_util::sync::CancellationToken;
 
 const HOOK_NAMES: [&str; 5] = [
@@ -59,9 +59,8 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
 
                     for event in &events {
                         let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
+                        let decision = if event.decision == DECISION_DENY { "DENY" } else { "ALLOW" };
                         if event.caller_zone == 0 {
-                            // Process not in any zone triggered an enforcement path.
-                            // This can indicate a missing syva.dev/zone annotation.
                             tracing::debug!(
                                 hook = hook,
                                 pid = event.pid,
@@ -71,11 +70,12 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
                         }
                         tracing::warn!(
                             hook = hook,
+                            decision = decision,
                             pid = event.pid,
                             caller_zone = event.caller_zone,
                             target_zone = event.target_zone,
                             context = event.context,
-                            "DENY"
+                            "enforcement event"
                         );
                     }
                 }

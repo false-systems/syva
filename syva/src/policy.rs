@@ -52,9 +52,14 @@ pub fn load_policies(dir: &Path) -> anyhow::Result<HashMap<String, ZonePolicy>> 
         };
 
         match toml::from_str::<ZonePolicy>(&content) {
-            Ok(policy) => {
-                tracing::info!(zone = zone_name, file = %path.display(), "loaded zone policy");
-                policies.insert(zone_name, policy);
+            Ok(policy) => match policy.validate(&zone_name) {
+                Ok(()) => {
+                    tracing::info!(zone = zone_name, file = %path.display(), "loaded zone policy");
+                    policies.insert(zone_name, policy);
+                }
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), %e, "invalid policy — zone will not be enforced");
+                }
             }
             Err(e) => {
                 tracing::warn!(

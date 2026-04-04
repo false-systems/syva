@@ -13,7 +13,10 @@ use aya::maps::RingBuf;
 use aya::programs::Lsm;
 use aya::{Bpf, BpfLoader, Btf};
 use crate::types::{ZonePolicy, ZoneType, NetworkMode};
-use syva_ebpf_common::*;
+use syva_ebpf_common::{
+    ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, EnforcementCounters,
+    ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+};
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
 
@@ -146,7 +149,16 @@ impl EnforceEbpf {
 
     /// Set enforcement policy for a zone.
     pub fn set_zone_policy(&mut self, zone_id: u32, policy: &ZonePolicy) -> anyhow::Result<()> {
-        let kernel_policy = policy_to_kernel(policy);
+        let allow_ptrace = policy.capabilities.allowed.iter().any(|c| {
+            let u = c.to_uppercase();
+            u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
+        });
+        let allow_host_net = policy.network.mode == NetworkMode::Host;
+        let kernel_policy = ZonePolicyKernel::from_caps(
+            &policy.capabilities.allowed,
+            allow_ptrace,
+            allow_host_net,
+        );
 
         let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
             self.bpf.map_mut("ZONE_POLICY")
@@ -190,8 +202,9 @@ impl EnforceEbpf {
     ///
     /// Triggers a synthetic file open to ensure the hook fires, then polls the
     /// SELF_TEST map until the result is available.
-    pub fn verify_self_test(&self) -> anyhow::Result<()> {
+    pub async fn verify_self_test(&self) -> anyhow::Result<()> {
         use aya::maps::Array;
+        use std::time::Duration;
 
         // Trigger a file_open so the self-test fires.
         let _ = std::fs::File::open("/proc/self/status");
@@ -201,31 +214,32 @@ impl EnforceEbpf {
                 .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
         )?;
 
-        for attempt in 0..10 {
+        for attempt in 0..20 {
             let result = map.get(&0, 0)?;
             if result.helper_cgroup_id != 0 {
                 if result.helper_cgroup_id == result.offset_cgroup_id {
                     tracing::info!(
                         cgroup_id = result.helper_cgroup_id,
-                        "offset self-test passed"
+                        "self-test passed: kernel struct offsets verified"
                     );
                     return Ok(());
                 } else {
                     anyhow::bail!(
-                        "offset self-test FAILED: helper_cgroup_id={} offset_cgroup_id={}. \
-                         Kernel struct offsets are wrong — enforcement would be incorrect. \
-                         Install pahole for automatic offset resolution.",
+                        "kernel struct offset mismatch: helper_cgroup_id={} \
+                         offset_cgroup_id={} delta={} — run with pahole installed \
+                         or report this kernel version",
                         result.helper_cgroup_id,
                         result.offset_cgroup_id,
+                        result.helper_cgroup_id.abs_diff(result.offset_cgroup_id),
                     );
                 }
             }
-            if attempt < 9 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
-        anyhow::bail!("offset self-test did not complete after 1s — file_open hook may not be attached")
+        anyhow::bail!("self-test timed out after 1s — file_open hook may not be attached")
     }
 
     /// Allow cross-zone communication between two zones.
@@ -356,16 +370,20 @@ impl EnforceEbpf {
         Ok(count)
     }
 
-    /// Clean up pinned maps on shutdown.
-    pub fn cleanup(&self) {
+}
+
+impl Drop for EnforceEbpf {
+    fn drop(&mut self) {
         for &name in MAP_NAMES {
             let path = self.pin_path.join(name);
             if path.exists() {
                 let _ = fs::remove_file(&path);
             }
         }
-        let _ = fs::remove_dir(&self.pin_path);
-        tracing::info!("cleaned up BPF pin directory");
+        if self.pin_path.exists() {
+            let _ = fs::remove_dir(&self.pin_path);
+        }
+        tracing::info!("syva: BPF pins cleaned up");
     }
 }
 
@@ -393,28 +411,6 @@ fn find_ebpf_object() -> anyhow::Result<PathBuf> {
     anyhow::bail!(
         "eBPF object not found — run `cargo xtask build-ebpf` or pass --ebpf-obj"
     )
-}
-
-fn policy_to_kernel(policy: &ZonePolicy) -> ZonePolicyKernel {
-    let caps_mask = caps_to_mask(&policy.capabilities.allowed);
-
-    let mut flags = 0u32;
-    if policy.capabilities.allowed.iter().any(|c| {
-        let upper = c.to_uppercase();
-        upper == "CAP_SYS_PTRACE" || upper == "SYS_PTRACE"
-    }) {
-        flags |= POLICY_FLAG_ALLOW_PTRACE;
-    }
-
-    if policy.network.mode == NetworkMode::Host {
-        flags |= POLICY_FLAG_ALLOW_HOST_NET;
-    }
-
-    ZonePolicyKernel {
-        caps_mask,
-        flags,
-        _pad: 0,
-    }
 }
 
 /// Offset definitions: (struct, field, global_name, default)

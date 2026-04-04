@@ -9,7 +9,7 @@ use aya_ebpf::{
 use syva_ebpf_common::{
     EnforcementCounters, EnforcementEvent, SelfTestResult, ZoneCommKey, ZoneInfoKernel,
     ZonePolicyKernel, DECISION_DENY, ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES,
-    MAX_ZONES,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS,
 };
 
 mod file_guard;
@@ -28,7 +28,7 @@ static ZONE_POLICY: HashMap<u32, ZonePolicyKernel> = HashMap::with_max_entries(M
 static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 0);
 
 #[map]
-static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONES, 0);
+static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
 
 #[map]
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
@@ -170,7 +170,12 @@ fn check_cross_zone_task_access(ctx: &LsmContext, hook: u8) -> Result<i32, i64> 
 
     let target = match unsafe { lookup_task_zone(target_ptr) } {
         Some(info) => info,
-        None => return Ok(0),
+        None => {
+            // Target is a host process (not in any zone).
+            // A zoned caller must not signal or ptrace host processes.
+            emit_deny_event(hook, caller.zone_id, syva_ebpf_common::ZONE_ID_HOST, 0);
+            return Ok(-1);
+        }
     };
 
     if is_cross_zone_allowed(caller.zone_id, target.zone_id) {
