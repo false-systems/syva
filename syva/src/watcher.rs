@@ -42,7 +42,7 @@ pub fn enumerate_cgroups(
             continue;
         }
 
-        scan_cgroup_dir(root_path, policies, &mut assignments)?;
+        scan_cgroup_dir(root_path, policies, &mut assignments, 0)?;
     }
 
     if assignments.is_empty() {
@@ -52,11 +52,19 @@ pub fn enumerate_cgroups(
     Ok(assignments)
 }
 
+/// Maximum recursion depth for cgroup directory scanning.
+/// Prevents unbounded recursion from malformed hierarchies or bind mount loops.
+const MAX_CGROUP_SCAN_DEPTH: usize = 8;
+
 fn scan_cgroup_dir(
     dir: &Path,
     policies: &HashMap<String, ZonePolicy>,
     assignments: &mut Vec<ZoneAssignment>,
+    depth: usize,
 ) -> anyhow::Result<()> {
+    if depth > MAX_CGROUP_SCAN_DEPTH {
+        return Ok(());
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Ok(()),
@@ -102,7 +110,7 @@ fn scan_cgroup_dir(
             }
         }
 
-        scan_cgroup_dir(&path, policies, assignments)?;
+        scan_cgroup_dir(&path, policies, assignments, depth + 1)?;
     }
 
     Ok(())
