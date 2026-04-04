@@ -9,7 +9,7 @@ use aya_ebpf::{
 use syva_ebpf_common::{
     EnforcementCounters, EnforcementEvent, SelfTestResult, ZoneCommKey, ZoneInfoKernel,
     ZonePolicyKernel, DECISION_DENY, ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES,
-    MAX_ZONES,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS,
 };
 
 mod file_guard;
@@ -28,7 +28,7 @@ static ZONE_POLICY: HashMap<u32, ZonePolicyKernel> = HashMap::with_max_entries(M
 static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 0);
 
 #[map]
-static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONES, 0);
+static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
 
 #[map]
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
