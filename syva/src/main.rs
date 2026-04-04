@@ -125,6 +125,22 @@ async fn cmd_run(
         );
     }
 
+    // Populate INODE_ZONE_MAP from zone filesystem policies.
+    for (zone_name, policy) in &policies {
+        if let Some(&zone_id) = zone_id_for_name.get(zone_name.as_str()) {
+            let paths = &policy.filesystem.writable_paths;
+            match mgr.populate_inode_zone_map(zone_id, paths) {
+                Ok(count) if count > 0 => {
+                    tracing::info!(zone = zone_name, inodes = count, "populated inode zone map");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(zone = zone_name, %e, "failed to populate inode zone map");
+                }
+            }
+        }
+    }
+
     print_status_summary(&policies, &assignments, &mgr);
 
     // Start live containerd event watcher.

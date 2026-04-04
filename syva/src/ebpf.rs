@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use aya::maps::HashMap as AyaHashMap;
@@ -178,6 +179,49 @@ impl EnforceEbpf {
         }
 
         Ok(results)
+    }
+
+    /// Register file inodes as belonging to a zone.
+    ///
+    /// Scans the given filesystem paths and registers every inode found
+    /// in the INODE_ZONE_MAP BPF map. This enables the file_open and
+    /// bprm_check hooks to detect cross-zone file access.
+    ///
+    /// Assumption: the paths are host-visible (e.g. container rootfs mounts
+    /// or host paths listed in the zone's writable_paths policy). Inodes
+    /// must be on the same filesystem visible to the kernel LSM hooks.
+    pub fn populate_inode_zone_map(&mut self, zone_id: u32, paths: &[String]) -> anyhow::Result<usize> {
+        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        let mut count = 0usize;
+        for path_str in paths {
+            let path = Path::new(path_str);
+            if !path.exists() {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(path) {
+                let ino = meta.ino();
+                map.insert(ino, zone_id, 0)?;
+                count += 1;
+            }
+            // Scan directory contents one level deep.
+            if path.is_dir() {
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            let ino = meta.ino();
+                            map.insert(ino, zone_id, 0)?;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     /// Clean up pinned maps on shutdown.
