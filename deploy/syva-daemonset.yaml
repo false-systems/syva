@@ -26,12 +26,17 @@ spec:
             - --policy-dir
             - /etc/syva/policies
           securityContext:
-            privileged: true
+            privileged: false
+            readOnlyRootFilesystem: true
             capabilities:
+              drop:
+                - ALL
               add:
                 - BPF
                 - SYS_ADMIN
                 - PERFMON
+          seccompProfile:
+            type: RuntimeDefault
           volumeMounts:
             - name: bpf
               mountPath: /sys/fs/bpf
