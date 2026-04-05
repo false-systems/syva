@@ -51,7 +51,8 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 
 ### Key Files in `syva/src/`
 
-- **ebpf.rs** — `EnforceEbpf` struct: loads eBPF, manages all BPF maps (membership, policy, comms, inodes), resolves kernel offsets via pahole with word-boundary matching, verifies self-test, mutual exclusion on `/sys/fs/bpf/syva/`
+- **zone.rs** — `ZoneRegistry`: single source of truth for zone lifecycle (Pending→Active→Pending). Replaces scattered HashMaps. Enforces invariants: zone_id 0 reserved, stable IDs per name, refcount-based state transitions, rollback on failure.
+- **ebpf.rs** — `EnforceEbpf` struct: loads eBPF, manages all BPF maps (membership, policy, comms, inodes), resolves kernel offsets via pahole with word-boundary matching, verifies self-test, mutual exclusion on `/sys/fs/bpf/syva/`. `Drop` impl cleans up pins.
 - **watcher.rs** — Containerd integration: cgroup enumeration (depth-limited), live event subscription via gRPC, cgroup_id resolution from `/proc/{pid}/cgroup`, retry loop for OCI config availability
 - **events.rs** — Ring buffer drain via `block_in_place` (100ms interval, 1000 event cap), unzoned access debug logging
 - **policy.rs** — Scans a directory of `.toml` files, filename = zone name, deserializes directly into `ZonePolicy`
@@ -97,9 +98,11 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 
 - Policies are TOML. See `policies/standard.toml` for the canonical example.
 - `memory_limit` in policies accepts both integers (bytes) and strings (`"4Gi"`, `"512Mi"`, `"1G"`). `MemoryLimit` inner field is private — use `MemoryLimit::new()`.
-- `ZonePolicy::validate()` checks resource bounds (cpu_shares, pids_max, io_weight > 0).
+- `ZonePolicy::validate()` checks resource bounds (cpu_shares, pids_max, io_weight > 0) and warns on unknown capability names.
 - Zoned callers are denied access to host processes (target not in any zone) in ptrace and signal hooks. `ZONE_ID_HOST = 0` in deny events.
 - `POLICY_FLAG_ALLOW_PTRACE` only permits intra-zone ptrace, not cross-zone.
+- `INODE_ZONE_MAP` only works for bind-mounted host paths (`host_paths` in policy). Container-internal paths (`writable_paths`) have different overlayfs inodes.
+- Zone lifecycle: Pending (policy configured, no containers) → Active (containers present) → Pending (last container left, BPF maps stay configured). Policy-defined zones persist — re-activation is free.
 - The policy TOML is deserialized directly into `ZonePolicy` (no intermediate `PolicyFile` types).
 - Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement). Debug-level log emitted if an unzoned process hits enforcement paths.
 - Policies are loaded once at startup. No hot-reload.
