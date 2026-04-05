@@ -13,18 +13,24 @@ Extracted from the [Rauha](https://github.com/yairfalse/rauha) container runtime
 ```bash
 cargo build -p syva-ebpf-common    # Build shared types (works on any OS)
 cargo build -p xtask               # Build the eBPF build helper
-cargo test -p syva-ebpf-common     # Run type-size + caps tests (8 tests)
+cargo test -p syva-ebpf-common     # Run type-size + layout tests (6 default; 10 with `userspace` feature)
 cargo test                         # All workspace tests
+
+# Run a single test
+cargo test -p syva-ebpf-common -- test_name
 
 # Full workspace build (Linux only — aya crate requires Linux libc)
 cargo build                        # Builds syva binary + syva-ebpf-common + xtask
 
 # eBPF programs (separate workspace, requires nightly + Linux)
-cargo xtask build-ebpf             # Debug build
-cargo xtask build-ebpf --release   # Release build
+cargo run -p xtask -- build-ebpf             # Debug build
+cargo run -p xtask -- build-ebpf --release   # Release build
 
 # Run the agent (Linux only, requires root for BPF)
 RUST_LOG=syva=debug cargo run --bin syva -- --policy-dir ./policies
+
+# Run with a custom eBPF object (useful when iterating on eBPF programs)
+RUST_LOG=syva=debug cargo run --bin syva -- --policy-dir ./policies --ebpf-obj ./target/bpfel-unknown-none/debug/syva-ebpf
 ```
 
 The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` uses Linux-specific libc symbols (netlink, bpf syscalls). Only `syva-ebpf-common` and `xtask` are cross-platform.
@@ -34,20 +40,20 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 ### Startup Sequence
 
 1. **Load**: `EnforceEbpf::load()` reads BTF, resolves kernel struct offsets via pahole, injects them as globals into the eBPF object, loads 5 LSM programs via aya. `Drop` impl cleans up pins on failure.
-2. **Self-test**: `verify_self_test()` (async) triggers a synthetic file open, then polls `SELF_TEST` map to verify offset chain correctness. Aborts if offsets are wrong — no silent enforcement failure.
+2. **Self-test**: `verify_self_test()` (async) triggers a synthetic file open, then polls `SELF_TEST` map (20 attempts × 50ms ≈ 1s timeout) to verify offset chain correctness. Aborts startup if offsets are wrong — no silent enforcement failure.
 3. **Policy-driven zone setup**: All policy files get zone IDs, `ZONE_POLICY`, `ZONE_ALLOWED_COMMS`, and `INODE_ZONE_MAP` populated at startup — regardless of running containers. This ensures comms and inode maps are complete even for zones with no containers yet.
-4. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (up to 10 attempts) for config availability. Containers join pre-allocated zone IDs.
+4. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (10 attempts, linear backoff 50ms × attempt, ~2.25s total window). Containers join pre-allocated zone IDs.
 5. **Watch**: `watch_containerd_events()` subscribes to containerd's gRPC event stream for live container start/stop events, updating BPF maps in real time
-6. **Stream**: Ring buffer drains deny events every 100ms in `block_in_place`, capped at 1000 events/tick
+6. **Stream**: Ring buffer drains deny events every 100ms in `block_in_place`, capped at 1000 events/tick. Events can be lost at high deny rates — warning logged when cap hit.
 
 ### Crate Structure
 
 | Crate | Target | Purpose |
 |-------|--------|---------|
 | `syva` | Linux userspace | Main binary — CLI, eBPF lifecycle, containerd watcher, policy loading |
-| `syva-ebpf-common` | `no_std` + userspace | `#[repr(C)]` types shared between kernel and userspace BPF maps |
+| `syva-ebpf-common` | `no_std` + userspace | `#[repr(C)]` types shared between kernel and userspace BPF maps. Has `userspace` feature flag — `syva` depends on it with this feature enabled; `syva-ebpf` uses it without (pure `no_std`) |
 | `syva-ebpf` | `bpfel-unknown-none` | 5 eBPF LSM programs (separate workspace, nightly Rust) |
-| `xtask` | any | Build helper — `cargo xtask build-ebpf` |
+| `xtask` | any | Build helper — `cargo run -p xtask -- build-ebpf` |
 
 ### Key Files in `syva/src/`
 
@@ -58,7 +64,7 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 - **policy.rs** — Scans a directory of `.toml` files, filename = zone name, deserializes directly into `ZonePolicy`
 - **types.rs** — Inlined policy types (`ZonePolicy`, `ZoneType`, `MemoryLimit` newtype with human-readable deserialization)
 - **mapper.rs** — Annotation key constants (`syva.dev/zone`, `syva.dev/policy`)
-- **main.rs** — CLI, startup orchestration, zone refcounting, live event loop with BPF map cleanup on zone emptying
+- **main.rs** — CLI, startup orchestration, zone refcounting, live event loop with membership cleanup on zone emptying
 
 ### eBPF Programs (`syva-ebpf/src/`)
 
@@ -80,7 +86,7 @@ Kernel struct offsets are patched at load time via `BpfLoader::set_global()`. A 
 
 ### Zone Lifecycle
 
-- **Refcounting**: Each zone has a reference count tracking active containers. Zone BPF map entries are cleaned up when the last container leaves.
+- **Refcounting**: Each zone has a reference count tracking active containers. When the last container leaves (zone goes Pending), only `ZONE_MEMBERSHIP` is cleaned up. `ZONE_POLICY`, `ZONE_ALLOWED_COMMS`, and `INODE_ZONE_MAP` persist until agent shutdown — this is intentional (re-activation is free).
 - **allowed_zones symmetry**: Both zones must list each other in `network.allowed_zones`. One-sided declarations are logged as warnings and neither direction is written.
 - **Policy write-once**: `ZONE_POLICY` is written once per zone_id, tracked via `zone_policies_written: HashSet<u32>`.
 
@@ -94,6 +100,14 @@ Kernel struct offsets are patched at load time via `BpfLoader::set_global()`. A 
 
 Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only one instance can run per node. Stale pins from a crashed instance must be cleaned manually: `rm -rf /sys/fs/bpf/syva`.
 
+### Enforcement Semantics
+
+- **Global zone bypass**: All 5 eBPF hooks check `ZONE_FLAG_GLOBAL` first and skip enforcement entirely. However, this flag is currently unreachable — all `add_zone_member` calls hardcode `ZoneType::NonGlobal`, and unlabelled containers are skipped (absent from `ZONE_MEMBERSHIP`). The kernel-side bypass exists but no userspace code path sets the flag.
+- **Fail-open on error**: If `bpf_probe_read_kernel` fails in any hook, the operation is allowed and the error counter is incremented. No silent denies from kernel read failures.
+- **`ZONE_FLAG_PRIVILEGED`**: Defined and set in userspace for `ZoneType::Privileged`, but not checked by any eBPF program currently. Reserved for future use.
+- **INODE_ZONE_MAP inode-only key**: Keyed by `i_ino` alone (not `dev,ino`). Cross-filesystem deployments with overlapping inode numbers could produce false matches. Documented limitation in `ebpf.rs`.
+- **Host path scanning depth**: `populate_inode_zone_map()` scans host_paths one level deep into directories. Subdirectories beyond that are not enumerated.
+
 ## Conventions
 
 - Policies are TOML. See `policies/standard.toml` for the canonical example.
@@ -101,8 +115,7 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 - `ZonePolicy::validate()` checks resource bounds (cpu_shares, pids_max, io_weight > 0) and warns on unknown capability names.
 - Zoned callers are denied access to host processes (target not in any zone) in ptrace and signal hooks. `ZONE_ID_HOST = 0` in deny events.
 - `POLICY_FLAG_ALLOW_PTRACE` only permits intra-zone ptrace, not cross-zone.
-- `INODE_ZONE_MAP` only works for bind-mounted host paths (`host_paths` in policy). Container-internal paths (`writable_paths`) have different overlayfs inodes.
-- Zone lifecycle: Pending (policy configured, no containers) → Active (containers present) → Pending (last container left, BPF maps stay configured). Policy-defined zones persist — re-activation is free.
+- `INODE_ZONE_MAP` only works for bind-mounted host paths (`host_paths` in `[filesystem]`). Container-internal paths (`writable_paths`) have different overlayfs inodes. `host_paths` are resolved to inodes at startup and written to the inode→zone map for file/exec enforcement.
 - The policy TOML is deserialized directly into `ZonePolicy` (no intermediate `PolicyFile` types).
 - Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement). Debug-level log emitted if an unzoned process hits enforcement paths.
 - Policies are loaded once at startup. No hot-reload.
