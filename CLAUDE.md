@@ -13,7 +13,7 @@ Extracted from the [Rauha](https://github.com/yairfalse/rauha) container runtime
 ```bash
 cargo build -p syva-ebpf-common    # Build shared types (works on any OS)
 cargo build -p xtask               # Build the eBPF build helper
-cargo test -p syva-ebpf-common     # Run type-size + caps tests (8 tests)
+cargo test -p syva-ebpf-common     # Run type-size + layout tests (6 default; 10 with `userspace` feature)
 cargo test                         # All workspace tests
 
 # Run a single test
@@ -102,7 +102,7 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 
 ### Enforcement Semantics
 
-- **Global zone bypass**: Zones with `ZoneType::Global` set `ZONE_FLAG_GLOBAL` on `ZoneInfoKernel`. All 5 hooks check this flag first and skip enforcement entirely — global zones are unconfined.
+- **Global zone bypass**: All 5 eBPF hooks check `ZONE_FLAG_GLOBAL` first and skip enforcement entirely. However, this flag is currently unreachable — all `add_zone_member` calls hardcode `ZoneType::NonGlobal`, and unlabelled containers are skipped (absent from `ZONE_MEMBERSHIP`). The kernel-side bypass exists but no userspace code path sets the flag.
 - **Fail-open on error**: If `bpf_probe_read_kernel` fails in any hook, the operation is allowed and the error counter is incremented. No silent denies from kernel read failures.
 - **`ZONE_FLAG_PRIVILEGED`**: Defined and set in userspace for `ZoneType::Privileged`, but not checked by any eBPF program currently. Reserved for future use.
 - **INODE_ZONE_MAP inode-only key**: Keyed by `i_ino` alone (not `dev,ino`). Cross-filesystem deployments with overlapping inode numbers could produce false matches. Documented limitation in `ebpf.rs`.
