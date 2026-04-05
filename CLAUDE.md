@@ -16,6 +16,9 @@ cargo build -p xtask               # Build the eBPF build helper
 cargo test -p syva-ebpf-common     # Run type-size + caps tests (8 tests)
 cargo test                         # All workspace tests
 
+# Run a single test
+cargo test -p syva-ebpf-common -- test_name
+
 # Full workspace build (Linux only — aya crate requires Linux libc)
 cargo build                        # Builds syva binary + syva-ebpf-common + xtask
 
@@ -25,6 +28,9 @@ cargo xtask build-ebpf --release   # Release build
 
 # Run the agent (Linux only, requires root for BPF)
 RUST_LOG=syva=debug cargo run --bin syva -- --policy-dir ./policies
+
+# Run with a custom eBPF object (useful when iterating on eBPF programs)
+RUST_LOG=syva=debug cargo run --bin syva -- --policy-dir ./policies --ebpf-obj ./target/bpfel-unknown-none/debug/syva-ebpf
 ```
 
 The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` uses Linux-specific libc symbols (netlink, bpf syscalls). Only `syva-ebpf-common` and `xtask` are cross-platform.
@@ -45,7 +51,7 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 | Crate | Target | Purpose |
 |-------|--------|---------|
 | `syva` | Linux userspace | Main binary — CLI, eBPF lifecycle, containerd watcher, policy loading |
-| `syva-ebpf-common` | `no_std` + userspace | `#[repr(C)]` types shared between kernel and userspace BPF maps |
+| `syva-ebpf-common` | `no_std` + userspace | `#[repr(C)]` types shared between kernel and userspace BPF maps. Has `userspace` feature flag — `syva` depends on it with this feature enabled; `syva-ebpf` uses it without (pure `no_std`) |
 | `syva-ebpf` | `bpfel-unknown-none` | 5 eBPF LSM programs (separate workspace, nightly Rust) |
 | `xtask` | any | Build helper — `cargo xtask build-ebpf` |
 
@@ -101,8 +107,7 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 - `ZonePolicy::validate()` checks resource bounds (cpu_shares, pids_max, io_weight > 0) and warns on unknown capability names.
 - Zoned callers are denied access to host processes (target not in any zone) in ptrace and signal hooks. `ZONE_ID_HOST = 0` in deny events.
 - `POLICY_FLAG_ALLOW_PTRACE` only permits intra-zone ptrace, not cross-zone.
-- `INODE_ZONE_MAP` only works for bind-mounted host paths (`host_paths` in policy). Container-internal paths (`writable_paths`) have different overlayfs inodes.
-- Zone lifecycle: Pending (policy configured, no containers) → Active (containers present) → Pending (last container left, BPF maps stay configured). Policy-defined zones persist — re-activation is free.
+- `INODE_ZONE_MAP` only works for bind-mounted host paths (`host_paths` in `[filesystem]`). Container-internal paths (`writable_paths`) have different overlayfs inodes. `host_paths` are resolved to inodes at startup and written to the inode→zone map for file/exec enforcement.
 - The policy TOML is deserialized directly into `ZonePolicy` (no intermediate `PolicyFile` types).
 - Containers without a `syva.dev/zone` annotation are silently skipped (global zone, no enforcement). Debug-level log emitted if an unzoned process hits enforcement paths.
 - Policies are loaded once at startup. No hot-reload.
