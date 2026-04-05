@@ -130,6 +130,16 @@ impl ZonePolicy {
         if self.resources.io_weight == 0 {
             anyhow::bail!("zone {zone_name}: io_weight must be > 0");
         }
+
+        let (_, unknown) = syva_ebpf_common::caps_to_mask_validated(&self.capabilities.allowed);
+        if !unknown.is_empty() {
+            tracing::warn!(
+                zone = zone_name,
+                unknown = ?unknown,
+                "unknown capability names — will be ignored by kernel"
+            );
+        }
+
         Ok(())
     }
 }
@@ -192,6 +202,13 @@ pub struct FilesystemPolicy {
     pub root: String,
     pub shared_layers: bool,
     pub writable_paths: Vec<String>,
+    /// Host-visible paths for INODE_ZONE_MAP population.
+    ///
+    /// Only bind-mounted host paths can be correctly enumerated by the agent —
+    /// container-internal paths (overlayfs layers) have different inodes from
+    /// the host perspective and will not match in the kernel LSM hooks.
+    #[serde(default)]
+    pub host_paths: Vec<String>,
 }
 
 impl Default for FilesystemPolicy {
@@ -200,6 +217,7 @@ impl Default for FilesystemPolicy {
             root: String::new(),
             shared_layers: true,
             writable_paths: vec!["/tmp".into(), "/var/log".into()],
+            host_paths: Vec::new(),
         }
     }
 }

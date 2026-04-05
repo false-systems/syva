@@ -15,11 +15,10 @@ mod mapper;
 mod policy;
 pub mod types;
 mod watcher;
+mod zone;
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -97,80 +96,69 @@ async fn cmd_run(
         events::spawn_event_reader(ring_buf, cancel.clone());
     }
 
-    // Assign zone IDs from policy files — all zones get IDs regardless of
-    // whether they have running containers. This ensures ZONE_ALLOWED_COMMS
-    // and INODE_ZONE_MAP are populated for all zones at startup.
-    let zone_counter = AtomicU32::new(1);
-    let mut zone_id_for_name: HashMap<String, u32> = HashMap::new();
-    let mut zone_policies_written: HashSet<u32> = HashSet::new();
-    let mut zone_refcount: HashMap<u32, usize> = HashMap::new();
-    let mut container_zone: HashMap<String, u32> = HashMap::new();
-    let mut cgroup_id_map: HashMap<String, u64> = HashMap::new();
+    // --- Zone registry: single source of truth for zone lifecycle ---
+    let mut registry = zone::ZoneRegistry::new();
 
+    // Register all zones from policy files. Every zone gets an ID and its
+    // BPF maps configured, regardless of whether it has running containers.
     for (zone_name, policy) in &policies {
-        let zone_id = zone_counter.fetch_add(1, Ordering::SeqCst);
-        zone_id_for_name.insert(zone_name.clone(), zone_id);
+        let zone_id = registry.register_zone(zone_name);
         mgr.set_zone_policy(zone_id, policy)?;
-        zone_policies_written.insert(zone_id);
-        tracing::info!(zone = zone_name.as_str(), zone_id, "assigned zone ID from policy");
+        tracing::info!(zone = zone_name.as_str(), zone_id, "registered zone from policy");
     }
 
-    // Populate ZONE_ALLOWED_COMMS from policy network.allowed_zones.
-    // Strict bilateral symmetry: both zones must list each other.
+    // Populate ZONE_ALLOWED_COMMS — strict bilateral symmetry.
     for (zone_name, policy) in &policies {
-        let src_id = zone_id_for_name[zone_name.as_str()];
+        let src_id = registry.zone_id(zone_name).unwrap();
         for allowed_name in &policy.network.allowed_zones {
-            if let Some(&dst_id) = zone_id_for_name.get(allowed_name.as_str()) {
-                let other_allows_back = policies
+            if let Some(dst_id) = registry.zone_id(allowed_name) {
+                let bilateral = policies
                     .get(allowed_name)
                     .map(|p| p.network.allowed_zones.contains(zone_name))
                     .unwrap_or(false);
-                if other_allows_back {
+                if bilateral {
                     if let Err(e) = mgr.set_zone_allowed_comms(src_id, dst_id) {
                         tracing::warn!(src = zone_name.as_str(), dst = allowed_name.as_str(), %e, "failed to set allowed comms");
-                    } else {
-                        tracing::info!(src = zone_name.as_str(), dst = allowed_name.as_str(), "allowed cross-zone communication");
                     }
                 } else {
                     tracing::warn!(
                         src = zone_name.as_str(), dst = allowed_name.as_str(),
-                        "one-sided allowed_zones declaration — both zones must list each other. Skipping."
+                        "one-sided allowed_zones — both zones must list each other"
                     );
                 }
             } else {
                 tracing::warn!(
                     zone = zone_name.as_str(), peer = allowed_name.as_str(),
-                    "allowed_zones references unknown zone — no policy file found"
+                    "allowed_zones references unknown zone"
                 );
             }
         }
     }
 
-    // Populate INODE_ZONE_MAP from zone filesystem policies.
+    // Populate INODE_ZONE_MAP from host_paths (bind-mounted host paths only).
+    // Container-internal paths (writable_paths) have different overlayfs inodes
+    // and cannot be correctly matched by the kernel LSM hooks.
     for (zone_name, policy) in &policies {
-        let zone_id = zone_id_for_name[zone_name.as_str()];
-        let paths = &policy.filesystem.writable_paths;
-        match mgr.populate_inode_zone_map(zone_id, paths) {
-            Ok(count) if count > 0 => {
-                tracing::info!(zone = zone_name.as_str(), inodes = count, "populated inode zone map");
-            }
+        if policy.filesystem.host_paths.is_empty() {
+            continue;
+        }
+        let zone_id = registry.zone_id(zone_name).unwrap();
+        match mgr.populate_inode_zone_map(zone_id, &policy.filesystem.host_paths) {
+            Ok(n) if n > 0 => tracing::info!(zone = zone_name.as_str(), inodes = n, "inode map populated from host_paths"),
             Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(zone = zone_name.as_str(), %e, "failed to populate inode zone map");
-            }
+            Err(e) => tracing::warn!(zone = zone_name.as_str(), %e, "inode map population failed"),
         }
     }
 
     // Enumerate existing containers and assign to pre-allocated zones.
     let assignments = watcher::enumerate_cgroups(&policies)?;
-
     for assignment in &assignments {
-        let zone_id = zone_id_for_name[&assignment.zone_name];
+        let zone_id = registry.add_container(
+            &assignment.container_id,
+            &assignment.zone_name,
+            assignment.cgroup_id,
+        )?;
         mgr.add_zone_member(assignment.cgroup_id, zone_id, types::ZoneType::NonGlobal)?;
-        *zone_refcount.entry(zone_id).or_insert(0) += 1;
-        cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
-        container_zone.insert(assignment.container_id.clone(), zone_id);
-
         tracing::info!(
             zone = assignment.zone_name,
             cgroup_id = assignment.cgroup_id,
@@ -179,7 +167,11 @@ async fn cmd_run(
         );
     }
 
-    print_status_summary(&policies, &assignments, &mgr);
+    tracing::info!(
+        zones = registry.zone_count(),
+        containers = registry.container_count(),
+        "startup complete"
+    );
 
     // Start live containerd event watcher.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<watcher::WatcherEvent>(100);
@@ -203,12 +195,15 @@ async fn cmd_run(
             event = rx.recv() => {
                 match event {
                     Some(watcher::WatcherEvent::Add(assignment)) => {
-                        // Zone IDs are pre-allocated from policy files at startup.
-                        // Unknown zones (no policy file) are rejected by the watcher.
-                        let zone_id = match zone_id_for_name.get(&assignment.zone_name) {
-                            Some(&id) => id,
-                            None => {
-                                tracing::warn!(zone = assignment.zone_name, "no zone ID for zone — no policy loaded");
+                        // Registry handles zone lookup and refcounting.
+                        let zone_id = match registry.add_container(
+                            &assignment.container_id,
+                            &assignment.zone_name,
+                            assignment.cgroup_id,
+                        ) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                tracing::warn!(%e, zone = assignment.zone_name, "rejected container");
                                 continue;
                             }
                         };
@@ -217,12 +212,11 @@ async fn cmd_run(
                             zone_id,
                             types::ZoneType::NonGlobal,
                         ) {
-                            tracing::error!(%e, zone = assignment.zone_name, "failed to add zone member");
+                            tracing::error!(%e, zone = assignment.zone_name, "BPF add_zone_member failed");
+                            // Rollback registry state.
+                            registry.remove_container(&assignment.container_id, None);
                             continue;
                         }
-                        *zone_refcount.entry(zone_id).or_insert(0) += 1;
-                        cgroup_id_map.insert(assignment.container_id.clone(), assignment.cgroup_id);
-                        container_zone.insert(assignment.container_id.clone(), zone_id);
                         tracing::info!(
                             container = assignment.container_id,
                             zone = assignment.zone_name,
@@ -231,26 +225,13 @@ async fn cmd_run(
                         );
                     }
                     Some(watcher::WatcherEvent::Remove { container_id, cgroup_id }) => {
-                        let resolved_cgroup_id = cgroup_id
-                            .or_else(|| cgroup_id_map.remove(&container_id))
-                            .unwrap_or(0);
-                        if resolved_cgroup_id != 0 {
-                            let _ = mgr.remove_zone_member(resolved_cgroup_id);
-                        }
-                        // Decrement zone refcount; clean up zone maps when last container leaves.
-                        if let Some(zone_id) = container_zone.remove(&container_id) {
-                            if let Some(count) = zone_refcount.get_mut(&zone_id) {
-                                *count = count.saturating_sub(1);
-                                if *count == 0 {
-                                    zone_refcount.remove(&zone_id);
-                                    zone_policies_written.remove(&zone_id);
-                                    let _ = mgr.remove_zone_policy(zone_id);
-                                    let _ = mgr.remove_zone_comms(zone_id);
-                                    let _ = mgr.remove_zone_inodes(zone_id);
-                                    // Remove zone_id_for_name entry.
-                                    zone_id_for_name.retain(|_, &mut v| v != zone_id);
-                                    tracing::info!(zone_id, "zone emptied — cleaned up BPF maps");
-                                }
+                        // Registry handles lookup, refcount, and state transition.
+                        if let Some((zone_id, resolved_cgroup, went_to_pending)) =
+                            registry.remove_container(&container_id, cgroup_id)
+                        {
+                            let _ = mgr.remove_zone_member(resolved_cgroup);
+                            if went_to_pending {
+                                tracing::info!(zone_id, "zone has no active containers (Pending)");
                             }
                         }
                         tracing::info!(container = container_id, "live: container removed");
@@ -270,49 +251,6 @@ async fn cmd_run(
     Ok(())
 }
 
-fn print_status_summary(
-    policies: &std::collections::HashMap<String, types::ZonePolicy>,
-    assignments: &[watcher::ZoneAssignment],
-    mgr: &ebpf::EnforceEbpf,
-) {
-    let enforced = assignments.len();
-    let zone_names: std::collections::HashSet<&str> = assignments
-        .iter()
-        .map(|a| a.zone_name.as_str())
-        .collect();
-
-    tracing::info!(
-        programs = "5/5",
-        zones = zone_names.len(),
-        containers_enforced = enforced,
-        "enforcement active"
-    );
-
-    for zone in &zone_names {
-        let count = assignments.iter().filter(|a| a.zone_name == *zone).count();
-        let has_policy = policies.contains_key(*zone);
-        tracing::info!(
-            zone = zone,
-            containers = count,
-            policy = has_policy,
-            "zone summary"
-        );
-    }
-
-    if let Ok(counters) = mgr.read_counters() {
-        for (name, c) in &counters {
-            if c.allow > 0 || c.deny > 0 || c.error > 0 {
-                tracing::info!(
-                    hook = name.as_str(),
-                    allow = c.allow,
-                    deny = c.deny,
-                    error = c.error,
-                    "enforcement counters"
-                );
-            }
-        }
-    }
-}
 
 async fn cmd_status() -> anyhow::Result<()> {
     use aya::maps::PerCpuArray;
@@ -389,17 +327,33 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                while let Some(item) = ring_buf.next() {
-                    if item.len() < std::mem::size_of::<EnforcementEvent>() {
-                        continue;
+                const MAX_EVENTS_PER_TICK: usize = 1000;
+                let events: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
+                    let mut out = Vec::new();
+                    while let Some(item) = ring_buf.next() {
+                        if item.len() < std::mem::size_of::<EnforcementEvent>() {
+                            continue;
+                        }
+                        let event: EnforcementEvent = unsafe {
+                            std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
+                        };
+                        out.push(event);
+                        if out.len() >= MAX_EVENTS_PER_TICK {
+                            break;
+                        }
                     }
-                    let event: EnforcementEvent = unsafe {
-                        std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
-                    };
+                    out
+                });
+                for event in &events {
                     let hook = hook_names.get(event.hook as usize).copied().unwrap_or("unknown");
+                    let decision = match event.decision {
+                        syva_ebpf_common::DECISION_ALLOW => "ALLOW",
+                        syva_ebpf_common::DECISION_DENY => "DENY",
+                        _ => "UNKNOWN",
+                    };
                     println!(
-                        "DENY hook={} pid={} caller_zone={} target_zone={} context={}",
-                        hook, event.pid, event.caller_zone, event.target_zone, event.context
+                        "{} hook={} pid={} caller_zone={} target_zone={} context={}",
+                        decision, hook, event.pid, event.caller_zone, event.target_zone, event.context
                     );
                 }
             }

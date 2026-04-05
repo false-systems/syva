@@ -203,19 +203,22 @@ impl EnforceEbpf {
     /// Triggers a synthetic file open to ensure the hook fires, then polls the
     /// SELF_TEST map until the result is available.
     pub async fn verify_self_test(&self) -> anyhow::Result<()> {
-        use aya::maps::Array;
         use std::time::Duration;
 
         // Trigger a file_open so the self-test fires.
         let _ = std::fs::File::open("/proc/self/status");
 
-        let map = Array::<_, SelfTestResult>::try_from(
-            self.bpf.map("SELF_TEST")
-                .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
-        )?;
-
         for attempt in 0..20 {
-            let result = map.get(&0, 0)?;
+            // Read BPF map synchronously — avoids Send bound on self.bpf.
+            let result = tokio::task::block_in_place(|| {
+                use aya::maps::Array;
+                let map = Array::<_, SelfTestResult>::try_from(
+                    self.bpf.map("SELF_TEST")
+                        .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
+                )?;
+                anyhow::Ok(map.get(&0, 0)?)
+            })?;
+
             if result.helper_cgroup_id != 0 {
                 if result.helper_cgroup_id == result.offset_cgroup_id {
                     tracing::info!(
