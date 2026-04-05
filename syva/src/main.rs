@@ -135,12 +135,16 @@ async fn cmd_run(
         }
     }
 
-    // Populate INODE_ZONE_MAP from zone filesystem policies.
+    // Populate INODE_ZONE_MAP from host_paths (bind-mounted host paths only).
+    // Container-internal paths (writable_paths) have different overlayfs inodes
+    // and cannot be correctly matched by the kernel LSM hooks.
     for (zone_name, policy) in &policies {
+        if policy.filesystem.host_paths.is_empty() {
+            continue;
+        }
         let zone_id = registry.zone_id(zone_name).unwrap();
-        let paths = &policy.filesystem.writable_paths;
-        match mgr.populate_inode_zone_map(zone_id, paths) {
-            Ok(n) if n > 0 => tracing::info!(zone = zone_name.as_str(), inodes = n, "inode map populated"),
+        match mgr.populate_inode_zone_map(zone_id, &policy.filesystem.host_paths) {
+            Ok(n) if n > 0 => tracing::info!(zone = zone_name.as_str(), inodes = n, "inode map populated from host_paths"),
             Ok(_) => {}
             Err(e) => tracing::warn!(zone = zone_name.as_str(), %e, "inode map population failed"),
         }
