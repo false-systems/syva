@@ -130,6 +130,16 @@ impl ZonePolicy {
         if self.resources.io_weight == 0 {
             anyhow::bail!("zone {zone_name}: io_weight must be > 0");
         }
+
+        let (_, unknown) = syva_ebpf_common::caps_to_mask_validated(&self.capabilities.allowed);
+        if !unknown.is_empty() {
+            tracing::warn!(
+                zone = zone_name,
+                unknown = ?unknown,
+                "unknown capability names — will be ignored by kernel"
+            );
+        }
+
         Ok(())
     }
 }

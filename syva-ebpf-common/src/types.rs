@@ -171,22 +171,28 @@ mod cap_convert {
         "CAP_CHECKPOINT_RESTORE", // 40
     ];
 
+    fn normalize_cap_name(s: &str) -> String {
+        let upper = s.to_uppercase();
+        if upper.starts_with("CAP_") { upper } else { format!("CAP_{upper}") }
+    }
+
     pub fn caps_to_mask(caps: &[impl AsRef<str>]) -> u64 {
+        caps_to_mask_validated(caps).0
+    }
+
+    /// Convert capability names to a bitmask, also returning any unrecognized names.
+    pub fn caps_to_mask_validated(caps: &[impl AsRef<str>]) -> (u64, Vec<String>) {
         let mut mask = 0u64;
+        let mut unknown = Vec::new();
         for cap in caps {
-            let name = cap.as_ref().to_uppercase();
-            let name = if name.starts_with("CAP_") {
-                name
-            } else {
-                let mut prefixed = "CAP_".to_owned();
-                prefixed.push_str(&name);
-                prefixed
-            };
+            let name = normalize_cap_name(cap.as_ref());
             if let Some(pos) = CAPS.iter().position(|&c| c == name) {
                 mask |= 1u64 << pos;
+            } else {
+                unknown.push(name);
             }
         }
-        mask
+        (mask, unknown)
     }
 
     impl ZonePolicyKernel {
@@ -208,7 +214,7 @@ mod cap_convert {
 }
 
 #[cfg(feature = "userspace")]
-pub use cap_convert::caps_to_mask;
+pub use cap_convert::{caps_to_mask, caps_to_mask_validated};
 
 unsafe impl Sync for ZoneInfoKernel {}
 unsafe impl Send for ZoneInfoKernel {}
@@ -283,5 +289,21 @@ mod tests {
     fn caps_to_mask_short_form() {
         let mask = caps_to_mask(&["NET_ADMIN"]);
         assert_eq!(mask, 1 << 12);
+    }
+
+    #[test]
+    #[cfg(feature = "userspace")]
+    fn caps_to_mask_validated_detects_typo() {
+        let (mask, unknown) = caps_to_mask_validated(&["CAP_NET_ADMIN", "CPA_NET_ADMIN"]);
+        assert_eq!(mask, 1 << 12); // only the valid one
+        assert_eq!(unknown.len(), 1);
+        assert!(unknown[0].contains("CPA_NET_ADMIN"));
+    }
+
+    #[test]
+    #[cfg(feature = "userspace")]
+    fn caps_to_mask_validated_clean_input() {
+        let (_, unknown) = caps_to_mask_validated(&["CAP_KILL", "NET_ADMIN"]);
+        assert!(unknown.is_empty());
     }
 }
