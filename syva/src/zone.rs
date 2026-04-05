@@ -44,8 +44,8 @@ pub struct ZoneEntry {
 pub struct ZoneRegistry {
     /// zone_name → ZoneEntry
     zones: HashMap<String, ZoneEntry>,
-    /// cgroup_id → zone_name (for fast Remove lookup)
-    cgroup_to_zone: HashMap<u64, String>,
+    /// cgroup_id → (container_id, zone_name) — enables hint-based removal
+    cgroup_to_info: HashMap<u64, (String, String)>,
     /// container_id → (zone_name, cgroup_id)
     container_to_info: HashMap<String, (String, u64)>,
     /// Monotonic zone ID counter. Starts at 1. 0 is reserved for ZONE_ID_HOST.
@@ -56,7 +56,7 @@ impl ZoneRegistry {
     pub fn new() -> Self {
         Self {
             zones: HashMap::new(),
-            cgroup_to_zone: HashMap::new(),
+            cgroup_to_info: HashMap::new(),
             container_to_info: HashMap::new(),
             next_id: 1,
         }
@@ -94,7 +94,7 @@ impl ZoneRegistry {
         entry.state = ZoneState::Active;
         let zone_id = entry.zone_id;
 
-        self.cgroup_to_zone.insert(cgroup_id, zone_name.to_string());
+        self.cgroup_to_info.insert(cgroup_id, (container_id.to_string(), zone_name.to_string()));
         self.container_to_info.insert(
             container_id.to_string(),
             (zone_name.to_string(), cgroup_id),
@@ -116,8 +116,10 @@ impl ZoneRegistry {
         let (zone_name, cgroup_id) = if let Some(info) = self.container_to_info.remove(container_id) {
             info
         } else if let Some(cid) = cgroup_id_hint {
-            if let Some(name) = self.cgroup_to_zone.remove(&cid) {
-                (name, cid)
+            if let Some((cont_id, zone_name)) = self.cgroup_to_info.remove(&cid) {
+                // Clean up the forward map too.
+                self.container_to_info.remove(&cont_id);
+                (zone_name, cid)
             } else {
                 return None;
             }
@@ -125,7 +127,7 @@ impl ZoneRegistry {
             return None;
         };
 
-        self.cgroup_to_zone.remove(&cgroup_id);
+        self.cgroup_to_info.remove(&cgroup_id);
 
         let entry = self.zones.get_mut(&zone_name)?;
         entry.refcount = entry.refcount.saturating_sub(1);

@@ -59,7 +59,11 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
 
                     for event in &events {
                         let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
-                        let decision = if event.decision == DECISION_DENY { "DENY" } else { "ALLOW" };
+                        let decision = match event.decision {
+                            DECISION_DENY => "DENY",
+                            syva_ebpf_common::DECISION_ALLOW => "ALLOW",
+                            _ => "UNKNOWN",
+                        };
                         if event.caller_zone == 0 {
                             tracing::debug!(
                                 hook = hook,

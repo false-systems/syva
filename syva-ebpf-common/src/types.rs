@@ -176,8 +176,17 @@ mod cap_convert {
         if upper.starts_with("CAP_") { upper } else { format!("CAP_{upper}") }
     }
 
+    /// Convert capability names to a bitmask. Unknown names are silently ignored.
+    /// Use `caps_to_mask_validated` when you need to detect typos.
     pub fn caps_to_mask(caps: &[impl AsRef<str>]) -> u64 {
-        caps_to_mask_validated(caps).0
+        let mut mask = 0u64;
+        for cap in caps {
+            let name = normalize_cap_name(cap.as_ref());
+            if let Some(pos) = CAPS.iter().position(|&c| c == name.as_str()) {
+                mask |= 1u64 << pos;
+            }
+        }
+        mask
     }
 
     /// Convert capability names to a bitmask, also returning any unrecognized names.

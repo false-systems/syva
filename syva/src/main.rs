@@ -327,6 +327,7 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                const MAX_EVENTS_PER_TICK: usize = 1000;
                 let events: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
                     let mut out = Vec::new();
                     while let Some(item) = ring_buf.next() {
@@ -337,12 +338,19 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
                             std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
                         };
                         out.push(event);
+                        if out.len() >= MAX_EVENTS_PER_TICK {
+                            break;
+                        }
                     }
                     out
                 });
                 for event in &events {
                     let hook = hook_names.get(event.hook as usize).copied().unwrap_or("unknown");
-                    let decision = if event.decision == syva_ebpf_common::DECISION_DENY { "DENY" } else { "ALLOW" };
+                    let decision = match event.decision {
+                        syva_ebpf_common::DECISION_ALLOW => "ALLOW",
+                        syva_ebpf_common::DECISION_DENY => "DENY",
+                        _ => "UNKNOWN",
+                    };
                     println!(
                         "{} hook={} pid={} caller_zone={} target_zone={} context={}",
                         decision, hook, event.pid, event.caller_zone, event.target_zone, event.context
