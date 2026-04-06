@@ -94,9 +94,22 @@ pub enum ZoneType {
     Privileged,
 }
 
+/// Metadata section from policy TOML. Parsed but not used for enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ZoneMetadata {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub zone_type: String,
+}
+
 /// Declarative policy defining what a zone can do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZonePolicy {
+    /// Optional metadata section — parsed but not used for enforcement.
+    #[serde(default)]
+    pub zone: ZoneMetadata,
     pub capabilities: CapabilityPolicy,
     pub resources: ResourcePolicy,
     pub network: NetworkPolicy,
@@ -108,6 +121,7 @@ pub struct ZonePolicy {
 impl Default for ZonePolicy {
     fn default() -> Self {
         Self {
+            zone: ZoneMetadata::default(),
             capabilities: CapabilityPolicy::default(),
             resources: ResourcePolicy::default(),
             network: NetworkPolicy::default(),
@@ -170,11 +184,13 @@ impl ZonePolicy {
 
 /// Allow-list only. Nothing not listed here is permitted.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityPolicy {
     pub allowed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourcePolicy {
     pub cpu_shares: u64,
     pub memory_limit: MemoryLimit,
@@ -202,6 +218,7 @@ pub enum NetworkMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
     pub mode: NetworkMode,
     pub allowed_zones: Vec<String>,
@@ -221,6 +238,7 @@ impl Default for NetworkPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilesystemPolicy {
     #[serde(default)]
     pub root: String,
@@ -247,11 +265,13 @@ impl Default for FilesystemPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DevicePolicy {
     pub allowed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SyscallPolicy {
     pub deny: Vec<String>,
 }
@@ -354,6 +374,39 @@ mod tests {
         assert_eq!(toml::from_str::<T>("mode = \"bridged\"").unwrap().mode, NetworkMode::Bridged);
         assert_eq!(toml::from_str::<T>("mode = \"isolated\"").unwrap().mode, NetworkMode::Isolated);
         assert_eq!(toml::from_str::<T>("mode = \"host\"").unwrap().mode, NetworkMode::Host);
+    }
+
+    #[test]
+    fn unknown_field_rejected() {
+        let toml_str = r#"
+[capabilities]
+allowed = []
+typo_field = "oops"
+
+[resources]
+cpu_shares = 1024
+memory_limit = "512Mi"
+io_weight = 100
+pids_max = 256
+
+[network]
+mode = "isolated"
+allowed_zones = []
+allowed_egress = []
+allowed_ingress = []
+
+[filesystem]
+shared_layers = true
+writable_paths = ["/tmp"]
+
+[devices]
+allowed = []
+
+[syscalls]
+deny = []
+"#;
+        let result = toml::from_str::<ZonePolicy>(toml_str);
+        assert!(result.is_err(), "unknown field 'typo_field' should be rejected");
     }
 
     #[test]
