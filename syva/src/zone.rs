@@ -80,13 +80,21 @@ impl ZoneRegistry {
 
     /// Record that a container has joined a zone.
     /// Transitions zone from Pending → Active.
-    /// Returns Err if zone_name is not registered.
+    /// Returns Err if zone_name is not registered or container_id is already tracked.
     pub fn add_container(
         &mut self,
         container_id: &str,
         zone_name: &str,
         cgroup_id: u64,
     ) -> anyhow::Result<u32> {
+        // Reject duplicate container_id — a second add without remove would
+        // corrupt refcounts and orphan the old cgroup_to_info entry.
+        if let Some((existing_zone, _)) = self.container_to_info.get(container_id) {
+            anyhow::bail!(
+                "container '{container_id}' is already tracked in zone '{existing_zone}'"
+            );
+        }
+
         let entry = self.zones.get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
 
@@ -256,6 +264,36 @@ mod tests {
         let id2 = reg.add_container("c2", "frontend", 2000).unwrap();
         assert_eq!(id1, id2);
         assert_eq!(reg.zones["frontend"].state, ZoneState::Active);
+    }
+
+    #[test]
+    fn duplicate_container_id_returns_error() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend");
+        reg.add_container("c1", "frontend", 1000).unwrap();
+
+        // Second add with same container_id must fail.
+        let result = reg.add_container("c1", "frontend", 1000);
+        assert!(result.is_err());
+
+        // Refcount must still be 1 — not corrupted by the failed add.
+        assert_eq!(reg.refcount("frontend"), 1);
+    }
+
+    #[test]
+    fn duplicate_container_id_different_zone_returns_error() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend");
+        reg.register_zone("database");
+        reg.add_container("c1", "frontend", 1000).unwrap();
+
+        // Same container_id in a different zone must also fail.
+        let result = reg.add_container("c1", "database", 2000);
+        assert!(result.is_err());
+
+        // Both zones' refcounts must be unaffected.
+        assert_eq!(reg.refcount("frontend"), 1);
+        assert_eq!(reg.refcount("database"), 0);
     }
 
     #[test]
