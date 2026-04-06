@@ -14,8 +14,8 @@ use aya::programs::Lsm;
 use aya::{Bpf, BpfLoader, Btf};
 use crate::types::{ZonePolicy, ZoneType, NetworkMode};
 use syva_ebpf_common::{
-    ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, EnforcementCounters,
-    ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+    ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, SelfTestInodeResult,
+    EnforcementCounters, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
 };
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
@@ -36,6 +36,7 @@ const MAP_NAMES: &[&str] = &[
     "INODE_ZONE_MAP",
     "ZONE_ALLOWED_COMMS",
     "SELF_TEST",
+    "SELF_TEST_INODE",
     "ENFORCEMENT_COUNTERS",
     "ENFORCEMENT_EVENTS",
 ];
@@ -265,6 +266,53 @@ impl EnforceEbpf {
         }
 
         anyhow::bail!("self-test timed out after 1s — file_open hook may not be attached")
+    }
+
+    /// Verify that FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET are correct.
+    ///
+    /// The file_open self-test writes the inode number derived via the offset
+    /// chain. We compare it against the inode from stat() on the same file.
+    pub async fn verify_inode_self_test(&self) -> anyhow::Result<()> {
+        use std::time::Duration;
+
+        // The self-test file was /proc/self/status (opened in verify_self_test).
+        // Get its expected inode via stat.
+        let expected_ino = std::fs::metadata("/proc/self/status")
+            .map(|m| m.ino())
+            .map_err(|e| anyhow::anyhow!("failed to stat /proc/self/status for inode self-test: {e}"))?;
+
+        for attempt in 0..20 {
+            let result = tokio::task::block_in_place(|| {
+                use aya::maps::Array;
+                let map = Array::<_, SelfTestInodeResult>::try_from(
+                    self.bpf.map("SELF_TEST_INODE")
+                        .ok_or_else(|| anyhow::anyhow!("SELF_TEST_INODE map not found"))?,
+                )?;
+                anyhow::Ok(map.get(&0, 0)?)
+            })?;
+
+            if result.offset_ino != 0 {
+                if result.offset_ino == expected_ino {
+                    tracing::info!(
+                        inode = result.offset_ino,
+                        "inode self-test passed: FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET verified"
+                    );
+                    return Ok(());
+                } else {
+                    anyhow::bail!(
+                        "inode offset self-test FAILED: expected inode {} but eBPF \
+                         derived {} — FILE_F_INODE_OFFSET or INODE_I_INO_OFFSET is wrong \
+                         for this kernel. Install pahole and restart.",
+                        expected_ino, result.offset_ino,
+                    );
+                }
+            }
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        anyhow::bail!("inode self-test timed out — file_open hook may not be writing SELF_TEST_INODE")
     }
 
     /// Allow cross-zone communication between two zones.

@@ -74,6 +74,15 @@ pub struct SelfTestResult {
     pub offset_cgroup_id: u64,
 }
 
+/// Result of the file/inode offset self-test.
+/// Validates FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET are correct.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SelfTestInodeResult {
+    /// Inode number derived via the offset chain (file->f_inode->i_ino).
+    pub offset_ino: u64,
+}
+
 /// Per-hook enforcement decision counters.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -244,6 +253,8 @@ unsafe impl Sync for EnforcementCounters {}
 unsafe impl Send for EnforcementCounters {}
 unsafe impl Sync for EnforcementEvent {}
 unsafe impl Send for EnforcementEvent {}
+unsafe impl Sync for SelfTestInodeResult {}
+unsafe impl Send for SelfTestInodeResult {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ZoneInfoKernel {}
@@ -257,6 +268,8 @@ unsafe impl aya::Pod for SelfTestResult {}
 unsafe impl aya::Pod for EnforcementCounters {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for EnforcementEvent {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SelfTestInodeResult {}
 
 #[cfg(test)]
 mod tests {
@@ -286,6 +299,11 @@ mod tests {
     #[test]
     fn enforcement_counters_size() {
         assert_eq!(size_of::<EnforcementCounters>(), 32);
+    }
+
+    #[test]
+    fn self_test_inode_result_size() {
+        assert_eq!(size_of::<SelfTestInodeResult>(), 8);
     }
 
     #[test]
