@@ -150,6 +150,8 @@ impl EnforceEbpf {
 
     /// Set enforcement policy for a zone.
     pub fn set_zone_policy(&mut self, zone_id: u32, policy: &ZonePolicy) -> anyhow::Result<()> {
+        use aya::maps::Array;
+
         let allow_ptrace = policy.capabilities.allowed.iter().any(|c| {
             let u = c.to_uppercase();
             u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
@@ -161,12 +163,12 @@ impl EnforceEbpf {
             allow_host_net,
         );
 
-        let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
+        let mut map = Array::<_, ZonePolicyKernel>::try_from(
             self.bpf.map_mut("ZONE_POLICY")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
         )?;
 
-        map.insert(zone_id, kernel_policy, 0)?;
+        map.set(zone_id, kernel_policy, 0)?;
         Ok(())
     }
 
@@ -182,11 +184,12 @@ impl EnforceEbpf {
         let mut results = Vec::new();
         for (idx, &name) in LSM_PROGRAMS.iter().enumerate() {
             let per_cpu = map.get(&(idx as u32), 0)?;
-            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0 };
+            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0, lost: 0 };
             for cpu_val in per_cpu.iter() {
                 total.allow += cpu_val.allow;
                 total.deny += cpu_val.deny;
                 total.error += cpu_val.error;
+                total.lost += cpu_val.lost;
             }
             results.push((name.to_string(), total));
         }
@@ -262,13 +265,16 @@ impl EnforceEbpf {
         Ok(())
     }
 
-    /// Remove a zone's enforcement policy.
+    /// Clear a zone's enforcement policy (zeroed entry — Array can't remove).
     pub fn remove_zone_policy(&mut self, zone_id: u32) -> anyhow::Result<()> {
-        let mut map: AyaHashMap<_, u32, ZonePolicyKernel> = AyaHashMap::try_from(
+        use aya::maps::Array;
+
+        let mut map = Array::<_, ZonePolicyKernel>::try_from(
             self.bpf.map_mut("ZONE_POLICY")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
         )?;
-        let _ = map.remove(&zone_id);
+        let zeroed = ZonePolicyKernel { caps_mask: 0, flags: 0, _pad: 0 };
+        map.set(zone_id, zeroed, 0)?;
         Ok(())
     }
 

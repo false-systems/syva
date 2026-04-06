@@ -40,7 +40,7 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
 
     // Same zone: allow only if POLICY_FLAG_ALLOW_PTRACE is set.
     if caller.zone_id == target.zone_id {
-        if let Some(policy) = unsafe { ZONE_POLICY.get(&caller.zone_id) } {
+        if let Some(policy) = unsafe { ZONE_POLICY.get(caller.zone_id) } {
             if policy.flags & POLICY_FLAG_ALLOW_PTRACE != 0 {
                 return Ok(0);
             }

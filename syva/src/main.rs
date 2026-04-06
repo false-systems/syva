@@ -309,23 +309,26 @@ async fn cmd_status() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?,
         ) {
             Ok(map) => {
-                println!("  hooks:");
+println!("  hooks:");
                 let mut total_errors: u64 = 0;
+                let mut total_lost: u64 = 0;
                 let mut had_read_error = false;
                 for (idx, hook) in events::HOOK_NAMES.iter().enumerate() {
                     match map.get(&(idx as u32), 0) {
                         Ok(per_cpu) => {
-                            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0 };
+                            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0, lost: 0 };
                             for cpu_val in per_cpu.iter() {
                                 total.allow += cpu_val.allow;
                                 total.deny += cpu_val.deny;
                                 total.error += cpu_val.error;
+                                total.lost += cpu_val.lost;
                             }
                             total_errors += total.error;
-                            let flag = if total.error > 0 { " ⚠" } else { "" };
+                            total_lost += total.lost;
+                            let flag = if total.error > 0 || total.lost > 0 { " ⚠" } else { "" };
                             println!(
-                                "    {:<16} allow={:<8} deny={:<8} error={}{}",
-                                hook, total.allow, total.deny, total.error, flag
+                                "    {:<16} allow={:<8} deny={:<8} error={:<6} lost={}{}",
+                                hook, total.allow, total.deny, total.error, total.lost, flag
                             );
                         }
                         Err(_) => { had_read_error = true; }

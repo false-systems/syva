@@ -7,11 +7,14 @@ use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
 use tokio_util::sync::CancellationToken;
 
 pub const HOOK_NAMES: [&str; 5] = [
+pub const HOOK_NAMES: [&str; 7] = [
     "file_open",
     "bprm_check",
     "ptrace_access_check",
     "task_kill",
     "cgroup_attach_task",
+    "mmap_file",
+    "unix_connect",
 ];
 
 /// Maximum events to drain per tick. Prevents the blocking task from
