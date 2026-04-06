@@ -81,6 +81,8 @@ pub struct EnforcementCounters {
     pub allow: u64,
     pub deny: u64,
     pub error: u64,
+    /// Ring buffer events lost (reserve() returned None).
+    pub lost: u64,
 }
 
 // Program indices in the ENFORCEMENT_COUNTERS array.
@@ -89,7 +91,10 @@ pub const PROG_BPRM_CHECK: u32 = 1;
 pub const PROG_PTRACE_CHECK: u32 = 2;
 pub const PROG_TASK_KILL: u32 = 3;
 pub const PROG_CGROUP_ATTACH: u32 = 4;
-pub const ENFORCEMENT_COUNTER_ENTRIES: u32 = 5;
+pub const PROG_MMAP_FILE: u32 = 5;
+pub const PROG_UNIX_CONNECT: u32 = 6;
+/// Sized to 16 for headroom — avoids pin-breaking changes when adding hooks.
+pub const ENFORCEMENT_COUNTER_ENTRIES: u32 = 16;
 
 // Hook type constants for EnforcementEvent.
 pub const HOOK_FILE_OPEN: u8 = 0;
@@ -97,6 +102,8 @@ pub const HOOK_BPRM_CHECK: u8 = 1;
 pub const HOOK_PTRACE_CHECK: u8 = 2;
 pub const HOOK_TASK_KILL: u8 = 3;
 pub const HOOK_CGROUP_ATTACH: u8 = 4;
+pub const HOOK_MMAP_FILE: u8 = 5;
+pub const HOOK_UNIX_CONNECT: u8 = 6;
 
 // Decision constants for EnforcementEvent.
 pub const DECISION_ALLOW: u8 = 0;
@@ -278,7 +285,7 @@ mod tests {
 
     #[test]
     fn enforcement_counters_size() {
-        assert_eq!(size_of::<EnforcementCounters>(), 24);
+        assert_eq!(size_of::<EnforcementCounters>(), 32);
     }
 
     #[test]
