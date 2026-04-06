@@ -64,18 +64,24 @@ impl ZoneRegistry {
 
     /// Register a zone from a loaded policy. Assigns a zone_id.
     /// Idempotent: if zone_name already exists, returns existing zone_id.
-    pub fn register_zone(&mut self, zone_name: &str) -> u32 {
+    /// Returns Err if zone ID space is exhausted (u32::MAX zones registered).
+    pub fn register_zone(&mut self, zone_name: &str) -> anyhow::Result<u32> {
         if let Some(entry) = self.zones.get(zone_name) {
-            return entry.zone_id;
+            return Ok(entry.zone_id);
+        }
+        // Zone ID 0 is reserved for ZONE_ID_HOST. Reject if we've wrapped.
+        if self.next_id == 0 {
+            anyhow::bail!("zone ID space exhausted");
         }
         let zone_id = self.next_id;
-        self.next_id += 1;
+        // Advance. If this was u32::MAX, next call will see next_id=0 and fail.
+        self.next_id = self.next_id.wrapping_add(1);
         self.zones.insert(zone_name.to_string(), ZoneEntry {
             zone_id,
             state: ZoneState::Pending,
             refcount: 0,
         });
-        zone_id
+        Ok(zone_id)
     }
 
     /// Record that a container has joined a zone.
@@ -181,30 +187,30 @@ mod tests {
     #[test]
     fn register_zone_assigns_nonzero_id() {
         let mut reg = ZoneRegistry::new();
-        let id = reg.register_zone("frontend");
+        let id = reg.register_zone("frontend").unwrap();
         assert!(id > 0, "zone_id 0 is reserved for ZONE_ID_HOST");
     }
 
     #[test]
     fn register_zone_is_idempotent() {
         let mut reg = ZoneRegistry::new();
-        let id1 = reg.register_zone("frontend");
-        let id2 = reg.register_zone("frontend");
+        let id1 = reg.register_zone("frontend").unwrap();
+        let id2 = reg.register_zone("frontend").unwrap();
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn different_zones_get_different_ids() {
         let mut reg = ZoneRegistry::new();
-        let id1 = reg.register_zone("frontend");
-        let id2 = reg.register_zone("database");
+        let id1 = reg.register_zone("frontend").unwrap();
+        let id2 = reg.register_zone("database").unwrap();
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn add_container_transitions_to_active() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        reg.register_zone("frontend").unwrap();
 
         let zone_id = reg.add_container("c1", "frontend", 1000).unwrap();
         assert!(zone_id > 0);
@@ -221,7 +227,7 @@ mod tests {
     #[test]
     fn remove_container_transitions_to_pending() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        reg.register_zone("frontend").unwrap();
         reg.add_container("c1", "frontend", 1000).unwrap();
 
         let result = reg.remove_container("c1", None);
@@ -235,7 +241,7 @@ mod tests {
     #[test]
     fn remove_container_with_multiple_keeps_active() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        reg.register_zone("frontend").unwrap();
         reg.add_container("c1", "frontend", 1000).unwrap();
         reg.add_container("c2", "frontend", 2000).unwrap();
 
@@ -248,7 +254,7 @@ mod tests {
     #[test]
     fn delete_before_start_is_noop() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        reg.register_zone("frontend").unwrap();
         let result = reg.remove_container("unknown-container", None);
         assert!(result.is_none());
     }
@@ -256,7 +262,7 @@ mod tests {
     #[test]
     fn reactivation_after_pending() {
         let mut reg = ZoneRegistry::new();
-        let id1 = reg.register_zone("frontend");
+        let id1 = reg.register_zone("frontend").unwrap();
         reg.add_container("c1", "frontend", 1000).unwrap();
         reg.remove_container("c1", None);
 
@@ -299,12 +305,24 @@ mod tests {
     #[test]
     fn remove_with_cgroup_hint() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        reg.register_zone("frontend").unwrap();
         reg.add_container("c1", "frontend", 1000).unwrap();
 
         // Remove by cgroup_id hint when container_id is unknown.
         let result = reg.remove_container("wrong-id", Some(1000));
         assert!(result.is_some());
         assert_eq!(reg.refcount("frontend"), 0);
+    }
+
+    #[test]
+    fn register_zone_allows_u32_max_then_exhausts() {
+        let mut reg = ZoneRegistry::new();
+        reg.next_id = u32::MAX;
+        // u32::MAX is the last valid ID — should succeed.
+        let id = reg.register_zone("last-zone").unwrap();
+        assert_eq!(id, u32::MAX);
+        // next_id has wrapped to 0 — next registration must fail.
+        let result = reg.register_zone("one-too-many");
+        assert!(result.is_err());
     }
 }

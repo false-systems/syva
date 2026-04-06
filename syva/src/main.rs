@@ -102,7 +102,7 @@ async fn cmd_run(
     // Register all zones from policy files. Every zone gets an ID and its
     // BPF maps configured, regardless of whether it has running containers.
     for (zone_name, policy) in &policies {
-        let zone_id = registry.register_zone(zone_name);
+        let zone_id = registry.register_zone(zone_name)?;
         mgr.set_zone_policy(zone_id, policy)?;
         tracing::info!(zone = zone_name.as_str(), zone_id, "registered zone from policy");
     }
