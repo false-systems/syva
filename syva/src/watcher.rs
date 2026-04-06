@@ -283,13 +283,17 @@ async fn handle_task_start(
         return;
     }
 
-    let _ = tx
+    if tx
         .send(WatcherEvent::Add(ZoneAssignment {
-            container_id,
+            container_id: container_id.clone(),
             zone_name,
             cgroup_id,
         }))
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::error!(container = container_id, "zone assignment channel closed — enforcement loop is dead");
+    }
 }
 
 async fn handle_task_delete(
@@ -301,12 +305,16 @@ async fn handle_task_delete(
         None => return,
     };
 
-    let _ = tx
+    if tx
         .send(WatcherEvent::Remove {
-            container_id,
+            container_id: container_id.clone(),
             cgroup_id: None,
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::error!(container = container_id, "zone assignment channel closed — enforcement loop is dead");
+    }
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
