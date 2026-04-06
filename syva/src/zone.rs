@@ -69,9 +69,13 @@ impl ZoneRegistry {
         if let Some(entry) = self.zones.get(zone_name) {
             return Ok(entry.zone_id);
         }
+        // Zone ID 0 is reserved for ZONE_ID_HOST. Reject if we've wrapped.
+        if self.next_id == 0 {
+            anyhow::bail!("zone ID space exhausted");
+        }
         let zone_id = self.next_id;
-        self.next_id = self.next_id.checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("zone ID space exhausted (u32::MAX zones registered)"))?;
+        // Advance. If this was u32::MAX, next call will see next_id=0 and fail.
+        self.next_id = self.next_id.wrapping_add(1);
         self.zones.insert(zone_name.to_string(), ZoneEntry {
             zone_id,
             state: ZoneState::Pending,
@@ -273,11 +277,14 @@ mod tests {
     }
 
     #[test]
-    fn register_zone_overflow_returns_error() {
+    fn register_zone_allows_u32_max_then_exhausts() {
         let mut reg = ZoneRegistry::new();
-        // Force next_id to near overflow.
         reg.next_id = u32::MAX;
-        let result = reg.register_zone("overflow-zone");
+        // u32::MAX is the last valid ID — should succeed.
+        let id = reg.register_zone("last-zone").unwrap();
+        assert_eq!(id, u32::MAX);
+        // next_id has wrapped to 0 — next registration must fail.
+        let result = reg.register_zone("one-too-many");
         assert!(result.is_err());
     }
 }
