@@ -22,10 +22,10 @@ mod cgroup_lock;
 static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
 #[map]
-static ZONE_POLICY: HashMap<u32, ZonePolicyKernel> = HashMap::with_max_entries(MAX_ZONES, 0);
+static ZONE_POLICY: Array<ZonePolicyKernel> = Array::with_max_entries(MAX_ZONES, 0);
 
 #[map]
-static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 0);
+static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 1); // BPF_F_NO_PREALLOC
 
 #[map]
 static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
@@ -38,7 +38,7 @@ static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
     PerCpuArray::with_max_entries(ENFORCEMENT_COUNTER_ENTRIES, 0);
 
 #[map]
-static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0); // 4MB
 
 #[inline(always)]
 fn lookup_caller_zone(ctx: &LsmContext) -> Option<ZoneInfoKernel> {
@@ -151,6 +151,18 @@ fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
     if let Some(mut entry) = unsafe { ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) } {
         entry.write(event);
         entry.submit(0);
+    } else {
+        // Ring buffer full — increment lost counter for this hook.
+        count_lost(hook);
+    }
+}
+
+/// Increment the lost event counter for a hook when ring buffer reserve fails.
+#[inline(always)]
+fn count_lost(hook: u8) {
+    if let Some(counters) = unsafe { ENFORCEMENT_COUNTERS.get_ptr_mut(hook as u32) } {
+        let c = unsafe { &mut *counters };
+        c.lost += 1;
     }
 }
 
