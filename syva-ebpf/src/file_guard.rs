@@ -5,7 +5,7 @@ use crate::{lookup_caller_zone, is_cross_zone_allowed, read_file_ino, maybe_run_
 use syva_ebpf_common::{ZONE_FLAG_GLOBAL, PROG_FILE_OPEN, HOOK_FILE_OPEN};
 
 pub fn file_open(ctx: &LsmContext) -> i32 {
-    unsafe { maybe_run_self_test() };
+    unsafe { maybe_run_self_test(ctx) };
 
     let (ret, is_error) = match try_file_open(ctx) {
         Ok(ret) => (ret, false),

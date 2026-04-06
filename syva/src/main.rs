@@ -173,6 +173,7 @@ async fn cmd_run(
     // Validate kernel struct offsets via the eBPF self-test.
     // Must run after attach — the self-test fires on file_open hook.
     mgr.verify_self_test().await?;
+    mgr.verify_inode_self_test().await?;
 
     // H8: Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
