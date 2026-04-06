@@ -167,6 +167,11 @@ async fn cmd_run(
         );
     }
 
+    // H8: Drop unnecessary capabilities. After BPF load and map population,
+    // we only need open file descriptors (already held by the Bpf struct).
+    // CAP_SYS_ADMIN is no longer needed — BPF map operations use existing FDs.
+    drop_unnecessary_capabilities();
+
     tracing::info!(
         zones = registry.zone_count(),
         containers = registry.container_count(),
@@ -363,4 +368,23 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Drop capabilities that are no longer needed after BPF programs are loaded
+/// and maps are populated. BPF map operations use already-open file descriptors.
+fn drop_unnecessary_capabilities() {
+    // Drop CAP_SYS_ADMIN from the bounding set. BPF map operations use
+    // already-open FDs — the kernel checks FD permissions, not process caps.
+    const CAPS_TO_DROP: &[(libc::c_int, &str)] = &[
+        (21, "CAP_SYS_ADMIN"),
+    ];
+
+    for &(cap, name) in CAPS_TO_DROP {
+        let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) };
+        if ret == 0 {
+            tracing::info!(capability = name, "dropped capability");
+        } else {
+            tracing::debug!(capability = name, "failed to drop capability (may not be in bounding set)");
+        }
+    }
 }
