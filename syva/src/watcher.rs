@@ -17,6 +17,15 @@ use tokio::sync::mpsc;
 /// Label key for zone assignment.
 const ANNOTATION_ZONE: &str = "syva.dev/zone";
 
+/// Validate that a container ID is safe for use in filesystem paths.
+/// Containerd uses 64-char hex strings (SHA256 digests). Reject anything
+/// that could cause path traversal or injection.
+fn is_valid_container_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-' || b == b'_')
+}
+
 /// A container's zone assignment.
 pub struct ZoneAssignment {
     pub container_id: String,
@@ -87,6 +96,10 @@ fn scan_cgroup_dir(
                 .and_then(|s| s.strip_suffix(".scope"))
                 .unwrap_or(&name)
                 .to_string();
+
+            if !is_valid_container_id(&container_id) {
+                continue;
+            }
 
             let cgroup_id = resolve_cgroup_id(&path);
             if cgroup_id == 0 {
@@ -247,6 +260,14 @@ async fn handle_task_start(
     };
     let container_id = start.container_id;
 
+    if !is_valid_container_id(&container_id) {
+        tracing::warn!(
+            container = container_id,
+            "rejecting container with invalid ID (possible path traversal)"
+        );
+        return;
+    }
+
     // Retry loop: OCI config.json may not exist immediately after task start.
     let mut zone_name = None;
     for attempt in 0..10 {
@@ -297,8 +318,8 @@ async fn handle_task_delete(
     tx: &mpsc::Sender<WatcherEvent>,
 ) {
     let container_id = match extract_container_id(event) {
-        Some(id) => id,
-        None => return,
+        Some(id) if is_valid_container_id(&id) => id,
+        _ => return,
     };
 
     let _ = tx
