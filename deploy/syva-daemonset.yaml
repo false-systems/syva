@@ -14,17 +14,36 @@ spec:
       labels:
         app: syva
     spec:
-      hostPID: true
-      hostNetwork: true
+      hostPID: true  # Required: resolve_cgroup_id_from_pid reads /proc/{pid}/cgroup
+      # hostNetwork removed: containerd socket is mounted as a volume, no TCP needed
       tolerations:
         - effect: NoSchedule
           operator: Exists
+      initContainers:
+        - name: cleanup-stale-bpf-pins
+          image: ghcr.io/false-systems/syva:latest
+          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva || true"]
+          volumeMounts:
+            - name: bpf
+              mountPath: /sys/fs/bpf
+          securityContext:
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
       containers:
         - name: syva
           image: ghcr.io/false-systems/syva:latest
           args:
             - --policy-dir
             - /etc/syva/policies
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
           securityContext:
             privileged: false
             readOnlyRootFilesystem: true
