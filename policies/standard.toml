@@ -1,8 +1,19 @@
+# Standard zone policy for Syva.
+#
+# Syva enforces: cross-zone file access (host_paths), cross-zone ptrace/signals,
+# cgroup escape, and allowed_zones communication.
+#
+# NOT enforced by Syva (declarative only — use runtime/seccomp/NetworkPolicy):
+#   - capabilities.allowed, resources.*, devices.allowed, syscalls.deny,
+#     network.allowed_egress, network.allowed_ingress
+
 [zone]
 name = "standard"
 type = "non-global"
 
 [capabilities]
+# NOTE: Parsed and written to BPF maps (caps_mask) but NOT checked by eBPF hooks.
+# Capability enforcement depends on your container runtime (containerd/runc).
 allowed = [
     "CAP_NET_BIND_SERVICE",
     "CAP_CHOWN",
@@ -15,6 +26,8 @@ allowed = [
 ]
 
 [resources]
+# NOTE: Resource limits are declarative only — not enforced by Syva.
+# Configure via cgroup controllers or Kubernetes resource limits.
 cpu_shares = 1024
 memory_limit = "4Gi"
 io_weight = 100
@@ -34,4 +47,6 @@ writable_paths = ["/data", "/tmp", "/var/log", "/var/run"]
 allowed = ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"]
 
 [syscalls]
+# NOTE: Syscall deny list is declarative only — not enforced by Syva.
+# Use a seccomp profile for actual syscall filtering.
 deny = ["mount", "umount2", "pivot_root", "kexec_load", "reboot"]
