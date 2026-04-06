@@ -109,7 +109,8 @@ async fn cmd_run(
 
     // Populate ZONE_ALLOWED_COMMS — strict bilateral symmetry.
     for (zone_name, policy) in &policies {
-        let src_id = registry.zone_id(zone_name).unwrap();
+        let src_id = registry.zone_id(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' not in registry after registration"))?;
         for allowed_name in &policy.network.allowed_zones {
             if let Some(dst_id) = registry.zone_id(allowed_name) {
                 let bilateral = policies
@@ -142,7 +143,8 @@ async fn cmd_run(
         if policy.filesystem.host_paths.is_empty() {
             continue;
         }
-        let zone_id = registry.zone_id(zone_name).unwrap();
+        let zone_id = registry.zone_id(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' not in registry for inode map"))?;
         match mgr.populate_inode_zone_map(zone_id, &policy.filesystem.host_paths) {
             Ok(n) if n > 0 => tracing::info!(zone = zone_name.as_str(), inodes = n, "inode map populated from host_paths"),
             Ok(_) => {}
