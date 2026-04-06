@@ -178,6 +178,18 @@ impl ZonePolicy {
             );
         }
 
+
+        // M5: Bound policy arrays to prevent one zone from exhausting BPF maps.
+        if self.filesystem.host_paths.len() > 1000 {
+            anyhow::bail!("zone {zone_name}: host_paths exceeds limit of 1000 entries");
+        }
+        if self.network.allowed_zones.len() > 100 {
+            anyhow::bail!("zone {zone_name}: allowed_zones exceeds limit of 100 entries");
+        }
+        if self.capabilities.allowed.len() > 41 {
+            anyhow::bail!("zone {zone_name}: capabilities.allowed exceeds maximum of 41 Linux capabilities");
+        }
+
         Ok(())
     }
 }

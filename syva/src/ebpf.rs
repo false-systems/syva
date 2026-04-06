@@ -364,31 +364,59 @@ impl EnforceEbpf {
     /// are only unique within a filesystem — different filesystems can share the
     /// same i_ino. This matches the kernel-side eBPF map definition. Changing to
     /// (dev, ino) would require updating the BPF map type and all kernel hooks.
+    /// Maximum recursion depth for directory scanning.
+    const INODE_SCAN_MAX_DEPTH: usize = 16;
+
+    /// Maximum inodes per zone to prevent one zone from starving others.
+    const INODE_SCAN_MAX_PER_ZONE: usize = (syva_ebpf_common::MAX_INODES / syva_ebpf_common::MAX_ZONES) as usize;
+
     pub fn populate_inode_zone_map(&mut self, zone_id: u32, paths: &[String]) -> anyhow::Result<usize> {
+        use std::collections::{HashSet, VecDeque};
+
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
             self.bpf.map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
 
         let mut count = 0usize;
+        let mut visited = HashSet::new();
+
         for path_str in paths {
-            let path = Path::new(path_str);
-            if !path.exists() {
-                continue;
-            }
-            if let Ok(meta) = fs::metadata(path) {
-                let ino = meta.ino();
-                map.insert(ino, zone_id, 0)?;
-                count += 1;
-            }
-            // Scan directory contents one level deep.
-            if path.is_dir() {
-                if let Ok(entries) = fs::read_dir(path) {
-                    for entry in entries.flatten() {
-                        if let Ok(meta) = entry.metadata() {
-                            let ino = meta.ino();
-                            map.insert(ino, zone_id, 0)?;
-                            count += 1;
+            // H6: Canonicalize to resolve symlinks and ../  traversal.
+            let canonical = match fs::canonicalize(path_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(path = path_str, %e, "host_path canonicalization failed — skipping");
+                    continue;
+                }
+            };
+
+            // H13: Recursive walk with depth limit and cycle detection.
+            let mut work: VecDeque<(PathBuf, usize)> = VecDeque::new();
+            work.push_back((canonical, 0));
+
+            while let Some((path, depth)) = work.pop_front() {
+                if count >= Self::INODE_SCAN_MAX_PER_ZONE {
+                    tracing::warn!(
+                        zone_id, max = Self::INODE_SCAN_MAX_PER_ZONE,
+                        "inode scan cap reached — remaining host_paths skipped"
+                    );
+                    break;
+                }
+
+                if let Ok(meta) = fs::symlink_metadata(&path) {
+                    let ino = meta.ino();
+                    if !visited.insert(ino) {
+                        continue; // Cycle detection.
+                    }
+                    map.insert(ino, zone_id, 0)?;
+                    count += 1;
+
+                    if meta.is_dir() && depth < Self::INODE_SCAN_MAX_DEPTH {
+                        if let Ok(entries) = fs::read_dir(&path) {
+                            for entry in entries.flatten() {
+                                work.push_back((entry.path(), depth + 1));
+                            }
                         }
                     }
                 }
