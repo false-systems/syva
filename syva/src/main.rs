@@ -79,12 +79,8 @@ async fn cmd_run(
 ) -> anyhow::Result<()> {
     tracing::info!("syva starting");
 
-    // Load eBPF programs.
+    // Load eBPF programs (but do NOT attach — no enforcement yet).
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
-    tracing::info!("eBPF programs loaded and attached");
-
-    // Validate kernel struct offsets via the eBPF self-test.
-    mgr.verify_self_test().await?;
 
     // Load zone policies from disk.
     let policies = policy::load_policies(&policy_dir)?;
@@ -167,10 +163,19 @@ async fn cmd_run(
         );
     }
 
+    // All zone membership is populated. Now attach eBPF hooks — this
+    // eliminates the startup race window (C2). Hooks become active only
+    // after ZONE_MEMBERSHIP, ZONE_POLICY, and INODE_ZONE_MAP are filled.
+    mgr.attach_programs()?;
+
+    // Validate kernel struct offsets via the eBPF self-test.
+    // Must run after attach — the self-test fires on file_open hook.
+    mgr.verify_self_test().await?;
+
     tracing::info!(
         zones = registry.zone_count(),
         containers = registry.container_count(),
-        "startup complete"
+        "startup complete — enforcement active"
     );
 
     // Start live containerd event watcher.
