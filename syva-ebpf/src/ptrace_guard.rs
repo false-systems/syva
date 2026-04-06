@@ -25,6 +25,10 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
 
+    // Read ptrace mode for granular policy and forensic logging.
+    // arg(1) = unsigned int mode (PTRACE_MODE_READ=0x4, PTRACE_MODE_ATTACH=0x1)
+    let mode: u64 = unsafe { ctx.arg(1) };
+
     // Resolve target zone FIRST — before any policy check.
     let target_ptr: u64 = unsafe { ctx.arg(0) };
     if target_ptr == 0 { return Ok(0); }
@@ -33,7 +37,7 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
         Some(info) => info,
         None => {
             // Target is a host process — deny from any zoned caller.
-            emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, ZONE_ID_HOST, 0);
+            emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, ZONE_ID_HOST, mode);
             return Ok(-1);
         }
     };
@@ -46,15 +50,13 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
             }
         }
         // Same zone but ptrace not permitted by policy.
-        emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, target.zone_id, 0);
+        emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, target.zone_id, mode);
         return Ok(-1);
     }
 
-    // Cross-zone: check ZONE_ALLOWED_COMMS (ptrace flag is irrelevant here).
-    if is_cross_zone_allowed(caller.zone_id, target.zone_id) {
-        return Ok(0);
-    }
-
-    emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, target.zone_id, 0);
+    // Cross-zone: always deny regardless of mode or ZONE_ALLOWED_COMMS.
+    // ZONE_ALLOWED_COMMS grants file/signal access, NOT ptrace attach.
+    // Cross-zone ptrace is a privilege escalation vector.
+    emit_deny_event(HOOK_PTRACE_CHECK, caller.zone_id, target.zone_id, mode);
     Ok(-1)
 }

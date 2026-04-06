@@ -26,6 +26,8 @@ const LSM_PROGRAMS: &[&str] = &[
     "syva_ptrace_check",
     "syva_task_kill",
     "syva_cgroup_attach",
+    "syva_mmap_file",
+    "syva_unix_connect",
 ];
 
 const MAP_NAMES: &[&str] = &[
@@ -90,20 +92,36 @@ impl EnforceEbpf {
             .load(&obj_data)
             .map_err(|e| anyhow::anyhow!("failed to load eBPF: {e} — check CONFIG_BPF_LSM=y and lsm=bpf"))?;
 
-        // Attach all LSM programs.
+        // Phase 1: Load all LSM programs (validates with kernel verifier).
+        // Programs are NOT attached yet — no enforcement until attach_programs().
         for &name in LSM_PROGRAMS {
             let prog: &mut Lsm = bpf
                 .program_mut(name)
                 .ok_or_else(|| anyhow::anyhow!("LSM program '{name}' not found"))?
                 .try_into()?;
             prog.load(name, &btf)?;
+            tracing::debug!(program = name, "loaded LSM program");
+        }
+
+        tracing::info!(programs = LSM_PROGRAMS.len(), "eBPF programs loaded (not yet attached)");
+
+        Ok(Self { bpf, pin_path })
+    }
+
+    /// Attach all loaded LSM programs. Call this AFTER zone membership is
+    /// populated to eliminate the startup race window where hooks are active
+    /// but ZONE_MEMBERSHIP is empty (all containers would appear unzoned).
+    pub fn attach_programs(&mut self) -> anyhow::Result<()> {
+        for &name in LSM_PROGRAMS {
+            let prog: &mut Lsm = self.bpf
+                .program_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("LSM program '{name}' not found"))?
+                .try_into()?;
             prog.attach()?;
             tracing::info!(program = name, "attached LSM program");
         }
-
-        tracing::info!(programs = LSM_PROGRAMS.len(), "eBPF programs loaded");
-
-        Ok(Self { bpf, pin_path })
+        tracing::info!(programs = LSM_PROGRAMS.len(), "all LSM programs attached — enforcement active");
+        Ok(())
     }
 
     /// Take ownership of the ring buffer for event streaming.
