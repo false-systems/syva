@@ -34,6 +34,8 @@ fn try_cgroup_attach(ctx: &LsmContext) -> Result<i32, i64> {
 
     match dst_zone {
         Some(dst_info) => {
+            // Same-zone cgroup migration is permitted by design (L1).
+            // Containers within the same zone share resource boundaries.
             if caller.zone_id == dst_info.zone_id {
                 Ok(0)
             } else {

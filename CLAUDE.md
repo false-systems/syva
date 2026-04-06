@@ -108,6 +108,32 @@ Syva refuses to load if BPF maps are already pinned at `/sys/fs/bpf/syva/`. Only
 - **INODE_ZONE_MAP inode-only key**: Keyed by `i_ino` alone (not `dev,ino`). Cross-filesystem deployments with overlapping inode numbers could produce false matches. Documented limitation in `ebpf.rs`.
 - **Host path scanning depth**: `populate_inode_zone_map()` scans host_paths one level deep into directories. Subdirectories beyond that are not enumerated.
 
+### Threat Model: Unzoned Containers
+
+Containers without a `syva.dev/zone` annotation are **not in `ZONE_MEMBERSHIP`** and are invisible to all hooks. This means:
+- Unzoned processes can access files in `INODE_ZONE_MAP` (file_open/exec hooks skip unzoned callers).
+- Zoned callers ARE blocked from ptrace/signalling host processes (target not in any zone → deny).
+- Unzoned processes can ptrace/signal zoned processes freely (they bypass all enforcement).
+
+This is by design — Syva enforces boundaries between zones, not between zoned and unzoned workloads. If your threat model requires protecting zoned resources from unzoned processes, all containers must be labelled.
+
+### Known Limitation: /proc and /sys Access
+
+Virtual filesystem inodes (`/proc`, `/sys`) are not in `INODE_ZONE_MAP`. A zoned process can read `/proc/<pid>/mem`, `/proc/<pid>/maps`, or `/proc/<pid>/environ` of processes in other zones. The `file_open` hook fires but the inode lookup returns `None` (not mapped), so access is allowed. `/proc` access control requires task-to-inode resolution in BPF, which is architecturally different from inode-based enforcement. Deferred to a future `/proc`-specific LSM hook.
+
+### What Syva Enforces vs Declares
+
+| Policy field | Kernel enforcement |
+|---|---|
+| `network.allowed_zones` | **Enforced** — cross-zone ptrace/signal/file/exec blocked |
+| `filesystem.host_paths` | **Enforced** — inodes registered in INODE_ZONE_MAP |
+| `POLICY_FLAG_ALLOW_PTRACE` | **Enforced** — intra-zone ptrace gated |
+| `capabilities.allowed` | Declarative — caps_mask written but not checked by hooks |
+| `resources.*` | Declarative — use cgroup controllers |
+| `devices.allowed` | Declarative — use device cgroup |
+| `syscalls.deny` | Declarative — use seccomp |
+| `network.allowed_egress/ingress` | Declarative — use NetworkPolicy |
+
 ## Conventions
 
 - Policies are TOML. See `policies/standard.toml` for the canonical example.

@@ -119,6 +119,7 @@ impl EnforceEbpf {
         zone_id: u32,
         zone_type: ZoneType,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(cgroup_id != 0, "cgroup_id 0 is invalid (reserved for host)");
         let mut flags = 0u32;
         match zone_type {
             ZoneType::Global => flags |= ZONE_FLAG_GLOBAL,

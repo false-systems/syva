@@ -229,7 +229,9 @@ async fn cmd_run(
                         if let Some((zone_id, resolved_cgroup, went_to_pending)) =
                             registry.remove_container(&container_id, cgroup_id)
                         {
-                            let _ = mgr.remove_zone_member(resolved_cgroup);
+                            if let Err(e) = mgr.remove_zone_member(resolved_cgroup) {
+                                tracing::warn!(cgroup_id = resolved_cgroup, %e, "failed to remove zone member from BPF map");
+                            }
                             if went_to_pending {
                                 tracing::info!(zone_id, "zone has no active containers (Pending)");
                             }
