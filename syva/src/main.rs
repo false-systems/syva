@@ -185,12 +185,44 @@ async fn cmd_run(
 
     tracing::info!("syva running — watching for container events");
 
+    // Periodic error monitoring: check enforcement counters for kernel read errors.
+    let mut error_check_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    error_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_errors: Vec<u64> = Vec::new();
+
     // Process live events until shutdown.
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 break;
+            }
+            _ = error_check_interval.tick() => {
+                match mgr.read_counters() {
+                    Ok(counters) => {
+                        // Grow last_errors to match counter count on first read.
+                        if last_errors.len() < counters.len() {
+                            last_errors.resize(counters.len(), 0);
+                        }
+                        for (idx, (_, totals)) in counters.iter().enumerate() {
+                            if totals.error > last_errors[idx] {
+                                let new_errors = totals.error - last_errors[idx];
+                                let hook = events::HOOK_NAMES.get(idx).unwrap_or(&"unknown");
+                                tracing::warn!(
+                                    hook,
+                                    new_errors,
+                                    total_errors = totals.error,
+                                    "enforcement errors detected — kernel struct reads \
+                                     failing (fail-open). Run `syva status` to inspect."
+                                );
+                            }
+                            last_errors[idx] = totals.error;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(%e, "failed to read enforcement counters");
+                    }
+                }
             }
             event = rx.recv() => {
                 match event {
@@ -273,21 +305,38 @@ async fn cmd_status() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?,
         ) {
             Ok(map) => {
-                let hook_names = ["file_open", "bprm_check", "ptrace_check", "task_kill", "cgroup_attach"];
                 println!("  hooks:");
-                for (idx, &name) in hook_names.iter().enumerate() {
-                    if let Ok(per_cpu) = map.get(&(idx as u32), 0) {
-                        let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0 };
-                        for cpu_val in per_cpu.iter() {
-                            total.allow += cpu_val.allow;
-                            total.deny += cpu_val.deny;
-                            total.error += cpu_val.error;
+                let mut total_errors: u64 = 0;
+                let mut had_read_error = false;
+                for (idx, hook) in events::HOOK_NAMES.iter().enumerate() {
+                    match map.get(&(idx as u32), 0) {
+                        Ok(per_cpu) => {
+                            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0 };
+                            for cpu_val in per_cpu.iter() {
+                                total.allow += cpu_val.allow;
+                                total.deny += cpu_val.deny;
+                                total.error += cpu_val.error;
+                            }
+                            total_errors += total.error;
+                            let flag = if total.error > 0 { " ⚠" } else { "" };
+                            println!(
+                                "    {:<16} allow={:<8} deny={:<8} error={}{}",
+                                hook, total.allow, total.deny, total.error, flag
+                            );
                         }
-                        println!(
-                            "    {:<16} allow={:<8} deny={:<8} error={}",
-                            name, total.allow, total.deny, total.error
-                        );
+                        Err(_) => { had_read_error = true; }
                     }
+                }
+
+                if had_read_error {
+                    println!();
+                    println!("  counters: some reads failed");
+                } else if total_errors > 0 {
+                    println!();
+                    println!("  WARNING: {} total enforcement errors detected.", total_errors);
+                    println!("  Errors cause fail-open behavior — operations are ALLOWED");
+                    println!("  when kernel struct reads fail. This may indicate wrong");
+                    println!("  kernel struct offsets. Install pahole and restart syva.");
                 }
             }
             Err(e) => {
