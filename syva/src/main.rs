@@ -85,6 +85,7 @@ async fn cmd_run(
 
     // Validate kernel struct offsets via the eBPF self-test.
     mgr.verify_self_test().await?;
+    mgr.verify_inode_self_test().await?;
 
     // Load zone policies from disk.
     let policies = policy::load_policies(&policy_dir)?;
