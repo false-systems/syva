@@ -17,6 +17,8 @@ mod exec_guard;
 mod ptrace_guard;
 mod signal_guard;
 mod cgroup_lock;
+mod mmap_guard;
+mod unix_guard;
 
 #[map]
 static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::with_max_entries(MAX_CGROUPS, 0);
@@ -257,6 +259,16 @@ pub fn syva_task_kill(ctx: LsmContext) -> i32 {
 #[lsm(hook = "cgroup_attach_task")]
 pub fn syva_cgroup_attach(ctx: LsmContext) -> i32 {
     cgroup_lock::cgroup_attach_task(&ctx)
+}
+
+#[lsm(hook = "mmap_file")]
+pub fn syva_mmap_file(ctx: LsmContext) -> i32 {
+    mmap_guard::mmap_file(&ctx)
+}
+
+#[lsm(hook = "unix_stream_connect")]
+pub fn syva_unix_connect(ctx: LsmContext) -> i32 {
+    unix_guard::unix_stream_connect(&ctx)
 }
 
 #[panic_handler]
