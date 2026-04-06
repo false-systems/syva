@@ -14,8 +14,7 @@ use std::time::Duration;
 use crate::types::ZonePolicy;
 use tokio::sync::mpsc;
 
-/// Label key for zone assignment.
-const ANNOTATION_ZONE: &str = "syva.dev/zone";
+use crate::mapper::LABEL_ZONE;
 
 /// Validate that a container ID is safe for use in filesystem paths.
 /// Containerd uses 64-char hex strings (SHA256 digests). Reject anything
@@ -148,7 +147,7 @@ fn read_container_zone_label(container_id: &str) -> Option<String> {
             if let Ok(spec) = serde_json::from_str::<serde_json::Value>(&data) {
                 if let Some(zone) = spec
                     .get("annotations")
-                    .and_then(|a| a.get(ANNOTATION_ZONE))
+                    .and_then(|a| a.get(LABEL_ZONE))
                     .and_then(|v| v.as_str())
                 {
                     return Some(zone.to_string());
