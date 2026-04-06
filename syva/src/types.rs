@@ -140,6 +140,30 @@ impl ZonePolicy {
             );
         }
 
+        // Warn about policy fields that are parsed but NOT enforced by eBPF hooks.
+        // Operators may expect these to have kernel-level enforcement.
+        if !self.syscalls.deny.is_empty() {
+            tracing::info!(
+                zone = zone_name,
+                "syscalls.deny is configured but NOT enforced by Syva — \
+                 use a seccomp profile for syscall filtering"
+            );
+        }
+        if !self.devices.allowed.is_empty() {
+            tracing::info!(
+                zone = zone_name,
+                "devices.allowed is configured but NOT enforced by Syva — \
+                 use device cgroup controller for device access control"
+            );
+        }
+        if !self.network.allowed_egress.is_empty() || !self.network.allowed_ingress.is_empty() {
+            tracing::info!(
+                zone = zone_name,
+                "network egress/ingress rules are configured but NOT enforced by Syva — \
+                 use NetworkPolicy or iptables for network filtering"
+            );
+        }
+
         Ok(())
     }
 }
