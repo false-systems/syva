@@ -180,13 +180,14 @@ pub enum WatcherEvent {
 /// Watch containerd for container start/stop events.
 pub async fn watch_containerd_events(
     socket_path: String,
-    policies: Arc<HashMap<String, ZonePolicy>>,
+    policies_rx: tokio::sync::watch::Receiver<Arc<HashMap<String, ZonePolicy>>>,
     tx: mpsc::Sender<WatcherEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
 
     loop {
+        let policies = policies_rx.borrow().clone();
         match try_watch(&socket_path, &policies, &tx).await {
             Ok(()) => {
                 tracing::warn!("containerd event stream ended — reconnecting");

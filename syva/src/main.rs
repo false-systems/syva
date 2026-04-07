@@ -13,6 +13,7 @@ mod ebpf;
 mod events;
 mod mapper;
 mod policy;
+mod reload;
 pub mod types;
 mod watcher;
 mod zone;
@@ -186,13 +187,13 @@ async fn cmd_run(
         "startup complete — enforcement active"
     );
 
-    // Start live containerd event watcher.
+    // Start live containerd event watcher with shared policy reference.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<watcher::WatcherEvent>(100);
-    let policies_arc = Arc::new(policies.clone());
+    let (policy_tx, policy_rx) = tokio::sync::watch::channel(Arc::new(policies.clone()));
 
     tokio::spawn(watcher::watch_containerd_events(
         containerd_sock,
-        policies_arc.clone(),
+        policy_rx,
         tx,
     ));
 
@@ -203,12 +204,29 @@ async fn cmd_run(
     error_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_errors: Vec<u64> = Vec::new();
 
+    // Policy hot-reload: poll for file changes every 5 seconds.
+    let mut reload_watcher = reload::PolicyDirWatcher::new(policy_dir.clone());
+    let mut reload_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    reload_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // Process live events until shutdown.
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 break;
+            }
+            _ = reload_interval.tick() => {
+                if reload_watcher.check_changed() {
+                    match reload::try_reload(&policy_dir, &mut registry, &mut mgr, &mut policies) {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(changes = n, "policy reload complete");
+                            let _ = policy_tx.send(Arc::new(policies.clone()));
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!(%e, "policy reload failed — keeping current policies"),
+                    }
+                }
             }
             _ = error_check_interval.tick() => {
                 match mgr.read_counters() {
@@ -271,14 +289,23 @@ async fn cmd_run(
                     }
                     Some(watcher::WatcherEvent::Remove { container_id, cgroup_id }) => {
                         // Registry handles lookup, refcount, and state transition.
-                        if let Some((zone_id, resolved_cgroup, went_to_pending)) =
+                        if let Some((zone_id, resolved_cgroup, transition)) =
                             registry.remove_container(&container_id, cgroup_id)
                         {
                             if let Err(e) = mgr.remove_zone_member(resolved_cgroup) {
                                 tracing::warn!(cgroup_id = resolved_cgroup, %e, "failed to remove zone member from BPF map");
                             }
-                            if went_to_pending {
-                                tracing::info!(zone_id, "zone has no active containers (Pending)");
+                            match transition {
+                                zone::ZoneTransition::WentToPending => {
+                                    tracing::info!(zone_id, "zone has no active containers (Pending)");
+                                }
+                                zone::ZoneTransition::DrainingComplete => {
+                                    tracing::info!(zone_id, "draining zone emptied — cleaning up BPF maps");
+                                    let _ = mgr.remove_zone_policy(zone_id);
+                                    let _ = mgr.remove_zone_comms(zone_id);
+                                    let _ = mgr.remove_zone_inodes(zone_id);
+                                }
+                                zone::ZoneTransition::StillActive => {}
                             }
                         }
                         tracing::info!(container = container_id, "live: container removed");
