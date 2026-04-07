@@ -84,7 +84,7 @@ async fn cmd_run(
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
 
     // Load zone policies from disk.
-    let policies = policy::load_policies(&policy_dir)?;
+    let mut policies = policy::load_policies(&policy_dir)?;
     tracing::info!(count = policies.len(), dir = %policy_dir.display(), "loaded zone policies");
 
     // Start the event reader (ring buffer → logs).
@@ -304,6 +304,11 @@ async fn cmd_run(
                                     let _ = mgr.remove_zone_policy(zone_id);
                                     let _ = mgr.remove_zone_comms(zone_id);
                                     let _ = mgr.remove_zone_inodes(zone_id);
+                                    // Remove from registry so the zone can be
+                                    // re-added cleanly if its policy reappears.
+                                    if let Err(e) = registry.unregister_zone_by_id(zone_id) {
+                                        tracing::warn!(zone_id, %e, "failed to unregister drained zone");
+                                    }
                                 }
                                 zone::ZoneTransition::StillActive => {}
                             }

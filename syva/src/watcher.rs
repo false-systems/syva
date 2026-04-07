@@ -187,8 +187,7 @@ pub async fn watch_containerd_events(
     let max_backoff = Duration::from_secs(30);
 
     loop {
-        let policies = policies_rx.borrow().clone();
-        match try_watch(&socket_path, &policies, &tx).await {
+        match try_watch(&socket_path, &policies_rx, &tx).await {
             Ok(()) => {
                 tracing::warn!("containerd event stream ended — reconnecting");
                 backoff = Duration::from_secs(1);
@@ -208,7 +207,7 @@ pub async fn watch_containerd_events(
 
 async fn try_watch(
     socket_path: &str,
-    policies: &HashMap<String, ZonePolicy>,
+    policies_rx: &tokio::sync::watch::Receiver<Arc<HashMap<String, ZonePolicy>>>,
     tx: &mpsc::Sender<WatcherEvent>,
 ) -> anyhow::Result<()> {
     use containerd_client::{connect, services::v1::events_client::EventsClient};
@@ -238,7 +237,8 @@ async fn try_watch(
         };
 
         if topic == "/tasks/start" {
-            handle_task_start(event, policies, tx).await;
+            let policies = policies_rx.borrow().clone();
+            handle_task_start(event, &policies, tx).await;
         } else if topic == "/tasks/delete" {
             handle_task_delete(event, tx).await;
         }

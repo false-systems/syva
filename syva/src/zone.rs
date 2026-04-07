@@ -14,8 +14,8 @@
 //!   Enforcement continues. New containers rejected. BPF maps cleaned up
 //!   when the last container leaves.
 //!
-//! Zone IDs are stable — once assigned, the same name always maps to the
-//! same zone_id. IDs are never reused.
+//! Zone IDs are stable while a zone is registered. After `unregister_zone()`,
+//! a re-registration of the same name will allocate a new ID.
 
 use std::collections::HashMap;
 
@@ -189,6 +189,18 @@ impl ZoneRegistry {
         Ok(())
     }
 
+    /// Transition a Draining zone back to Pending so it accepts containers again.
+    /// Used when a removed policy reappears during hot-reload.
+    /// No-op if the zone is already Pending or Active.
+    pub fn revive_draining(&mut self, zone_name: &str) -> anyhow::Result<u32> {
+        let entry = self.zones.get_mut(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
+        if entry.state == ZoneState::Draining {
+            entry.state = if entry.refcount > 0 { ZoneState::Active } else { ZoneState::Pending };
+        }
+        Ok(entry.zone_id)
+    }
+
     /// Remove a zone entry entirely. Only valid for zones with refcount 0.
     /// Returns the zone_id that was removed (it will never be reused).
     pub fn unregister_zone(&mut self, zone_name: &str) -> anyhow::Result<u32> {
@@ -200,6 +212,18 @@ impl ZoneRegistry {
         let zone_id = entry.zone_id;
         self.zones.remove(zone_name);
         Ok(zone_id)
+    }
+
+    /// Remove a zone entry by ID. Reverse-lookup by scanning zones.
+    /// Only valid for zones with refcount 0.
+    pub fn unregister_zone_by_id(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let zone_name = self.zones.iter()
+            .find(|(_, e)| e.zone_id == zone_id)
+            .map(|(name, _)| name.clone());
+        match zone_name {
+            Some(name) => { self.unregister_zone(&name)?; Ok(()) }
+            None => anyhow::bail!("no zone with id {zone_id}"),
+        }
     }
 
     /// Look up zone_id by name.
@@ -402,6 +426,32 @@ mod tests {
         let removed_id = reg.unregister_zone("frontend").unwrap();
         assert_eq!(id, removed_id);
         assert!(reg.zone_id("frontend").is_none());
+    }
+
+    #[test]
+    fn revive_draining_allows_new_containers() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.add_container("c1", "frontend", 1000).unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        // Revive the draining zone — should transition to Active (has containers).
+        let id = reg.revive_draining("frontend").unwrap();
+        assert!(id > 0);
+
+        // Now new containers should be accepted.
+        reg.add_container("c2", "frontend", 2000).unwrap();
+        assert_eq!(reg.refcount("frontend"), 2);
+    }
+
+    #[test]
+    fn revive_draining_empty_goes_to_pending() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        reg.revive_draining("frontend").unwrap();
+        assert_eq!(reg.zones["frontend"].state, ZoneState::Pending);
     }
 
     #[test]

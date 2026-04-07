@@ -44,10 +44,13 @@ impl PolicyDirWatcher {
                 self.last_fingerprint = compute_fingerprint(&self.dir);
                 return true;
             }
-            return false;
+            // Symlink unchanged — still check fingerprint in case files were
+            // edited in place (e.g. `..data` exists but isn't a true ConfigMap).
+        } else {
+            self.last_symlink_target = None;
         }
 
-        // Fallback: compare file fingerprint (non-Kubernetes direct edits).
+        // Compare file fingerprint to detect direct edits.
         let fingerprint = compute_fingerprint(&self.dir);
         if fingerprint != self.last_fingerprint {
             self.last_fingerprint = fingerprint;
@@ -195,7 +198,11 @@ fn apply_addition(
     ebpf: &mut EnforceEbpf,
     all_policies: &HashMap<String, ZonePolicy>,
 ) -> anyhow::Result<()> {
+    // register_zone is idempotent — returns existing ID if already registered.
+    // If the zone was draining (policy removed then re-added), revive it so
+    // new containers are accepted again.
     let zone_id = registry.register_zone(zone_name)?;
+    registry.revive_draining(zone_name)?;
     ebpf.set_zone_policy(zone_id, policy)?;
 
     if !policy.filesystem.host_paths.is_empty() {
@@ -238,7 +245,10 @@ fn apply_modification(
 
     // Rebuild comms if allowed_zones changed.
     if old_policy.network.allowed_zones != new_policy.network.allowed_zones {
-        let _ = ebpf.remove_zone_comms(zone_id);
+        if let Err(e) = ebpf.remove_zone_comms(zone_id) {
+            tracing::error!(zone = zone_name, %e, "reload: failed to clear comms map before rebuild");
+            anyhow::bail!("reload: failed to clear comms map for zone '{zone_name}': {e}");
+        }
         for peer_name in &new_policy.network.allowed_zones {
             if let Some(peer_id) = registry.zone_id(peer_name) {
                 let bilateral = all_policies
@@ -246,7 +256,9 @@ fn apply_modification(
                     .map(|p| p.network.allowed_zones.contains(&zone_name.to_string()))
                     .unwrap_or(false);
                 if bilateral {
-                    let _ = ebpf.set_zone_allowed_comms(zone_id, peer_id);
+                    if let Err(e) = ebpf.set_zone_allowed_comms(zone_id, peer_id) {
+                        tracing::error!(zone = zone_name, peer = peer_name.as_str(), %e, "reload: failed to set comms");
+                    }
                 }
             }
         }
@@ -254,7 +266,10 @@ fn apply_modification(
 
     // Rebuild inodes if host_paths changed.
     if old_policy.filesystem.host_paths != new_policy.filesystem.host_paths {
-        let _ = ebpf.remove_zone_inodes(zone_id);
+        if let Err(e) = ebpf.remove_zone_inodes(zone_id) {
+            tracing::error!(zone = zone_name, %e, "reload: failed to clear inode map before rebuild");
+            anyhow::bail!("reload: failed to clear inode map for zone '{zone_name}': {e}");
+        }
         if !new_policy.filesystem.host_paths.is_empty() {
             match ebpf.populate_inode_zone_map(zone_id, &new_policy.filesystem.host_paths) {
                 Ok(n) => tracing::info!(zone = zone_name, inodes = n, "reload: inode map rebuilt"),
