@@ -1,18 +1,21 @@
 //! Zone lifecycle registry — the single source of truth for zone state.
 //!
-//! A zone moves through two states:
+//! A zone moves through three states:
 //!
 //!   Pending → Active → Pending (on last container leave)
+//!   Active → Draining → (cleanup at refcount=0)
 //!
 //! - **Pending**: policy loaded, zone_id assigned, BPF maps configured.
-//!   No containers yet. The zone is fully configured in the kernel,
-//!   waiting for containers. Re-activation is free.
+//!   No containers yet. Re-activation is free.
 //!
 //! - **Active**: one or more containers are members. refcount > 0.
 //!
-//! Policy-defined zones are never removed during the agent lifetime.
-//! Zone IDs are stable — once assigned, the same name always maps to the
-//! same zone_id.
+//! - **Draining**: policy removed from disk, but containers still running.
+//!   Enforcement continues. New containers rejected. BPF maps cleaned up
+//!   when the last container leaves.
+//!
+//! Zone IDs are stable while a zone is registered. After `unregister_zone()`,
+//! a re-registration of the same name will allocate a new ID.
 
 use std::collections::HashMap;
 
@@ -23,6 +26,20 @@ pub enum ZoneState {
     Pending,
     /// At least one container is a member.
     Active,
+    /// Policy removed from disk, containers still running.
+    /// Enforcement continues. New containers rejected.
+    Draining,
+}
+
+/// Result of a container removal — what happened to the zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneTransition {
+    /// Zone still has containers.
+    StillActive,
+    /// Last container left, zone returned to Pending (policy still exists).
+    WentToPending,
+    /// Last container left a draining zone — caller must clean up BPF maps.
+    DrainingComplete,
 }
 
 /// Per-zone metadata.
@@ -104,6 +121,10 @@ impl ZoneRegistry {
         let entry = self.zones.get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
 
+        if entry.state == ZoneState::Draining {
+            anyhow::bail!("zone '{zone_name}' is draining — cannot add new containers");
+        }
+
         entry.refcount += 1;
         entry.state = ZoneState::Active;
         let zone_id = entry.zone_id;
@@ -118,20 +139,18 @@ impl ZoneRegistry {
     }
 
     /// Record that a container has left.
-    /// Decrements refcount. If refcount hits 0: Active → Pending.
-    /// Returns Some((zone_id, cgroup_id, went_to_pending)) if the container was tracked.
+    /// Decrements refcount. Returns the zone transition that occurred.
     /// Returns None if the container_id is unknown (no-op for Delete-before-Start).
     pub fn remove_container(
         &mut self,
         container_id: &str,
         cgroup_id_hint: Option<u64>,
-    ) -> Option<(u32, u64, bool)> {
+    ) -> Option<(u32, u64, ZoneTransition)> {
         // Look up container info. If not found, try the cgroup_id hint.
         let (zone_name, cgroup_id) = if let Some(info) = self.container_to_info.remove(container_id) {
             info
         } else if let Some(cid) = cgroup_id_hint {
             if let Some((cont_id, zone_name)) = self.cgroup_to_info.remove(&cid) {
-                // Clean up the forward map too.
                 self.container_to_info.remove(&cont_id);
                 (zone_name, cid)
             } else {
@@ -146,12 +165,65 @@ impl ZoneRegistry {
         let entry = self.zones.get_mut(&zone_name)?;
         entry.refcount = entry.refcount.saturating_sub(1);
 
-        let went_to_pending = entry.refcount == 0;
-        if went_to_pending {
-            entry.state = ZoneState::Pending;
-        }
+        let transition = if entry.refcount == 0 {
+            if entry.state == ZoneState::Draining {
+                // Draining zone emptied — caller must clean BPF maps.
+                ZoneTransition::DrainingComplete
+            } else {
+                entry.state = ZoneState::Pending;
+                ZoneTransition::WentToPending
+            }
+        } else {
+            ZoneTransition::StillActive
+        };
 
-        Some((entry.zone_id, cgroup_id, went_to_pending))
+        Some((entry.zone_id, cgroup_id, transition))
+    }
+
+    /// Mark a zone as draining. Policy was removed but containers remain.
+    /// Returns Err if the zone is not registered.
+    pub fn mark_draining(&mut self, zone_name: &str) -> anyhow::Result<()> {
+        let entry = self.zones.get_mut(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
+        entry.state = ZoneState::Draining;
+        Ok(())
+    }
+
+    /// Transition a Draining zone back to Pending so it accepts containers again.
+    /// Used when a removed policy reappears during hot-reload.
+    /// No-op if the zone is already Pending or Active.
+    pub fn revive_draining(&mut self, zone_name: &str) -> anyhow::Result<u32> {
+        let entry = self.zones.get_mut(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
+        if entry.state == ZoneState::Draining {
+            entry.state = if entry.refcount > 0 { ZoneState::Active } else { ZoneState::Pending };
+        }
+        Ok(entry.zone_id)
+    }
+
+    /// Remove a zone entry entirely. Only valid for zones with refcount 0.
+    /// Returns the zone_id that was removed (it will never be reused).
+    pub fn unregister_zone(&mut self, zone_name: &str) -> anyhow::Result<u32> {
+        let entry = self.zones.get(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
+        if entry.refcount > 0 {
+            anyhow::bail!("zone '{zone_name}' still has {} active containers", entry.refcount);
+        }
+        let zone_id = entry.zone_id;
+        self.zones.remove(zone_name);
+        Ok(zone_id)
+    }
+
+    /// Remove a zone entry by ID. Reverse-lookup by scanning zones.
+    /// Only valid for zones with refcount 0.
+    pub fn unregister_zone_by_id(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let zone_name = self.zones.iter()
+            .find(|(_, e)| e.zone_id == zone_id)
+            .map(|(name, _)| name.clone());
+        match zone_name {
+            Some(name) => { self.unregister_zone(&name)?; Ok(()) }
+            None => anyhow::bail!("no zone with id {zone_id}"),
+        }
     }
 
     /// Look up zone_id by name.
@@ -232,8 +304,8 @@ mod tests {
 
         let result = reg.remove_container("c1", None);
         assert!(result.is_some());
-        let (_, _, went_to_pending) = result.unwrap();
-        assert!(went_to_pending);
+        let (_, _, transition) = result.unwrap();
+        assert_eq!(transition, ZoneTransition::WentToPending);
         assert_eq!(reg.zones["frontend"].state, ZoneState::Pending);
         assert_eq!(reg.refcount("frontend"), 0);
     }
@@ -245,8 +317,8 @@ mod tests {
         reg.add_container("c1", "frontend", 1000).unwrap();
         reg.add_container("c2", "frontend", 2000).unwrap();
 
-        let (_, _, went_to_pending) = reg.remove_container("c1", None).unwrap();
-        assert!(!went_to_pending);
+        let (_, _, transition) = reg.remove_container("c1", None).unwrap();
+        assert_eq!(transition, ZoneTransition::StillActive);
         assert_eq!(reg.zones["frontend"].state, ZoneState::Active);
         assert_eq!(reg.refcount("frontend"), 1);
     }
@@ -312,6 +384,74 @@ mod tests {
         let result = reg.remove_container("wrong-id", Some(1000));
         assert!(result.is_some());
         assert_eq!(reg.refcount("frontend"), 0);
+    }
+
+    #[test]
+    fn draining_zone_rejects_new_containers() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.add_container("c1", "frontend", 1000).unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        let result = reg.add_container("c2", "frontend", 2000);
+        assert!(result.is_err());
+        assert_eq!(reg.refcount("frontend"), 1);
+    }
+
+    #[test]
+    fn remove_container_from_draining_returns_draining_complete() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.add_container("c1", "frontend", 1000).unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        let (_, _, transition) = reg.remove_container("c1", None).unwrap();
+        assert_eq!(transition, ZoneTransition::DrainingComplete);
+    }
+
+    #[test]
+    fn unregister_zone_with_active_containers_fails() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.add_container("c1", "frontend", 1000).unwrap();
+
+        let result = reg.unregister_zone("frontend");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unregister_empty_zone_succeeds() {
+        let mut reg = ZoneRegistry::new();
+        let id = reg.register_zone("frontend").unwrap();
+        let removed_id = reg.unregister_zone("frontend").unwrap();
+        assert_eq!(id, removed_id);
+        assert!(reg.zone_id("frontend").is_none());
+    }
+
+    #[test]
+    fn revive_draining_allows_new_containers() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.add_container("c1", "frontend", 1000).unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        // Revive the draining zone — should transition to Active (has containers).
+        let id = reg.revive_draining("frontend").unwrap();
+        assert!(id > 0);
+
+        // Now new containers should be accepted.
+        reg.add_container("c2", "frontend", 2000).unwrap();
+        assert_eq!(reg.refcount("frontend"), 2);
+    }
+
+    #[test]
+    fn revive_draining_empty_goes_to_pending() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.mark_draining("frontend").unwrap();
+
+        reg.revive_draining("frontend").unwrap();
+        assert_eq!(reg.zones["frontend"].state, ZoneState::Pending);
     }
 
     #[test]

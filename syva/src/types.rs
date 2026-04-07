@@ -95,7 +95,7 @@ pub enum ZoneType {
 }
 
 /// Metadata section from policy TOML. Parsed but not used for enforcement.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ZoneMetadata {
     #[serde(default)]
     pub name: String,
@@ -104,7 +104,7 @@ pub struct ZoneMetadata {
 }
 
 /// Declarative policy defining what a zone can do.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ZonePolicy {
     /// Optional metadata section — parsed but not used for enforcement.
@@ -195,13 +195,13 @@ impl ZonePolicy {
 }
 
 /// Allow-list only. Nothing not listed here is permitted.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityPolicy {
     pub allowed: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourcePolicy {
     pub cpu_shares: u64,
@@ -229,7 +229,7 @@ pub enum NetworkMode {
     Host,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
     pub mode: NetworkMode,
@@ -249,7 +249,7 @@ impl Default for NetworkPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemPolicy {
     #[serde(default)]
@@ -276,13 +276,13 @@ impl Default for FilesystemPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DevicePolicy {
     pub allowed: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SyscallPolicy {
     pub deny: Vec<String>,
