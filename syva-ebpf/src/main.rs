@@ -8,7 +8,7 @@ use aya_ebpf::{
 };
 use syva_ebpf_common::{
     EnforcementCounters, EnforcementEvent, SelfTestResult, SelfTestInodeResult,
-    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY,
+    SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY,
     ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
 };
 
@@ -37,6 +37,9 @@ static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
 
 #[map]
 static SELF_TEST_INODE: Array<SelfTestInodeResult> = Array::with_max_entries(1, 0);
+
+#[map]
+static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::with_max_entries(1, 0);
 
 #[map]
 static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
@@ -71,6 +74,8 @@ static FILE_F_INODE_OFFSET: u64 = 32;
 static INODE_I_INO_OFFSET: u64 = 64;
 #[no_mangle]
 static BPRM_FILE_OFFSET: u64 = 168;
+#[no_mangle]
+static SOCK_CGRP_DATA_CGROUP_OFFSET: u64 = 696;
 
 mod offsets {
     #[inline(always)]
@@ -101,6 +106,10 @@ mod offsets {
     pub fn bprm_file() -> usize {
         unsafe { core::ptr::read_volatile(&super::BPRM_FILE_OFFSET) as usize }
     }
+    #[inline(always)]
+    pub fn sock_cgrp_data_cgroup() -> usize {
+        unsafe { core::ptr::read_volatile(&super::SOCK_CGRP_DATA_CGROUP_OFFSET) as usize }
+    }
 }
 
 #[inline(always)]
@@ -119,6 +128,18 @@ unsafe fn read_task_cgroup_id(task_ptr: u64) -> Result<u64, i64> {
 unsafe fn lookup_task_zone(task_ptr: u64) -> Option<ZoneInfoKernel> {
     let cgroup_id = read_task_cgroup_id(task_ptr).ok()?;
     ZONE_MEMBERSHIP.get(&cgroup_id).copied()
+}
+
+/// Resolve a sock pointer to its owning cgroup_id.
+/// Chain: sock → sk_cgrp_data.cgroup → kn → id (reuses existing cgroup offsets).
+#[inline(always)]
+unsafe fn read_sock_cgroup_id(sock_ptr: u64) -> Result<u64, i64> {
+    if sock_ptr == 0 { return Err(-1); }
+    let cgrp_ptr = read_kernel_u64(sock_ptr, offsets::sock_cgrp_data_cgroup())?;
+    if cgrp_ptr == 0 { return Err(-1); }
+    let kn_ptr = read_kernel_u64(cgrp_ptr, offsets::cgroup_kn())?;
+    if kn_ptr == 0 { return Err(-1); }
+    read_kernel_u64(kn_ptr, offsets::kernfs_node_id())
 }
 
 #[inline(always)]

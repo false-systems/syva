@@ -194,6 +194,7 @@ async fn cmd_run(
     // Must run after attach — the self-test fires on file_open hook.
     mgr.verify_self_test().await?;
     mgr.verify_inode_self_test().await?;
+    mgr.verify_unix_self_test().await?;
 
     // Health: BPF attached and self-tests passed — mark healthy.
     if let Ok(mut h) = health_state.write() {
