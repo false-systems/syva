@@ -12,6 +12,61 @@ No sidecar. No proxy. No runtime replacement. Deploy one agent per node, label y
 
 ---
 
+## AI Agent Isolation
+
+AI agents run code. They make tool calls, spawn subprocesses, read files, and interact with APIs — all inside containers that share a kernel with everything else on the node. Namespaces don't stop an agent container from reading another container's files through bind mounts, sending signals to adjacent processes, or attaching a debugger to a database running next door.
+
+Syva enforces these boundaries in the kernel. Put your agent workloads in one zone, your production services in another, and the kernel blocks every cross-zone `open()`, `exec()`, `mmap()`, `ptrace()`, and `kill()` — before it happens, not after.
+
+```
+ Node
+ ═══════════════════════════════════════════════════
+
+   Zone: "agent-sandbox"         Zone: "production"
+  ┌─────────────────┐           ┌─────────────────┐
+  │                 │           │                 │
+  │   ai-agent      │           │   api-server    │
+  │   code-runner   │           │   postgres      │
+  │                 │           │                 │
+  └─────────────────┘           └─────────────────┘
+
+          │                              │
+          │   open("/db/data") ──────X   │
+          │   exec("/usr/bin/pg_dump") X │
+          │   ptrace(api_pid) ───────X   │
+          │   kill(postgres_pid, 9) ──X  │
+          │                              │
+          X = denied by Syva in the kernel
+```
+
+An agent sandbox policy locks it down:
+
+```toml
+# agent-sandbox.toml
+
+[capabilities]
+allowed = ["CAP_NET_BIND_SERVICE"]
+
+[resources]
+memory_limit = "4Gi"
+pids_max = 256
+
+[network]
+mode = "bridged"
+allowed_zones = []    # no cross-zone communication
+
+[filesystem]
+writable_paths = ["/tmp", "/workspace"]
+host_paths = ["/srv/agent/workspace"]
+
+[syscalls]
+deny = ["mount", "umount2", "pivot_root", "ptrace"]
+```
+
+No `allowed_zones` means the agent zone is fully isolated — every cross-zone operation is denied at the kernel level. The agent can run arbitrary code inside its zone, but it cannot reach anything outside it.
+
+---
+
 ## What Syva Does
 
 Imagine two groups of containers on the same node:
