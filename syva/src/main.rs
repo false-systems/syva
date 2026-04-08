@@ -11,6 +11,7 @@
 
 mod ebpf;
 mod events;
+mod health;
 mod mapper;
 mod policy;
 mod reload;
@@ -41,6 +42,10 @@ struct Cli {
     /// Path to the containerd socket for live event watching.
     #[arg(long, default_value = "/run/containerd/containerd.sock")]
     containerd_sock: String,
+
+    /// Port for the health/metrics HTTP server.
+    #[arg(long, default_value = "9091")]
+    health_port: u16,
 }
 
 #[derive(Subcommand)]
@@ -68,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Events { follow }) => cmd_events(follow).await,
-        None => cmd_run(cli.policy_dir, cli.ebpf_obj, cli.containerd_sock).await,
+        None => cmd_run(cli.policy_dir, cli.ebpf_obj, cli.containerd_sock, cli.health_port).await,
     }
 }
 
@@ -77,8 +82,16 @@ async fn cmd_run(
     policy_dir: PathBuf,
     ebpf_obj: Option<PathBuf>,
     containerd_sock: String,
+    health_port: u16,
 ) -> anyhow::Result<()> {
     tracing::info!("syva starting");
+
+    // Health state — shared with the HTTP server. Starts as unhealthy
+    // (not attached, zero zones) and transitions as startup progresses.
+    let health_state = health::SharedHealth::new(tokio::sync::RwLock::new(
+        health::HealthState::new(),
+    ));
+    health::spawn_health_server(health_port, health_state.clone()).await?;
 
     // Load eBPF programs (but do NOT attach — no enforcement yet).
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
@@ -166,6 +179,13 @@ async fn cmd_run(
         );
     }
 
+    // Update health: zones loaded, containers enumerated.
+    {
+        let mut h = health_state.write().await;
+        h.zones_loaded = policies.len();
+        h.containers_active = registry.container_count();
+    }
+
     // All zone membership is populated. Now attach eBPF hooks — this
     // eliminates the startup race window (C2). Hooks become active only
     // after ZONE_MEMBERSHIP, ZONE_POLICY, and INODE_ZONE_MAP are filled.
@@ -175,6 +195,9 @@ async fn cmd_run(
     // Must run after attach — the self-test fires on file_open hook.
     mgr.verify_self_test().await?;
     mgr.verify_inode_self_test().await?;
+
+    // Health: BPF attached and self-tests passed — mark healthy.
+    health_state.write().await.attached = true;
 
     // H8: Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
@@ -222,6 +245,7 @@ async fn cmd_run(
                         Ok(n) if n > 0 => {
                             tracing::info!(changes = n, "policy reload complete");
                             let _ = policy_tx.send(Arc::new(policies.clone()));
+                            health_state.write().await.zones_loaded = policies.len();
                         }
                         Ok(_) => {}
                         Err(e) => tracing::error!(%e, "policy reload failed — keeping current policies"),
@@ -280,6 +304,7 @@ async fn cmd_run(
                             registry.remove_container(&assignment.container_id, None);
                             continue;
                         }
+                        health_state.write().await.containers_active = registry.container_count();
                         tracing::info!(
                             container = assignment.container_id,
                             zone = assignment.zone_name,
@@ -313,6 +338,7 @@ async fn cmd_run(
                                 zone::ZoneTransition::StillActive => {}
                             }
                         }
+                        health_state.write().await.containers_active = registry.container_count();
                         tracing::info!(container = container_id, "live: container removed");
                     }
                     None => {
