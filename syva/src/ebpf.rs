@@ -581,28 +581,25 @@ const OFFSET_DEFS: &[(&str, &str, &str, u64)] = &[
 ];
 
 fn resolve_offsets() -> Vec<(String, u64)> {
-    let pahole = ["/usr/bin/pahole", "/usr/local/bin/pahole"]
-        .iter()
-        .find(|p| Path::new(p).exists())
-        .map(|p| PathBuf::from(p));
-
-    let pahole = match pahole {
-        Some(p) => p,
-        None => {
-            tracing::warn!("pahole not found — using default struct offsets");
-            return OFFSET_DEFS
-                .iter()
-                .map(|&(_, _, name, default)| (name.to_string(), default))
-                .collect();
+    // Parse BTF directly — no pahole dependency.
+    let btf = match crate::btf::BtfData::from_sys_fs() {
+        Ok(b) => {
+            tracing::info!("loaded kernel BTF from /sys/kernel/btf/vmlinux");
+            Some(b)
+        }
+        Err(e) => {
+            tracing::warn!(%e, "failed to load kernel BTF — using default struct offsets");
+            None
         }
     };
 
     OFFSET_DEFS
         .iter()
         .map(|&(type_name, field_name, global_name, default)| {
-            let offset = pahole_field_offset(&pahole, type_name, field_name)
+            let offset = btf.as_ref()
+                .and_then(|b| b.struct_field_offset(type_name, field_name))
                 .map(|v| v as u64)
-                .unwrap_or_else(|_| {
+                .unwrap_or_else(|| {
                     tracing::debug!(r#type = type_name, field = field_name, "using default offset");
                     default
                 });
@@ -619,109 +616,4 @@ fn resolve_offsets() -> Vec<(String, u64)> {
         .collect()
 }
 
-fn pahole_field_offset(pahole: &Path, type_name: &str, field_name: &str) -> Result<usize, String> {
-    let output = std::process::Command::new(pahole)
-        .args(["-C", type_name, "/sys/kernel/btf/vmlinux"])
-        .output()
-        .map_err(|e| format!("failed to run pahole: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("pahole failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if !is_field_match(trimmed, field_name) {
-            continue;
-        }
-        if let Some(comment_start) = trimmed.rfind("/*") {
-            let comment = &trimmed[comment_start + 2..];
-            if let Some(comment_end) = comment.find("*/") {
-                let nums = &comment[..comment_end].trim();
-                if let Some(offset_str) = nums.split_whitespace().next() {
-                    if let Ok(offset) = offset_str.parse::<usize>() {
-                        return Ok(offset);
-                    }
-                }
-            }
-        }
-    }
-
-    Err(format!("field '{field_name}' not found in pahole output for '{type_name}'"))
-}
-
-/// Match a pahole output line against a field name using word boundaries.
-///
-/// The field name must be followed by whitespace, `;`, `[`, or end-of-string
-/// to avoid substring matches (e.g. "file" matching "file_lock").
-fn is_field_match(line: &str, field_name: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = line[start..].find(field_name) {
-        let abs_pos = start + pos;
-        let after = abs_pos + field_name.len();
-
-        // Check left boundary: must be preceded by whitespace or `*` (pointer decl)
-        // or be at the start of the line.
-        let left_ok = abs_pos == 0 || {
-            let prev = bytes[abs_pos - 1];
-            prev == b' ' || prev == b'\t' || prev == b'*'
-        };
-
-        // Check right boundary: must be followed by whitespace, `;`, `[`, or end.
-        let right_ok = after >= line.len() || {
-            let next = bytes[after];
-            next == b' ' || next == b'\t' || next == b';' || next == b'['
-        };
-
-        if left_ok && right_ok {
-            return true;
-        }
-        start = abs_pos + 1;
-    }
-    false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_field_match;
-
-    #[test]
-    fn field_match_exact() {
-        let line = "    struct file *              file;                 /* 168     8 */";
-        assert!(is_field_match(line, "file"));
-    }
-
-    #[test]
-    fn field_match_rejects_substring() {
-        let line = "    struct file_lock *          file_lock;            /* 200     8 */";
-        assert!(!is_field_match(line, "file"));
-    }
-
-    #[test]
-    fn field_match_with_array() {
-        let line = "    unsigned long               flags[2];             /* 32    16 */";
-        assert!(is_field_match(line, "flags"));
-    }
-
-    #[test]
-    fn field_match_rejects_similar_prefix() {
-        let line = "    struct file_ra_state        f_ra;                 /* 144    56 */";
-        assert!(!is_field_match(line, "file"));
-    }
-
-    #[test]
-    fn field_match_rejects_left_substring() {
-        // "id" should not match "pid" — left boundary check.
-        let line = "    pid_t                       pid;                  /* 100     4 */";
-        assert!(!is_field_match(line, "id"));
-    }
-
-    #[test]
-    fn field_match_accepts_pointer_field() {
-        // Field after `*` pointer declaration.
-        let line = "    struct cgroup *             dfl_cgrp;             /* 48     8 */";
-        assert!(is_field_match(line, "dfl_cgrp"));
-    }
-}
+// pahole and is_field_match removed — BTF parsing in btf.rs replaces them.
