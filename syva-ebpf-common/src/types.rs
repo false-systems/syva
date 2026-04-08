@@ -83,6 +83,15 @@ pub struct SelfTestInodeResult {
     pub offset_ino: u64,
 }
 
+/// Result of the unix socket offset self-test.
+/// Validates SOCK_CGRP_DATA_CGROUP_OFFSET produces a valid cgroup_id.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SelfTestUnixResult {
+    /// cgroup_id of the peer socket, derived via sock→sk_cgrp_data→cgroup→kn→id.
+    pub peer_cgroup_id: u64,
+}
+
 /// Per-hook enforcement decision counters.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -255,6 +264,8 @@ unsafe impl Sync for EnforcementEvent {}
 unsafe impl Send for EnforcementEvent {}
 unsafe impl Sync for SelfTestInodeResult {}
 unsafe impl Send for SelfTestInodeResult {}
+unsafe impl Sync for SelfTestUnixResult {}
+unsafe impl Send for SelfTestUnixResult {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ZoneInfoKernel {}
@@ -270,6 +281,8 @@ unsafe impl aya::Pod for EnforcementCounters {}
 unsafe impl aya::Pod for EnforcementEvent {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SelfTestInodeResult {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SelfTestUnixResult {}
 
 #[cfg(test)]
 mod tests {
@@ -304,6 +317,11 @@ mod tests {
     #[test]
     fn self_test_inode_result_size() {
         assert_eq!(size_of::<SelfTestInodeResult>(), 8);
+    }
+
+    #[test]
+    fn self_test_unix_result_size() {
+        assert_eq!(size_of::<SelfTestUnixResult>(), 8);
     }
 
     #[test]

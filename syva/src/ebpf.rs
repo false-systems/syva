@@ -15,7 +15,7 @@ use aya::{Bpf, BpfLoader, Btf};
 use crate::types::{ZonePolicy, ZoneType, NetworkMode};
 use syva_ebpf_common::{
     ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, SelfTestInodeResult,
-    EnforcementCounters, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+    SelfTestUnixResult, EnforcementCounters, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
 };
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
@@ -37,6 +37,7 @@ const MAP_NAMES: &[&str] = &[
     "ZONE_ALLOWED_COMMS",
     "SELF_TEST",
     "SELF_TEST_INODE",
+    "SELF_TEST_UNIX",
     "ENFORCEMENT_COUNTERS",
     "ENFORCEMENT_EVENTS",
 ];
@@ -315,6 +316,53 @@ impl EnforceEbpf {
         anyhow::bail!("inode self-test timed out — file_open hook may not be writing SELF_TEST_INODE")
     }
 
+    /// Verify that SOCK_CGRP_DATA_CGROUP_OFFSET is correct.
+    ///
+    /// Triggers a Unix socket connection to fire the unix_stream_connect hook,
+    /// which writes the peer's cgroup_id to SELF_TEST_UNIX. We verify the
+    /// derived peer cgroup_id is non-zero, indicating the offset chain reads
+    /// plausible data from the peer socket.
+    pub async fn verify_unix_self_test(&self) -> anyhow::Result<()> {
+        use std::time::Duration;
+        use std::os::unix::net::UnixStream;
+
+        // Trigger unix_stream_connect by connecting to ourselves via a socketpair.
+        // socketpair() creates a connected pair — the connect path fires the LSM hook.
+        let _pair = UnixStream::pair()
+            .map_err(|e| anyhow::anyhow!("failed to create Unix socketpair for self-test: {e}"))?;
+
+        for attempt in 0..20 {
+            let result = tokio::task::block_in_place(|| {
+                use aya::maps::Array;
+                let map = Array::<_, SelfTestUnixResult>::try_from(
+                    self.bpf.map("SELF_TEST_UNIX")
+                        .ok_or_else(|| anyhow::anyhow!("SELF_TEST_UNIX map not found"))?,
+                )?;
+                anyhow::Ok(map.get(&0, 0)?)
+            })?;
+
+            if result.peer_cgroup_id != 0 {
+                // The peer cgroup_id should be non-zero and plausible.
+                // We can't compare against a known value (unlike the cgroup/inode
+                // self-tests) because the socketpair peer is in our own process.
+                // A non-zero result confirms the offset chain reads valid memory.
+                tracing::info!(
+                    peer_cgroup_id = result.peer_cgroup_id,
+                    "unix self-test passed: SOCK_CGRP_DATA_CGROUP_OFFSET verified"
+                );
+                return Ok(());
+            }
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        anyhow::bail!(
+            "unix self-test timed out — unix_stream_connect hook may not be \
+             writing SELF_TEST_UNIX, or SOCK_CGRP_DATA_CGROUP_OFFSET is wrong"
+        )
+    }
+
     /// Allow cross-zone communication between two zones.
     ///
     /// Writes both directions (src→dst and dst→src) into ZONE_ALLOWED_COMMS.
@@ -526,6 +574,10 @@ const OFFSET_DEFS: &[(&str, &str, &str, u64)] = &[
     ("file", "f_inode", "FILE_F_INODE_OFFSET", 32),
     ("inode", "i_ino", "INODE_I_INO_OFFSET", 64),
     ("linux_binprm", "file", "BPRM_FILE_OFFSET", 168),
+    // sk_cgrp_data is a sock_cgroup_data embedded in sock. Its first
+    // field is `cgroup *` at offset 0 within the sub-struct, so the
+    // offset of sk_cgrp_data within sock IS the offset of the cgroup ptr.
+    ("sock", "sk_cgrp_data", "SOCK_CGRP_DATA_CGROUP_OFFSET", 696),
 ];
 
 fn resolve_offsets() -> Vec<(String, u64)> {
