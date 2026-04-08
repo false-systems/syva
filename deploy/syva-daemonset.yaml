@@ -42,8 +42,7 @@ spec:
               containerPort: 9091
               protocol: TCP
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: health
             initialDelaySeconds: 15
             periodSeconds: 30
@@ -54,6 +53,7 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: "50m"

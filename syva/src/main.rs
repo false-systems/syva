@@ -88,10 +88,10 @@ async fn cmd_run(
 
     // Health state — shared with the HTTP server. Starts as unhealthy
     // (not attached, zero zones) and transitions as startup progresses.
-    let health_state = health::SharedHealth::new(std::sync::RwLock::new(
+    let health_state = health::SharedHealth::new(tokio::sync::RwLock::new(
         health::HealthState::new(),
     ));
-    health::spawn_health_server(health_port, health_state.clone());
+    health::spawn_health_server(health_port, health_state.clone()).await?;
 
     // Load eBPF programs (but do NOT attach — no enforcement yet).
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
@@ -180,8 +180,9 @@ async fn cmd_run(
     }
 
     // Update health: zones loaded, containers enumerated.
-    if let Ok(mut h) = health_state.write() {
-        h.zones_loaded = registry.zone_count();
+    {
+        let mut h = health_state.write().await;
+        h.zones_loaded = policies.len();
         h.containers_active = registry.container_count();
     }
 
@@ -197,9 +198,7 @@ async fn cmd_run(
     mgr.verify_unix_self_test().await?;
 
     // Health: BPF attached and self-tests passed — mark healthy.
-    if let Ok(mut h) = health_state.write() {
-        h.attached = true;
-    }
+    health_state.write().await.attached = true;
 
     // H8: Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
@@ -247,9 +246,7 @@ async fn cmd_run(
                         Ok(n) if n > 0 => {
                             tracing::info!(changes = n, "policy reload complete");
                             let _ = policy_tx.send(Arc::new(policies.clone()));
-                            if let Ok(mut h) = health_state.write() {
-                                h.zones_loaded = registry.zone_count();
-                            }
+                            health_state.write().await.zones_loaded = policies.len();
                         }
                         Ok(_) => {}
                         Err(e) => tracing::error!(%e, "policy reload failed — keeping current policies"),
@@ -308,9 +305,7 @@ async fn cmd_run(
                             registry.remove_container(&assignment.container_id, None);
                             continue;
                         }
-                        if let Ok(mut h) = health_state.write() {
-                            h.containers_active = registry.container_count();
-                        }
+                        health_state.write().await.containers_active = registry.container_count();
                         tracing::info!(
                             container = assignment.container_id,
                             zone = assignment.zone_name,
@@ -344,9 +339,7 @@ async fn cmd_run(
                                 zone::ZoneTransition::StillActive => {}
                             }
                         }
-                        if let Ok(mut h) = health_state.write() {
-                            h.containers_active = registry.container_count();
-                        }
+                        health_state.write().await.containers_active = registry.container_count();
                         tracing::info!(container = container_id, "live: container removed");
                     }
                     None => {

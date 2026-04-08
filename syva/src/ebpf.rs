@@ -319,8 +319,9 @@ impl EnforceEbpf {
     /// Verify that SOCK_CGRP_DATA_CGROUP_OFFSET is correct.
     ///
     /// Triggers a Unix socket connection to fire the unix_stream_connect hook,
-    /// which writes the peer's cgroup_id to SELF_TEST_UNIX. We verify it
-    /// matches our own cgroup_id (since we're connecting to ourselves).
+    /// which writes the peer's cgroup_id to SELF_TEST_UNIX. We verify the
+    /// derived peer cgroup_id is non-zero, indicating the offset chain reads
+    /// plausible data from the peer socket.
     pub async fn verify_unix_self_test(&self) -> anyhow::Result<()> {
         use std::time::Duration;
         use std::os::unix::net::UnixStream;
