@@ -41,7 +41,7 @@ The `syva` binary and `syva-ebpf` programs do not compile on macOS — `aya` use
 
 ### Startup Sequence
 
-1. **Health server**: Axum HTTP on `--health-port` (default 9091). Spawned first — reports 503 until BPF attached.
+1. **Health server**: Axum HTTP on `--health-port` (default 9091). Spawned first — reports 503 until BPF attached and all self-tests pass.
 2. **Load**: `EnforceEbpf::load()` reads BTF from `/sys/kernel/btf/vmlinux`, resolves kernel struct offsets via direct BTF parsing (no pahole), injects them as globals into the eBPF object, loads 7 LSM programs via aya. Programs loaded but **not attached** — no enforcement yet. `Drop` impl cleans up pins on failure.
 3. **Policy-driven zone setup**: All policy files get zone IDs, `ZONE_POLICY` (Array), `ZONE_ALLOWED_COMMS`, and `INODE_ZONE_MAP` populated at startup — regardless of running containers.
 4. **Discover**: `enumerate_cgroups()` walks `/sys/fs/cgroup` (max depth 8) looking for containerd-managed cgroups, reads each container's OCI `config.json` for the `syva.dev/zone` annotation. Uses retry loop (10 attempts, linear backoff 50ms × attempt, ~2.25s total window). Container IDs validated against `is_valid_container_id()` (hex/dash/underscore only, max 128 chars).
@@ -93,7 +93,7 @@ Seven LSM hooks, all using `bpf_probe_read_kernel` for verifier-safe kernel memo
 | `cgroup_lock.rs` | `cgroup_attach_task` | Zone escape via cgroup manipulation. Intra-zone migration permitted by design. |
 | `unix_guard.rs` | `unix_stream_connect` | Cross-zone Unix socket connections. Resolves peer cgroup via `sock→sk_cgrp_data.cgroup→kn→id`. Runs unix self-test on first invocation. |
 
-Kernel struct offsets resolved from `/sys/kernel/btf/vmlinux` at startup via `btf.rs`, injected via `BpfLoader::set_global()`. Three self-test maps validate all offset chains before enforcement begins.
+Kernel struct offsets resolved from `/sys/kernel/btf/vmlinux` at startup via `btf.rs`, injected via `BpfLoader::set_global()`. Three self-test maps validate all offset chains immediately after attach and gate health/readiness — hooks are active during self-test, but `/healthz` returns 503 until they pass.
 
 ### BPF Maps
 
@@ -117,7 +117,7 @@ Axum HTTP server on `--health-port` (default 9091):
 - `GET /healthz` — 200 if BPF attached + zones loaded, 503 otherwise. JSON: `{status, attached, zones_loaded, containers_active, uptime_secs}`.
 - `GET /metrics` — Prometheus text format: `syva_up`, `syva_zones_loaded`, `syva_containers_active`, `syva_uptime_seconds`.
 
-DaemonSet has liveness probe (30s period, 15s initial delay) and readiness probe (10s period, 5s initial delay) on `/healthz`.
+DaemonSet has a liveness probe using TCP socket check on the health port (30s period, 15s initial delay) and a readiness probe using `GET /healthz` (10s period, 5s initial delay).
 
 ### Policy Hot-Reload
 
@@ -187,6 +187,6 @@ Virtual filesystem inodes (`/proc`, `/sys`) are not in `INODE_ZONE_MAP`. A zoned
 
 - Linux 6.1+ with `CONFIG_BPF_LSM=y`, `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y`
 - Boot parameter: `lsm=lockdown,capability,bpf`
-- BTF at `/sys/kernel/btf/vmlinux` (required — used for kernel struct offset resolution)
+- BTF at `/sys/kernel/btf/vmlinux` recommended — used for kernel struct offset resolution when available, otherwise built-in defaults for Linux 6.1+ are used (self-tests validate correctness either way)
 - containerd socket at `/run/containerd/containerd.sock` (configurable via `--containerd-sock`)
-- `pahole` is NOT required — offsets are resolved directly from BTF
+- `pahole` is NOT required — offsets are resolved from BTF or defaults, not from pahole
