@@ -9,6 +9,7 @@
 //!   syva status
 //!   syva events --follow
 
+mod btf;
 mod ebpf;
 mod events;
 mod mapper;
