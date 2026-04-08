@@ -136,6 +136,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_200_with_zero_zones() {
+        // Empty policy dir is valid — not a liveness failure.
         let state = shared_state(true, 0, 0);
         let response = healthz(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);

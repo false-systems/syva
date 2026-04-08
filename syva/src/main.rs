@@ -200,6 +200,9 @@ async fn cmd_run(
     // Health: BPF attached and self-tests passed — mark healthy.
     health_state.write().await.attached = true;
 
+    // Health: BPF attached and self-tests passed — mark healthy.
+    health_state.write().await.attached = true;
+
     // H8: Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
     // CAP_SYS_ADMIN is no longer needed — BPF map operations use existing FDs.
