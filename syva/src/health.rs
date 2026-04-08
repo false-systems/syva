@@ -1,12 +1,14 @@
 //! Health and metrics HTTP server.
 //!
 //! Two routes:
-//! - GET /healthz — liveness probe (200 OK or 503 Service Unavailable)
-//! - GET /metrics — Prometheus text format (enforcement counters per hook)
+//! - GET /healthz — readiness check (200 OK when BPF attached, 503 otherwise)
+//! - GET /metrics — Prometheus text format (agent-level gauges)
 
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::RwLock;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -35,36 +37,34 @@ impl HealthState {
 
 pub type SharedHealth = Arc<RwLock<HealthState>>;
 
-/// Spawn the HTTP server on a separate tokio task.
-/// Returns immediately — the server runs in the background.
-pub fn spawn_health_server(port: u16, state: SharedHealth) {
+/// Bind the HTTP server and spawn it on a separate tokio task.
+/// Returns Err if the port cannot be bound (fail-fast for probe misconfiguration).
+pub async fn spawn_health_server(port: u16, state: SharedHealth) -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
+        .with_state(state);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await
+        .map_err(|e| anyhow::anyhow!("failed to bind health server on {addr}: {e}"))?;
+    tracing::info!(%addr, "health server listening");
+
     tokio::spawn(async move {
-        let app = Router::new()
-            .route("/healthz", get(healthz))
-            .route("/metrics", get(metrics))
-            .with_state(state);
-
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        tracing::info!(%addr, "health server listening");
-
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(%e, %addr, "failed to bind health server");
-                return;
-            }
-        };
-
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!(%e, "health server exited with error");
         }
     });
+
+    Ok(())
 }
 
 async fn healthz(State(state): State<SharedHealth>) -> Response {
-    let health = state.read().unwrap_or_else(|e| e.into_inner());
+    let health = state.read().await;
 
-    let healthy = health.attached && health.zones_loaded > 0;
+    // Healthy = BPF programs attached and self-tests passed.
+    // Zero zones loaded is valid (empty policy dir) — not a liveness failure.
+    let healthy = health.attached;
     let status = if healthy { "ok" } else { "unavailable" };
     let uptime_secs = health.start_time.elapsed().as_secs();
 
@@ -81,7 +81,7 @@ async fn healthz(State(state): State<SharedHealth>) -> Response {
 }
 
 async fn metrics(State(state): State<SharedHealth>) -> String {
-    let health = state.read().unwrap_or_else(|e| e.into_inner());
+    let health = state.read().await;
 
     // Prometheus text format — simple gauges for health state.
     // Enforcement counters come from BPF maps via `syva status`; the health
@@ -105,4 +105,57 @@ async fn metrics(State(state): State<SharedHealth>) -> String {
     out.push_str(&format!("syva_uptime_seconds {}\n", health.start_time.elapsed().as_secs()));
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_state(attached: bool, zones_loaded: usize, containers_active: usize) -> SharedHealth {
+        Arc::new(RwLock::new(HealthState {
+            attached,
+            zones_loaded,
+            containers_active,
+            start_time: Instant::now(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_503_when_not_attached() {
+        let state = shared_state(false, 3, 2);
+        let response = healthz(State(state)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_200_when_attached() {
+        let state = shared_state(true, 3, 7);
+        let response = healthz(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_200_with_zero_zones() {
+        // Empty policy dir is valid — not a liveness failure.
+        let state = shared_state(true, 0, 0);
+        let response = healthz(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_contains_expected_gauges() {
+        let state = shared_state(true, 4, 9);
+        let output = metrics(State(state)).await;
+        assert!(output.contains("syva_up 1\n"));
+        assert!(output.contains("syva_zones_loaded 4\n"));
+        assert!(output.contains("syva_containers_active 9\n"));
+        assert!(output.contains("syva_uptime_seconds "));
+    }
+
+    #[tokio::test]
+    async fn metrics_shows_down_when_not_attached() {
+        let state = shared_state(false, 0, 0);
+        let output = metrics(State(state)).await;
+        assert!(output.contains("syva_up 0\n"));
+    }
 }
