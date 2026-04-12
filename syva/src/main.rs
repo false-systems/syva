@@ -58,7 +58,18 @@ enum Commands {
         /// Follow events in real time.
         #[arg(long, short)]
         follow: bool,
+        /// Output format: text or json (ndjson).
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
     },
+    /// Dry-run policy validation without loading BPF.
+    Verify,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[tokio::main]
@@ -73,7 +84,8 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Status) => cmd_status().await,
-        Some(Commands::Events { follow }) => cmd_events(follow).await,
+        Some(Commands::Events { follow, format }) => cmd_events(follow, format).await,
+        Some(Commands::Verify) => cmd_verify(cli.policy_dir).await,
         None => cmd_run(cli.policy_dir, cli.ebpf_obj, cli.containerd_sock, cli.health_port).await,
     }
 }
@@ -434,7 +446,7 @@ println!("  hooks:");
     Ok(())
 }
 
-async fn cmd_events(follow: bool) -> anyhow::Result<()> {
+async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
     use aya::maps::RingBuf;
     use syva_ebpf_common::EnforcementEvent;
 
@@ -451,8 +463,7 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
     let map_data = aya::maps::MapData::from_pin(pin_path)
         .map_err(|e| anyhow::anyhow!("failed to open pinned ring buffer: {e}"))?;
     let mut ring_buf = RingBuf::try_from(map_data)?;
-
-    let hook_names = ["file_open", "bprm_check", "ptrace_access_check", "task_kill", "cgroup_attach_task"];
+    let json_mode = matches!(format, OutputFormat::Json);
 
     eprintln!("streaming enforcement events (Ctrl+C to stop)...");
 
@@ -463,7 +474,7 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 const MAX_EVENTS_PER_TICK: usize = 1000;
-                let events: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
+                let drained: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
                     let mut out = Vec::new();
                     while let Some(item) = ring_buf.next() {
                         if item.len() < std::mem::size_of::<EnforcementEvent>() {
@@ -479,17 +490,35 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
                     }
                     out
                 });
-                for event in &events {
-                    let hook = hook_names.get(event.hook as usize).copied().unwrap_or("unknown");
+                for event in &drained {
+                    let hook = events::HOOK_NAMES.get(event.hook as usize).copied().unwrap_or("unknown");
                     let decision = match event.decision {
-                        syva_ebpf_common::DECISION_ALLOW => "ALLOW",
-                        syva_ebpf_common::DECISION_DENY => "DENY",
-                        _ => "UNKNOWN",
+                        syva_ebpf_common::DECISION_DENY => "deny",
+                        syva_ebpf_common::DECISION_ALLOW => "allow",
+                        _ => "unknown",
                     };
-                    println!(
-                        "{} hook={} pid={} caller_zone={} target_zone={} context={}",
-                        decision, hook, event.pid, event.caller_zone, event.target_zone, event.context
-                    );
+
+                    if json_mode {
+                        let json = serde_json::json!({
+                            "timestamp_ns": event.timestamp_ns,
+                            "hook": hook,
+                            "action": decision,
+                            "pid": event.pid,
+                            "caller_zone": event.caller_zone,
+                            "target_zone": event.target_zone,
+                            "context": event.context,
+                        });
+                        // ndjson: one object per line, no array wrapper
+                        if let Ok(line) = serde_json::to_string(&json) {
+                            println!("{line}");
+                        }
+                    } else {
+                        println!(
+                            "{} hook={} pid={} caller_zone={} target_zone={} context={}",
+                            decision.to_uppercase(), hook, event.pid,
+                            event.caller_zone, event.target_zone, event.context
+                        );
+                    }
                 }
             }
         }
@@ -500,6 +529,109 @@ async fn cmd_events(follow: bool) -> anyhow::Result<()> {
 
 /// Drop capabilities that are no longer needed after BPF programs are loaded
 /// and maps are populated. BPF map operations use already-open file descriptors.
+/// Dry-run policy validation — no BPF loaded, read-only.
+async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
+    println!("syva verify");
+    println!("{}", "\u{2500}".repeat(43));
+
+    // 1. Load and validate policies.
+    println!("Policy directory: {}", policy_dir.display());
+    let policies = policy::load_policies(&policy_dir)?;
+    println!("Policies found:   {}", policies.len());
+    if policies.is_empty() {
+        println!("  (none)");
+    }
+    for (name, p) in &policies {
+        println!(
+            "  {:<14} {} host_paths, {} allowed_zones",
+            name,
+            p.filesystem.host_paths.len(),
+            p.network.allowed_zones.len(),
+        );
+    }
+
+    // 2. Resolve BTF offsets (read-only — no BPF loaded).
+    println!();
+    let btf_path = std::path::Path::new("/sys/kernel/btf/vmlinux");
+    if btf_path.exists() {
+        match btf::BtfData::from_sys_fs() {
+            Ok(btf_data) => {
+                println!("BTF resolution: {}", btf_path.display());
+                let offset_defs: &[(&str, &str)] = &[
+                    ("task_struct", "cgroups"),
+                    ("css_set", "dfl_cgrp"),
+                    ("cgroup", "kn"),
+                    ("kernfs_node", "id"),
+                    ("file", "f_inode"),
+                    ("inode", "i_ino"),
+                    ("linux_binprm", "file"),
+                    ("sock", "sk_cgrp_data"),
+                ];
+                let mut btf_ok = true;
+                for &(struct_name, field_name) in offset_defs {
+                    match btf_data.struct_field_offset(struct_name, field_name) {
+                        Some(offset) => {
+                            println!("  {:<40} offset={:<6} \u{2713}", format!("{struct_name}.{field_name}"), offset);
+                        }
+                        None => {
+                            println!("  {:<40} NOT FOUND \u{2717}", format!("{struct_name}.{field_name}"));
+                            btf_ok = false;
+                        }
+                    }
+                }
+                if !btf_ok {
+                    println!();
+                    println!("ERROR: some BTF offsets could not be resolved");
+                }
+            }
+            Err(e) => {
+                println!("BTF resolution: FAILED — {e}");
+            }
+        }
+    } else {
+        println!("BTF: not available at {} (will use defaults)", btf_path.display());
+    }
+
+    // 3. Check allowed_zones symmetry.
+    let mut symmetry_errors = Vec::new();
+    for (zone_name, p) in &policies {
+        for peer in &p.network.allowed_zones {
+            let bilateral = policies.get(peer)
+                .map(|pp| pp.network.allowed_zones.contains(zone_name))
+                .unwrap_or(false);
+            if !bilateral {
+                symmetry_errors.push(format!(
+                    "zone '{}' lists '{}' in allowed_zones, but '{}' does not list '{}'",
+                    zone_name, peer, peer, zone_name
+                ));
+            }
+        }
+    }
+
+    if !symmetry_errors.is_empty() {
+        println!();
+        println!("Symmetry violations:");
+        for err in &symmetry_errors {
+            println!("  \u{2717} {err}");
+        }
+    }
+
+    // 4. Summary.
+    println!();
+    let valid = !policies.is_empty() && symmetry_errors.is_empty();
+    if valid {
+        println!("Result: \u{2713} VALID \u{2014} ready to deploy");
+    } else {
+        if policies.is_empty() {
+            println!("ERROR: no policy files found");
+        }
+        println!("Result: \u{2717} INVALID \u{2014} fix errors before deploying");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 fn drop_unnecessary_capabilities() {
     // Drop CAP_SYS_ADMIN from the bounding set. BPF map operations use
     // already-open FDs — the kernel checks FD permissions, not process caps.
