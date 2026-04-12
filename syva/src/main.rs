@@ -246,11 +246,22 @@ async fn cmd_run(
     let mut reload_interval = tokio::time::interval(std::time::Duration::from_secs(5));
     reload_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
+    // Without SIGTERM handling, K8s kills the process without running Drop
+    // on EnforceEbpf, leaving stale BPF pins.
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    ).expect("failed to register SIGTERM handler");
+
     // Process live events until shutdown.
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("shutting down");
+                tracing::info!("received SIGINT — shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM — shutting down");
                 break;
             }
             _ = reload_interval.tick() => {
