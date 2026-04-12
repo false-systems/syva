@@ -243,7 +243,7 @@ Syva logs a warning at startup for each declarative-only field that is configure
 - Linux 6.1+ with `CONFIG_BPF_LSM=y`, `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y`
 - Boot parameter: `lsm=lockdown,capability,bpf`
 - BTF at `/sys/kernel/btf/vmlinux`
-- `pahole` recommended (for kernel struct offset resolution; defaults correct for Linux 6.1+)
+- `pahole` is NOT required — kernel struct offsets are resolved directly from BTF at startup
 
 **Runtime requirements:**
 - containerd with Unix socket at `/run/containerd/containerd.sock` (configurable)
@@ -359,7 +359,7 @@ syva events --follow
 
 Events come from a BPF ring buffer (4MB, ~75K events). Allows are tracked in per-CPU counters only — no per-event overhead for the common path. Lost events (ring buffer overflow) are counted per-hook and shown in `syva status`.
 
-Enforcement errors (kernel struct read failures) are monitored every 30 seconds. If errors are detected, a warning is logged with guidance to check `syva status` and install `pahole`.
+Enforcement errors (kernel struct read failures) are monitored every 30 seconds. If errors are detected, a warning is logged with guidance to check `syva status`.
 
 ## How Syva Handles Kernel Differences
 
@@ -368,8 +368,7 @@ eBPF programs read kernel struct fields (`task_struct->cgroups`, `file->f_inode`
 ```
  Startup
     │
-    ├─ Load BTF from /sys/kernel/btf/vmlinux
-    ├─ Run pahole to get real offsets for this kernel
+    ├─ Parse /sys/kernel/btf/vmlinux for kernel struct offsets
     ├─ Inject offsets into eBPF programs as globals
     ├─ Load programs (verified by kernel, not yet attached)
     │
@@ -378,18 +377,16 @@ eBPF programs read kernel struct fields (`task_struct->cgroups`, `file->f_inode`
     │
     ├─ Attach all 7 hooks (enforcement begins)
     │
-    ├─ Self-test: compare two ways of reading cgroup_id
-    │   ├─ BPF helper (known correct)
-    │   └─ Offset chain (what we just configured)
+    ├─ Three self-tests validate offset chains:
+    │   ├─ Cgroup: BPF helper vs offset chain
+    │   ├─ Inode: BPF-derived inode vs stat()
+    │   └─ Unix socket: peer cgroup resolution
     │
-    ├─ Inode self-test: compare BPF-derived inode with stat()
-    │   └─ Validates FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET
-    │
-    ├─ Match? → enforcement active, drop CAP_SYS_ADMIN
-    └─ Mismatch? → refuse to start (no silent failure)
+    ├─ All pass? → enforcement active, drop CAP_SYS_ADMIN
+    └─ Any fail? → refuse to start (no silent failure)
 ```
 
-If `pahole` isn't installed, defaults for Linux 6.1+ are used.
+If BTF is unavailable, defaults for Linux 6.1+ are used (self-tests validate correctness).
 
 ## Architecture
 
@@ -442,7 +439,7 @@ cargo test                         # all tests
 
 **Additive only.** eBPF LSM hooks can deny but never override existing MAC policy (SELinux, AppArmor). Syva stacks on top.
 
-**No hot-reload.** Policies load at startup. Restart the agent to pick up changes.
+**Policy hot-reload.** Policies are polled every 5 seconds. ConfigMap updates are detected via symlink rotation. Zones removed while containers are running transition to draining state — enforcement continues until the last container leaves.
 
 **One instance per node.** Syva pins BPF maps at `/sys/fs/bpf/syva/`. A second instance will refuse to start. The DaemonSet init container cleans stale pins automatically.
 
@@ -452,7 +449,7 @@ cargo test                         # all tests
 
 **/proc access not controlled.** Virtual filesystem inodes are not in `INODE_ZONE_MAP`. Cross-zone `/proc/<pid>/mem` access is possible. Deferred to a future release.
 
-**Unix socket enforcement is audit-only.** The `unix_stream_connect` hook emits events but does not block. Full enforcement requires peer cgroup resolution, which is pending.
+**Enforcement gap during rolling update.** During a DaemonSet rolling update, the init container removes old BPF pins before the new agent starts. Between pin removal and new hook attachment (10-30 seconds), all LSM hooks are inactive. Plan upgrades during maintenance windows or accept the gap as a tradeoff for clean restart.
 
 ## License
 
