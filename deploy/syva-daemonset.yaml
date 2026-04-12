@@ -9,25 +9,40 @@ spec:
   selector:
     matchLabels:
       app: syva
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
         app: syva
     spec:
       hostPID: true  # Required: resolve_cgroup_id_from_pid reads /proc/{pid}/cgroup
-      # hostNetwork removed: containerd socket is mounted as a volume, no TCP needed
+      priorityClassName: system-node-critical
+      serviceAccountName: syva
       tolerations:
         - effect: NoSchedule
           operator: Exists
       initContainers:
         - name: cleanup-stale-bpf-pins
           image: ghcr.io/false-systems/syva:latest
-          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva || true"]
+          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
           volumeMounts:
             - name: bpf
               mountPath: /sys/fs/bpf
           securityContext:
             privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
               add: ["SYS_ADMIN"]
@@ -41,17 +56,24 @@ spec:
             - name: health
               containerPort: 9091
               protocol: TCP
+          # Startup probe: generous window for BTF parsing, cgroup enumeration,
+          # and self-tests on slow nodes. Replaces long initialDelaySeconds.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12  # 5 + (12 * 5) = 65s max startup
           livenessProbe:
             tcpSocket:
               port: health
-            initialDelaySeconds: 15
             periodSeconds: 30
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /healthz
               port: health
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           resources:
@@ -119,3 +141,9 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: syva-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: syva
+  namespace: syva-system
