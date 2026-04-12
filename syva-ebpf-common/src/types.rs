@@ -39,7 +39,10 @@ pub struct ZoneInfoKernel {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ZonePolicyKernel {
-    /// Bitmask of allowed Linux capabilities (CAP_* values).
+    /// reserved: bitmask of allowed Linux capabilities. Written by userspace
+    /// but not read by any eBPF hook — capability enforcement is not
+    /// implemented at the BPF level. Used only for CAP_SYS_PTRACE detection
+    /// in userspace (sets POLICY_FLAG_ALLOW_PTRACE).
     pub caps_mask: u64,
     /// Policy flags.
     /// Bit 0: allow_ptrace
@@ -57,11 +60,15 @@ pub struct ZoneCommKey {
 }
 
 // Flag constants for ZoneInfoKernel.flags
+/// reserved: set by userspace for ZoneType::Privileged but not checked by
+/// any eBPF hook. Privileged zones receive standard enforcement.
 pub const ZONE_FLAG_PRIVILEGED: u32 = 1 << 0;
 pub const ZONE_FLAG_GLOBAL: u32 = 1 << 1;
 
 // Flag constants for ZonePolicyKernel.flags
 pub const POLICY_FLAG_ALLOW_PTRACE: u32 = 1 << 0;
+/// reserved: set by userspace for NetworkMode::Host but not checked by
+/// any eBPF hook. No network namespace enforcement exists yet.
 pub const POLICY_FLAG_ALLOW_HOST_NET: u32 = 1 << 1;
 
 /// Result of the startup self-test that validates kernel struct offsets.
@@ -124,6 +131,7 @@ pub const HOOK_MMAP_FILE: u8 = 5;
 pub const HOOK_UNIX_CONNECT: u8 = 6;
 
 // Decision constants for EnforcementEvent.
+/// Used in userspace display only — eBPF hooks never emit allow events.
 pub const DECISION_ALLOW: u8 = 0;
 pub const DECISION_DENY: u8 = 1;
 
