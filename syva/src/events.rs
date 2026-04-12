@@ -6,7 +6,6 @@ use aya::maps::{MapData, RingBuf};
 use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
 use tokio_util::sync::CancellationToken;
 
-pub const HOOK_NAMES: [&str; 5] = [
 pub const HOOK_NAMES: [&str; 7] = [
     "file_open",
     "bprm_check",

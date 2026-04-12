@@ -16,12 +16,24 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
+/// Per-hook enforcement counter snapshot, summed across CPUs.
+#[derive(Debug, Clone, Default)]
+pub struct HookCounters {
+    pub allow: u64,
+    pub deny: u64,
+    pub error: u64,
+    pub lost: u64,
+}
+
 /// Shared health state, written by the main loop, read by HTTP handlers.
 pub struct HealthState {
     pub attached: bool,
     pub zones_loaded: usize,
     pub containers_active: usize,
     pub start_time: Instant,
+    /// Latest per-hook enforcement counter snapshot.
+    /// Index matches `events::HOOK_NAMES`. Empty until first snapshot.
+    pub hook_counters: Vec<HookCounters>,
 }
 
 impl HealthState {
@@ -31,6 +43,7 @@ impl HealthState {
             zones_loaded: 0,
             containers_active: 0,
             start_time: Instant::now(),
+            hook_counters: Vec::new(),
         }
     }
 }
@@ -82,11 +95,12 @@ async fn healthz(State(state): State<SharedHealth>) -> Response {
 
 async fn metrics(State(state): State<SharedHealth>) -> String {
     let health = state.read().await;
+    render_metrics(&health)
+}
 
-    // Prometheus text format — simple gauges for health state.
-    // Enforcement counters come from BPF maps via `syva status`; the health
-    // endpoint exposes agent-level state only.
-    let mut out = String::with_capacity(512);
+/// Pure function — testable without HTTP server.
+pub fn render_metrics(health: &HealthState) -> String {
+    let mut out = String::with_capacity(2048);
 
     out.push_str("# HELP syva_up Whether syva is attached and enforcing.\n");
     out.push_str("# TYPE syva_up gauge\n");
@@ -104,6 +118,24 @@ async fn metrics(State(state): State<SharedHealth>) -> String {
     out.push_str("# TYPE syva_uptime_seconds gauge\n");
     out.push_str(&format!("syva_uptime_seconds {}\n", health.start_time.elapsed().as_secs()));
 
+    // Per-hook enforcement counters from BPF map snapshot.
+    if !health.hook_counters.is_empty() {
+        let hook_names = &crate::events::HOOK_NAMES;
+
+        for (metric, help, extractor) in [
+            ("syva_hook_allow_total", "Events allowed per hook", |c: &HookCounters| c.allow),
+            ("syva_hook_deny_total", "Events denied per hook", |c: &HookCounters| c.deny),
+            ("syva_hook_error_total", "Hook errors (fail-open) per hook", |c: &HookCounters| c.error),
+            ("syva_hook_lost_total", "Ring buffer lost events per hook", |c: &HookCounters| c.lost),
+        ] {
+            out.push_str(&format!("# HELP {} {}\n# TYPE {} counter\n", metric, help, metric));
+            for (i, name) in hook_names.iter().enumerate() {
+                let val = health.hook_counters.get(i).map(&extractor).unwrap_or(0);
+                out.push_str(&format!("{}{{hook=\"{}\"}} {}\n", metric, name, val));
+            }
+        }
+    }
+
     out
 }
 
@@ -111,51 +143,90 @@ async fn metrics(State(state): State<SharedHealth>) -> String {
 mod tests {
     use super::*;
 
-    fn shared_state(attached: bool, zones_loaded: usize, containers_active: usize) -> SharedHealth {
-        Arc::new(RwLock::new(HealthState {
+    fn make_state(attached: bool, zones: usize, containers: usize) -> HealthState {
+        HealthState {
             attached,
-            zones_loaded,
-            containers_active,
+            zones_loaded: zones,
+            containers_active: containers,
             start_time: Instant::now(),
-        }))
+            hook_counters: Vec::new(),
+        }
+    }
+
+    fn shared(state: HealthState) -> SharedHealth {
+        Arc::new(RwLock::new(state))
     }
 
     #[tokio::test]
     async fn healthz_returns_503_when_not_attached() {
-        let state = shared_state(false, 3, 2);
+        let state = shared(make_state(false, 3, 2));
         let response = healthz(State(state)).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
     async fn healthz_returns_200_when_attached() {
-        let state = shared_state(true, 3, 7);
+        let state = shared(make_state(true, 3, 7));
         let response = healthz(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn healthz_returns_200_with_zero_zones() {
-        // Empty policy dir is valid — not a liveness failure.
-        let state = shared_state(true, 0, 0);
+        let state = shared(make_state(true, 0, 0));
         let response = healthz(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[tokio::test]
-    async fn metrics_contains_expected_gauges() {
-        let state = shared_state(true, 4, 9);
-        let output = metrics(State(state)).await;
+    #[test]
+    fn hook_counters_default_zero() {
+        let c = HookCounters::default();
+        assert_eq!(c.allow, 0);
+        assert_eq!(c.deny, 0);
+        assert_eq!(c.error, 0);
+        assert_eq!(c.lost, 0);
+    }
+
+    #[test]
+    fn render_metrics_includes_agent_gauges() {
+        let state = make_state(true, 4, 9);
+        let output = render_metrics(&state);
         assert!(output.contains("syva_up 1\n"));
         assert!(output.contains("syva_zones_loaded 4\n"));
         assert!(output.contains("syva_containers_active 9\n"));
-        assert!(output.contains("syva_uptime_seconds "));
     }
 
-    #[tokio::test]
-    async fn metrics_shows_down_when_not_attached() {
-        let state = shared_state(false, 0, 0);
-        let output = metrics(State(state)).await;
+    #[test]
+    fn render_metrics_includes_hook_counters() {
+        let mut state = make_state(true, 2, 5);
+        state.hook_counters = vec![
+            HookCounters { allow: 100, deny: 2, error: 0, lost: 0 },
+            HookCounters { allow: 50, deny: 0, error: 1, lost: 0 },
+            HookCounters::default(),
+            HookCounters::default(),
+            HookCounters::default(),
+            HookCounters::default(),
+            HookCounters::default(),
+        ];
+
+        let output = render_metrics(&state);
+        assert!(output.contains("syva_hook_allow_total{hook=\"file_open\"} 100"));
+        assert!(output.contains("syva_hook_deny_total{hook=\"file_open\"} 2"));
+        assert!(output.contains("syva_hook_error_total{hook=\"bprm_check\"} 1"));
+        assert!(output.contains("syva_hook_deny_total{hook=\"unix_connect\"} 0"));
+    }
+
+    #[test]
+    fn render_metrics_empty_counters_omits_hook_lines() {
+        let state = make_state(false, 0, 0);
+        let output = render_metrics(&state);
+        assert!(!output.contains("syva_hook_"));
+    }
+
+    #[test]
+    fn render_metrics_down_when_not_attached() {
+        let state = make_state(false, 0, 0);
+        let output = render_metrics(&state);
         assert!(output.contains("syva_up 0\n"));
     }
 }

@@ -201,9 +201,6 @@ async fn cmd_run(
     // Health: BPF attached and self-tests passed — mark healthy.
     health_state.write().await.attached = true;
 
-    // Health: BPF attached and self-tests passed — mark healthy.
-    health_state.write().await.attached = true;
-
     // H8: Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
     // CAP_SYS_ADMIN is no longer needed — BPF map operations use existing FDs.
@@ -260,10 +257,11 @@ async fn cmd_run(
             _ = error_check_interval.tick() => {
                 match mgr.read_counters() {
                     Ok(counters) => {
-                        // Grow last_errors to match counter count on first read.
                         if last_errors.len() < counters.len() {
                             last_errors.resize(counters.len(), 0);
                         }
+                        // Snapshot counters into health state for /metrics.
+                        let mut hook_snapshot = Vec::with_capacity(counters.len());
                         for (idx, (_, totals)) in counters.iter().enumerate() {
                             if totals.error > last_errors[idx] {
                                 let new_errors = totals.error - last_errors[idx];
@@ -277,7 +275,14 @@ async fn cmd_run(
                                 );
                             }
                             last_errors[idx] = totals.error;
+                            hook_snapshot.push(health::HookCounters {
+                                allow: totals.allow,
+                                deny: totals.deny,
+                                error: totals.error,
+                                lost: totals.lost,
+                            });
                         }
+                        health_state.write().await.hook_counters = hook_snapshot;
                     }
                     Err(e) => {
                         tracing::debug!(%e, "failed to read enforcement counters");
