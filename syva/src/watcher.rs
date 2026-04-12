@@ -400,7 +400,7 @@ fn resolve_cgroup_id_from_pid(pid: u32) -> u64 {
     for line in content.lines() {
         if let Some(path) = line.strip_prefix("0::") {
             let cgroup_path = format!("/sys/fs/cgroup{path}");
-            let p = Path::new(&cgroup_path);
+            let p = std::path::Path::new(&cgroup_path);
             if p.exists() {
                 return resolve_cgroup_id(p);
             }
@@ -408,4 +408,97 @@ fn resolve_cgroup_id_from_pid(pid: u32) -> u64 {
     }
 
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_container_id_hex() {
+        assert!(is_valid_container_id("abc123def456"));
+    }
+
+    #[test]
+    fn valid_container_id_with_dash_underscore() {
+        assert!(is_valid_container_id("abc-123_def"));
+    }
+
+    #[test]
+    fn valid_container_id_64_hex() {
+        assert!(is_valid_container_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn reject_empty_container_id() {
+        assert!(!is_valid_container_id(""));
+    }
+
+    #[test]
+    fn reject_path_traversal() {
+        assert!(!is_valid_container_id("../../../etc/passwd"));
+    }
+
+    #[test]
+    fn reject_slash() {
+        assert!(!is_valid_container_id("abc/def"));
+    }
+
+    #[test]
+    fn reject_too_long() {
+        assert!(!is_valid_container_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn max_length_accepted() {
+        assert!(is_valid_container_id(&"a".repeat(128)));
+    }
+
+    #[test]
+    fn extract_container_id_from_start_event() {
+        use prost::Message;
+        let start = TaskStartEvent { container_id: "abc123".into(), pid: 42 };
+        let mut buf = Vec::new();
+        start.encode(&mut buf).unwrap();
+        let any = prost_types::Any {
+            type_url: "containerd.events.TaskStart".into(),
+            value: buf,
+        };
+        assert_eq!(extract_container_id(&any), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn extract_container_id_from_delete_event() {
+        use prost::Message;
+        let del = TaskDeleteEvent { container_id: "def456".into() };
+        let mut buf = Vec::new();
+        del.encode(&mut buf).unwrap();
+        let any = prost_types::Any {
+            type_url: "containerd.events.TaskDelete".into(),
+            value: buf,
+        };
+        assert_eq!(extract_container_id(&any), Some("def456".to_string()));
+    }
+
+    #[test]
+    fn extract_container_id_empty_is_none() {
+        use prost::Message;
+        let start = TaskStartEvent { container_id: String::new(), pid: 0 };
+        let mut buf = Vec::new();
+        start.encode(&mut buf).unwrap();
+        let any = prost_types::Any {
+            type_url: "containerd.events.TaskStart".into(),
+            value: buf,
+        };
+        assert_eq!(extract_container_id(&any), None);
+    }
+
+    #[test]
+    fn extract_container_id_garbage_does_not_panic() {
+        let any = prost_types::Any {
+            type_url: "unknown".into(),
+            value: vec![0xff, 0xff],
+        };
+        let _ = extract_container_id(&any);
+    }
 }

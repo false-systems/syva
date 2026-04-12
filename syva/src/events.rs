@@ -89,3 +89,20 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_names_count_is_seven() {
+        assert_eq!(HOOK_NAMES.len(), 7);
+    }
+
+    #[test]
+    fn hook_names_are_non_empty() {
+        for name in &HOOK_NAMES {
+            assert!(!name.is_empty());
+        }
+    }
+}
