@@ -527,17 +527,32 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop capabilities that are no longer needed after BPF programs are loaded
-/// and maps are populated. BPF map operations use already-open file descriptors.
 /// Dry-run policy validation — no BPF loaded, read-only.
+/// Exits 1 on any error (parse failure, BTF failure, symmetry violation).
 async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
+    let mut errors: Vec<String> = Vec::new();
+
     println!("syva verify");
     println!("{}", "\u{2500}".repeat(43));
 
-    // 1. Load and validate policies.
+    // 1. Strict policy loading — count TOML files and report any that fail.
     println!("Policy directory: {}", policy_dir.display());
     let policies = policy::load_policies(&policy_dir)?;
-    println!("Policies found:   {}", policies.len());
+
+    // Check for skipped files: compare TOML file count to loaded policy count.
+    let toml_count = std::fs::read_dir(&policy_dir)
+        .map(|entries| entries.flatten()
+            .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
+            .count())
+        .unwrap_or(0);
+    if toml_count > policies.len() {
+        let skipped = toml_count - policies.len();
+        errors.push(format!("{skipped} policy file(s) failed to parse or validate"));
+        println!("Policies loaded:  {} of {} ({} failed)", policies.len(), toml_count, skipped);
+    } else {
+        println!("Policies found:   {}", policies.len());
+    }
+
     if policies.is_empty() {
         println!("  (none)");
     }
@@ -553,6 +568,7 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
     // 2. Resolve BTF offsets (read-only — no BPF loaded).
     println!();
     let btf_path = std::path::Path::new("/sys/kernel/btf/vmlinux");
+    let mut btf_ok = true;
     if btf_path.exists() {
         match btf::BtfData::from_sys_fs() {
             Ok(btf_data) => {
@@ -567,7 +583,6 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
                     ("linux_binprm", "file"),
                     ("sock", "sk_cgrp_data"),
                 ];
-                let mut btf_ok = true;
                 for &(struct_name, field_name) in offset_defs {
                     match btf_data.struct_field_offset(struct_name, field_name) {
                         Some(offset) => {
@@ -580,50 +595,60 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
                     }
                 }
                 if !btf_ok {
-                    println!();
-                    println!("ERROR: some BTF offsets could not be resolved");
+                    errors.push("some BTF offsets could not be resolved".to_string());
                 }
             }
             Err(e) => {
-                println!("BTF resolution: FAILED — {e}");
+                btf_ok = false;
+                errors.push(format!("BTF resolution failed: {e}"));
+                println!("BTF resolution: FAILED \u{2014} {e}");
             }
         }
     } else {
+        btf_ok = false;
+        errors.push("BTF not available \u{2014} enforcement will use default offsets".to_string());
         println!("BTF: not available at {} (will use defaults)", btf_path.display());
     }
 
     // 3. Check allowed_zones symmetry.
-    let mut symmetry_errors = Vec::new();
     for (zone_name, p) in &policies {
         for peer in &p.network.allowed_zones {
             let bilateral = policies.get(peer)
                 .map(|pp| pp.network.allowed_zones.contains(zone_name))
                 .unwrap_or(false);
             if !bilateral {
-                symmetry_errors.push(format!(
+                let msg = format!(
                     "zone '{}' lists '{}' in allowed_zones, but '{}' does not list '{}'",
                     zone_name, peer, peer, zone_name
-                ));
+                );
+                errors.push(msg);
             }
         }
     }
 
-    if !symmetry_errors.is_empty() {
+    // Print symmetry errors.
+    let sym_errors: Vec<_> = errors.iter()
+        .filter(|e| e.contains("allowed_zones"))
+        .cloned()
+        .collect();
+    if !sym_errors.is_empty() {
         println!();
         println!("Symmetry violations:");
-        for err in &symmetry_errors {
+        for err in &sym_errors {
             println!("  \u{2717} {err}");
         }
     }
 
     // 4. Summary.
     println!();
-    let valid = !policies.is_empty() && symmetry_errors.is_empty();
+    let valid = policies.len() > 0 && errors.is_empty();
     if valid {
         println!("Result: \u{2713} VALID \u{2014} ready to deploy");
     } else {
-        if policies.is_empty() {
-            println!("ERROR: no policy files found");
+        for err in &errors {
+            if !err.contains("allowed_zones") {
+                println!("ERROR: {err}");
+            }
         }
         println!("Result: \u{2717} INVALID \u{2014} fix errors before deploying");
         std::process::exit(1);
@@ -632,6 +657,8 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drop capabilities that are no longer needed after BPF programs are loaded
+/// and maps are populated. BPF map operations use already-open file descriptors.
 fn drop_unnecessary_capabilities() {
     // Drop CAP_SYS_ADMIN from the bounding set. BPF map operations use
     // already-open FDs — the kernel checks FD permissions, not process caps.

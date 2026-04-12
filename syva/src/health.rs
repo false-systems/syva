@@ -118,21 +118,20 @@ pub fn render_metrics(health: &HealthState) -> String {
     out.push_str("# TYPE syva_uptime_seconds gauge\n");
     out.push_str(&format!("syva_uptime_seconds {}\n", health.start_time.elapsed().as_secs()));
 
-    // Per-hook enforcement counters from BPF map snapshot.
-    if !health.hook_counters.is_empty() {
-        let hook_names = &crate::events::HOOK_NAMES;
-
-        for (metric, help, extractor) in [
-            ("syva_hook_allow_total", "Events allowed per hook", |c: &HookCounters| c.allow),
-            ("syva_hook_deny_total", "Events denied per hook", |c: &HookCounters| c.deny),
-            ("syva_hook_error_total", "Hook errors (fail-open) per hook", |c: &HookCounters| c.error),
-            ("syva_hook_lost_total", "Ring buffer lost events per hook", |c: &HookCounters| c.lost),
-        ] {
-            out.push_str(&format!("# HELP {} {}\n# TYPE {} counter\n", metric, help, metric));
-            for (i, name) in hook_names.iter().enumerate() {
-                let val = health.hook_counters.get(i).map(&extractor).unwrap_or(0);
-                out.push_str(&format!("{}{{hook=\"{}\"}} {}\n", metric, name, val));
-            }
+    // Per-hook enforcement counters — always emitted (default 0 before first
+    // snapshot) so Prometheus series exist from the start.
+    let hook_names = &crate::events::HOOK_NAMES;
+    let metrics: [(&str, &str, fn(&HookCounters) -> u64); 4] = [
+        ("syva_hook_allow_total", "Events allowed per hook", |c: &HookCounters| c.allow),
+        ("syva_hook_deny_total", "Events denied per hook", |c: &HookCounters| c.deny),
+        ("syva_hook_error_total", "Hook errors (fail-open) per hook", |c: &HookCounters| c.error),
+        ("syva_hook_lost_total", "Ring buffer lost events per hook", |c: &HookCounters| c.lost),
+    ];
+    for (metric, help, extractor) in metrics {
+        out.push_str(&format!("# HELP {} {}\n# TYPE {} counter\n", metric, help, metric));
+        for (i, name) in hook_names.iter().enumerate() {
+            let val = health.hook_counters.get(i).map(extractor).unwrap_or(0);
+            out.push_str(&format!("{}{{hook=\"{}\"}} {}\n", metric, name, val));
         }
     }
 
@@ -217,10 +216,12 @@ mod tests {
     }
 
     #[test]
-    fn render_metrics_empty_counters_omits_hook_lines() {
+    fn render_metrics_empty_counters_shows_zeros() {
+        // Hook series always present so Prometheus doesn't churn on first snapshot.
         let state = make_state(false, 0, 0);
         let output = render_metrics(&state);
-        assert!(!output.contains("syva_hook_"));
+        assert!(output.contains("syva_hook_allow_total{hook=\"file_open\"} 0"));
+        assert!(output.contains("syva_hook_deny_total{hook=\"unix_connect\"} 0"));
     }
 
     #[test]
