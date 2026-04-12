@@ -244,11 +244,16 @@ fn apply_modification(
     ebpf.set_zone_policy(zone_id, new_policy)?;
 
     // Rebuild comms if allowed_zones changed.
+    // remove_zone_comms(zone_id) drops ALL comms involving this zone (both
+    // directions), so we must re-add comms from BOTH this zone's allowed_zones
+    // AND other zones that reference this zone — otherwise comms established
+    // by other zones are silently lost.
     if old_policy.network.allowed_zones != new_policy.network.allowed_zones {
         if let Err(e) = ebpf.remove_zone_comms(zone_id) {
             tracing::error!(zone = zone_name, %e, "reload: failed to clear comms map before rebuild");
             anyhow::bail!("reload: failed to clear comms map for zone '{zone_name}': {e}");
         }
+        // Re-add bilateral comms from this zone's perspective.
         for peer_name in &new_policy.network.allowed_zones {
             if let Some(peer_id) = registry.zone_id(peer_name) {
                 let bilateral = all_policies
@@ -256,9 +261,21 @@ fn apply_modification(
                     .map(|p| p.network.allowed_zones.contains(&zone_name.to_string()))
                     .unwrap_or(false);
                 if bilateral {
-                    if let Err(e) = ebpf.set_zone_allowed_comms(zone_id, peer_id) {
-                        tracing::error!(zone = zone_name, peer = peer_name.as_str(), %e, "reload: failed to set comms");
-                    }
+                    let _ = ebpf.set_zone_allowed_comms(zone_id, peer_id);
+                }
+            }
+        }
+        // Re-add bilateral comms from OTHER zones that reference this zone.
+        for (other_name, other_policy) in all_policies {
+            if other_name == zone_name {
+                continue;
+            }
+            if other_policy.network.allowed_zones.contains(&zone_name.to_string()) {
+                if let (Some(other_id), true) = (
+                    registry.zone_id(other_name),
+                    new_policy.network.allowed_zones.contains(other_name),
+                ) {
+                    let _ = ebpf.set_zone_allowed_comms(other_id, zone_id);
                 }
             }
         }
