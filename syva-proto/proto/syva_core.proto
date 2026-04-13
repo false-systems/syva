@@ -1,0 +1,168 @@
+syntax = "proto3";
+package syva.core.v1;
+
+// The syvä core engine API.
+// Adapters (file, k8s, api) connect to this service and issue commands.
+// The core programs BPF maps based on these commands.
+// The core never knows or cares where commands came from.
+service SyvaCore {
+    // Zone lifecycle
+    rpc RegisterZone(RegisterZoneRequest) returns (RegisterZoneResponse);
+    rpc RemoveZone(RemoveZoneRequest) returns (RemoveZoneResponse);
+
+    // Container membership
+    rpc AttachContainer(AttachContainerRequest) returns (AttachContainerResponse);
+    rpc DetachContainer(DetachContainerRequest) returns (DetachContainerResponse);
+
+    // Communication policy
+    rpc AllowComm(AllowCommRequest) returns (AllowCommResponse);
+    rpc DenyComm(DenyCommRequest) returns (DenyCommResponse);
+
+    // Inode registration
+    rpc RegisterHostPath(RegisterHostPathRequest) returns (RegisterHostPathResponse);
+
+    // Status and observability
+    rpc Status(StatusRequest) returns (StatusResponse);
+    rpc WatchEvents(WatchEventsRequest) returns (stream DenyEvent);
+}
+
+// --- Zone lifecycle ---
+
+message RegisterZoneRequest {
+    string zone_name = 1;
+    ZonePolicy policy = 2;
+}
+
+message RegisterZoneResponse {
+    uint32 zone_id = 1;
+}
+
+message RemoveZoneRequest {
+    string zone_name = 1;
+    // If true, drain active containers before removing.
+    // If false, reject if containers are attached.
+    bool drain = 2;
+}
+
+message RemoveZoneResponse {
+    bool ok = 1;
+    string message = 2;
+}
+
+// --- Container membership ---
+
+message AttachContainerRequest {
+    string container_id = 1;
+    string zone_name = 2;
+    // cgroup_id resolved by adapter from /proc/{pid}/cgroup
+    uint64 cgroup_id = 3;
+}
+
+message AttachContainerResponse {
+    bool ok = 1;
+    string message = 2;
+}
+
+message DetachContainerRequest {
+    string container_id = 1;
+}
+
+message DetachContainerResponse {
+    bool ok = 1;
+}
+
+// --- Communication policy ---
+
+message AllowCommRequest {
+    string zone_a = 1;
+    string zone_b = 2;
+    // Both directions are enforced atomically.
+    // Adapter must ensure symmetry before calling.
+}
+
+message AllowCommResponse {
+    bool ok = 1;
+}
+
+message DenyCommRequest {
+    string zone_a = 1;
+    string zone_b = 2;
+}
+
+message DenyCommResponse {
+    bool ok = 1;
+}
+
+// --- Inode registration ---
+
+message RegisterHostPathRequest {
+    string zone_name = 1;
+    string path = 2;
+    // If true, recursively scan path and register all inodes.
+    bool recursive = 3;
+}
+
+message RegisterHostPathResponse {
+    uint32 inodes_registered = 1;
+}
+
+// --- Status ---
+
+message StatusRequest {}
+
+message StatusResponse {
+    bool attached = 1;
+    uint32 zones_active = 2;
+    uint32 containers_active = 3;
+    uint64 uptime_secs = 4;
+    repeated HookStatus hooks = 5;
+}
+
+message HookStatus {
+    string hook = 1;
+    uint64 allow = 2;
+    uint64 deny = 3;
+    uint64 error = 4;
+    uint64 lost = 5;
+}
+
+// --- Events ---
+
+message WatchEventsRequest {
+    // If true, stream all future deny events.
+    // If false, return immediately after draining current buffer.
+    bool follow = 1;
+}
+
+message DenyEvent {
+    uint64 timestamp_ns = 1;
+    string hook = 2;
+    uint32 zone_id = 3;
+    uint32 target_zone_id = 4;
+    uint32 pid = 5;
+    string comm = 6;
+    uint64 inode = 7;
+    string context = 8;
+}
+
+// --- Policy ---
+
+message ZonePolicy {
+    // Filesystem
+    repeated string host_paths = 1;
+
+    // Network — communication with other zones
+    repeated string allowed_zones = 2;
+
+    // Process
+    bool allow_ptrace = 3;
+
+    // Zone type
+    ZoneType zone_type = 4;
+}
+
+enum ZoneType {
+    ZONE_TYPE_STANDARD   = 0;
+    ZONE_TYPE_PRIVILEGED = 1;
+    ZONE_TYPE_ISOLATED   = 2;
+}
