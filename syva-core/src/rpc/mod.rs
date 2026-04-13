@@ -326,14 +326,13 @@ impl SyvaCore for SyvaCoreService {
             .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
         drop(registry);
 
-        // Remove comms for both zones involved. This removes all comms for each
-        // zone, which is broader than removing just the pair. A more targeted
-        // approach would require a remove_zone_comm_pair method in ebpf.rs.
+        // Remove only the requested pair in both directions, preserving
+        // any unrelated comm entries involving either zone.
         let mut ebpf = self.ebpf.lock().await;
-        ebpf.remove_zone_comms(zone_a_id)
-            .map_err(|e| Status::internal(format!("failed to remove comms for zone_a: {e}")))?;
-        ebpf.remove_zone_comms(zone_b_id)
-            .map_err(|e| Status::internal(format!("failed to remove comms for zone_b: {e}")))?;
+        ebpf.remove_zone_comm_pair(zone_a_id, zone_b_id)
+            .map_err(|e| Status::internal(format!(
+                "failed to remove comms between '{}' and '{}': {e}", req.zone_a, req.zone_b
+            )))?;
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm denied via gRPC");
         Ok(Response::new(DenyCommResponse { ok: true }))
@@ -358,9 +357,15 @@ impl SyvaCore for SyvaCoreService {
         drop(registry);
 
         let mut ebpf = self.ebpf.lock().await;
-        let paths = vec![req.path.clone()];
-        let count = ebpf.populate_inode_zone_map(zone_id, &paths)
-            .map_err(|e| Status::internal(format!("failed to populate inode map: {e}")))?;
+        let count = if req.recursive {
+            let paths = vec![req.path.clone()];
+            ebpf.populate_inode_zone_map(zone_id, &paths)
+                .map_err(|e| Status::internal(format!("failed to populate inode map: {e}")))?
+        } else {
+            // Single inode registration — stat the path and add its inode directly.
+            ebpf.register_single_inode(zone_id, &req.path)
+                .map_err(|e| Status::internal(format!("failed to register inode: {e}")))?
+        };
 
         tracing::info!(
             zone = req.zone_name,
@@ -385,13 +390,18 @@ impl SyvaCore for SyvaCoreService {
 
         let mut hooks = Vec::new();
 
-        // Try to read live counters from BPF maps.
+        // Use stable HOOK_NAMES (file_open, bprm_check, etc.) rather than
+        // raw BPF program names (syva_file_open, etc.) for API consistency.
         let ebpf = self.ebpf.lock().await;
         match ebpf.read_counters() {
             Ok(counters) => {
-                for (name, totals) in &counters {
+                for (idx, (_, totals)) in counters.iter().enumerate() {
+                    let hook_name = HOOK_NAMES.get(idx)
+                        .copied()
+                        .unwrap_or("unknown")
+                        .to_string();
                     hooks.push(HookStatus {
-                        hook: name.clone(),
+                        hook: hook_name,
                         allow: totals.allow,
                         deny: totals.deny,
                         error: totals.error,

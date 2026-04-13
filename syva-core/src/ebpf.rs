@@ -419,6 +419,21 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Remove a specific comm pair from ZONE_ALLOWED_COMMS (both directions).
+    /// Unlike `remove_zone_comms`, this only removes the (a, b) and (b, a) entries,
+    /// preserving any other comms involving either zone.
+    pub fn remove_zone_comm_pair(&mut self, zone_a: u32, zone_b: u32) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
+            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
+        )?;
+        let fwd = ZoneCommKey { src_zone: zone_a, dst_zone: zone_b };
+        let rev = ZoneCommKey { src_zone: zone_b, dst_zone: zone_a };
+        let _ = map.remove(&fwd);
+        let _ = map.remove(&rev);
+        Ok(())
+    }
+
     /// Remove all INODE_ZONE_MAP entries for a given zone.
     pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
         let map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
@@ -444,6 +459,22 @@ impl EnforceEbpf {
             let _ = map.remove(&key);
         }
         Ok(())
+    }
+
+    /// Register a single path's inode in INODE_ZONE_MAP (non-recursive).
+    pub fn register_single_inode(&mut self, zone_id: u32, path: &str) -> anyhow::Result<usize> {
+        let canon = fs::canonicalize(path)
+            .map_err(|e| anyhow::anyhow!("failed to canonicalize '{}': {e}", path))?;
+        let meta = fs::metadata(&canon)
+            .map_err(|e| anyhow::anyhow!("failed to stat '{}': {e}", canon.display()))?;
+        let ino = meta.ino();
+
+        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+            self.bpf.map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+        map.insert(ino, zone_id, 0)?;
+        Ok(1)
     }
 
     /// Register file inodes as belonging to a zone.

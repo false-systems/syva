@@ -105,11 +105,10 @@ async fn cmd_run(
     // Load eBPF programs (but do NOT attach — no enforcement yet).
     let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
 
-    // Start the event reader (ring buffer -> logs).
+    // Do not take the ENFORCEMENT_EVENTS ring buffer here — it is single-consumer
+    // and the gRPC WatchEvents RPC needs to acquire it. Event logging for the core
+    // binary uses the status subcommand or adapter-side streaming instead.
     let cancel = tokio_util::sync::CancellationToken::new();
-    if let Some(ring_buf) = mgr.take_event_ring_buf() {
-        events::spawn_event_reader(ring_buf, cancel.clone());
-    }
 
     // Attach eBPF hooks — enforcement becomes active.
     mgr.attach_programs()?;

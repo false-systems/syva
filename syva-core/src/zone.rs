@@ -90,6 +90,13 @@ impl ZoneRegistry {
         if self.next_id == 0 {
             anyhow::bail!("zone ID space exhausted");
         }
+        // Cap at MAX_ZONES — the ZONE_POLICY BPF Array has this many entries.
+        if self.next_id >= syva_ebpf_common::MAX_ZONES {
+            anyhow::bail!(
+                "zone ID {} exceeds BPF map limit (MAX_ZONES={})",
+                self.next_id, syva_ebpf_common::MAX_ZONES
+            );
+        }
         let zone_id = self.next_id;
         // Advance. If this was u32::MAX, next call will see next_id=0 and fail.
         self.next_id = self.next_id.wrapping_add(1);

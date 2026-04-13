@@ -37,7 +37,7 @@ struct Cli {
     policy_dir: PathBuf,
 
     /// Unix socket path for connecting to syva-core.
-    #[arg(long, default_value = "/run/syva/core.sock")]
+    #[arg(long, default_value = "/run/syva/syva-core.sock")]
     socket_path: String,
 
     /// Containerd socket path.
