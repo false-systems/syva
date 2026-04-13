@@ -445,7 +445,7 @@ println!("  hooks:");
                     println!("  WARNING: {} total enforcement errors detected.", total_errors);
                     println!("  Errors cause fail-open behavior — operations are ALLOWED");
                     println!("  when kernel struct reads fail. This may indicate wrong");
-                    println!("  kernel struct offsets. Install pahole and restart syva.");
+                    println!("  kernel struct offsets. Check BTF availability and restart syva.");
                 }
             }
             Err(e) => {

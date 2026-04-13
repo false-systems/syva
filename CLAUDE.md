@@ -107,17 +107,18 @@ Kernel struct offsets resolved from `/sys/kernel/btf/vmlinux` at startup via `bt
 
 ### Subcommands
 
-- `syva` (no subcommand) — main enforcement loop with health endpoint
+- `syva` (no subcommand) — main enforcement loop with health endpoint. Handles SIGTERM for graceful Kubernetes shutdown (cleans up BPF pins via `Drop`).
 - `syva status` — reads pinned `ENFORCEMENT_COUNTERS` and prints per-hook allow/deny/error/lost totals
-- `syva events --follow` — streams deny events from pinned `ENFORCEMENT_EVENTS` ring buffer to stdout
+- `syva events --follow [--format text|json]` — streams events from pinned `ENFORCEMENT_EVENTS` ring buffer. JSON mode outputs ndjson (one object per line).
+- `syva verify` — dry-run policy validation. Checks TOML parsing, BTF offset resolution, and `allowed_zones` symmetry without loading BPF. Exits 1 on any error.
 
 ### Health Endpoint
 
 Axum HTTP server on `--health-port` (default 9091):
 - `GET /healthz` — 200 if BPF attached + zones loaded, 503 otherwise. JSON: `{status, attached, zones_loaded, containers_active, uptime_secs}`.
-- `GET /metrics` — Prometheus text format: `syva_up`, `syva_zones_loaded`, `syva_containers_active`, `syva_uptime_seconds`.
+- `GET /metrics` — Prometheus text format: `syva_up`, `syva_zones_loaded`, `syva_containers_active`, `syva_uptime_seconds`, plus per-hook counters: `syva_hook_allow_total`, `syva_hook_deny_total`, `syva_hook_error_total`, `syva_hook_lost_total` (labelled by `hook`). Counter snapshots updated every 30s from `ENFORCEMENT_COUNTERS`.
 
-DaemonSet has a liveness probe using TCP socket check on the health port (30s period, 15s initial delay) and a readiness probe using `GET /healthz` (10s period, 5s initial delay).
+DaemonSet probes: startup (tcpSocket, 5s interval, 30 failures), liveness (tcpSocket, 30s period), readiness (`GET /healthz`, 10s period). PriorityClass `system-node-critical`.
 
 ### Policy Hot-Reload
 
