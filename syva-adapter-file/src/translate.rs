@@ -13,6 +13,6 @@ pub fn to_proto_policy(policy: &ZonePolicy) -> syva_core::ZonePolicy {
         allowed_zones: policy.network.allowed_zones.clone(),
         allow_ptrace: policy.capabilities.allowed.iter()
             .any(|c| c == "CAP_SYS_PTRACE"),
-        zone_type: syva_core::ZoneType::ZoneTypeStandard.into(),
+        zone_type: syva_core::ZoneType::Standard.into(),
     }
 }
