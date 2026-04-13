@@ -1,0 +1,179 @@
+# syva v0.2 — Standalone / ConfigMap deployment
+# Two containers: syva-core (enforcement) + syva-file (policy adapter)
+# Use this when managing policies via TOML files or Kubernetes ConfigMaps.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: syva
+  namespace: syva-system
+  labels:
+    app: syva
+spec:
+  selector:
+    matchLabels:
+      app: syva
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: syva
+    spec:
+      hostPID: true
+      priorityClassName: system-node-critical
+      serviceAccountName: syva
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      initContainers:
+        - name: cleanup-stale-bpf-pins
+          image: ghcr.io/false-systems/syva-core:0.2.0
+          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
+          volumeMounts:
+            - name: bpf
+              mountPath: /sys/fs/bpf
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
+      containers:
+        - name: syva-core
+          image: ghcr.io/false-systems/syva-core:0.2.0
+          args:
+            - --socket-path
+            - /run/syva/syva-core.sock
+          ports:
+            - name: health
+              containerPort: 9091
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: health
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add: ["BPF", "SYS_ADMIN", "PERFMON"]
+          volumeMounts:
+            - name: syva-socket
+              mountPath: /run/syva
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+
+        - name: syva-adapter-file
+          image: ghcr.io/false-systems/syva-adapter-file:0.2.0
+          args:
+            - --policy-dir
+            - /etc/syva/policies
+            - --socket-path
+            - /run/syva/syva-core.sock
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: syva-socket
+              mountPath: /run/syva
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: containerd-state
+              mountPath: /run/containerd/io.containerd.runtime.v2.task
+              readOnly: true
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: policies
+              mountPath: /etc/syva/policies
+              readOnly: true
+
+      volumes:
+        - name: syva-socket
+          emptyDir: {}
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: containerd-state
+          hostPath:
+            path: /run/containerd/io.containerd.runtime.v2.task
+            type: DirectoryOrCreate
+        - name: policies
+          configMap:
+            name: syva-policies
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: syva-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: syva
+  namespace: syva-system

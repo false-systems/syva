@@ -1,0 +1,26 @@
+[package]
+name = "syva-core"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "syva-core"
+path = "src/main.rs"
+
+[dependencies]
+syva-proto = { path = "../syva-proto" }
+syva-ebpf-common = { path = "../syva-ebpf-common", features = ["userspace"] }
+aya = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+libc = "0.2"
+prost = { workspace = true }
