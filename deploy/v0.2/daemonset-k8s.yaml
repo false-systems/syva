@@ -1,0 +1,191 @@
+# syva v0.2 — Kubernetes CRD deployment
+# Two containers: syva-core (enforcement) + syva-k8s (CRD adapter)
+# Use this when managing policies via SyvaZonePolicy CRDs.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: syva
+  namespace: syva-system
+  labels:
+    app: syva
+spec:
+  selector:
+    matchLabels:
+      app: syva
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: syva
+    spec:
+      hostPID: true
+      priorityClassName: system-node-critical
+      serviceAccountName: syva
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      initContainers:
+        - name: cleanup-stale-bpf-pins
+          image: ghcr.io/false-systems/syva-core:0.2.0
+          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
+          volumeMounts:
+            - name: bpf
+              mountPath: /sys/fs/bpf
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
+      containers:
+        - name: syva-core
+          image: ghcr.io/false-systems/syva-core:0.2.0
+          args:
+            - --socket-path
+            - /run/syva/syva-core.sock
+          ports:
+            - name: health
+              containerPort: 9091
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: health
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add: ["BPF", "SYS_ADMIN", "PERFMON"]
+          volumeMounts:
+            - name: syva-socket
+              mountPath: /run/syva
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+
+        - name: syva-adapter-k8s
+          image: ghcr.io/false-systems/syva-adapter-k8s:0.2.0
+          args:
+            - --socket-path
+            - /run/syva/syva-core.sock
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: syva-socket
+              mountPath: /run/syva
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+
+      volumes:
+        - name: syva-socket
+          emptyDir: {}
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: syva-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: syva
+  namespace: syva-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: syva-k8s
+rules:
+  - apiGroups: ["syva.dev"]
+    resources: ["syvazonepolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["syva.dev"]
+    resources: ["syvazonepolicies/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: syva-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: syva-k8s
+subjects:
+  - kind: ServiceAccount
+    name: syva
+    namespace: syva-system
