@@ -4,6 +4,8 @@ members = [
     "syva-proto",
     "syva-core",
     "syva-adapter-file",
+    "syva-adapter-k8s",
+    "syva-adapter-api",
     "syva-ebpf-common",
     "syva",
     "xtask",
