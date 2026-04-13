@@ -6,7 +6,7 @@ Today, container isolation is structural — namespaces and cgroups set up walls
 
 Syva fixes this. It loads small programs into the kernel (via eBPF) that intercept security-sensitive operations — opening files, executing binaries, mapping executable memory, sending signals — and checks whether the caller is allowed to touch the target. If not, the operation is denied before it happens.
 
-No sidecar. No proxy. No runtime replacement. Deploy one agent per node, label your containers, done.
+No sidecar. No proxy. No runtime replacement. Deploy the core engine per node, connect an adapter for your environment, done.
 
 > *Syvä* (Finnish) — deep. Where enforcement happens.
 
@@ -94,11 +94,34 @@ Imagine two groups of containers on the same node:
 
 Without Syva, these containers can interact through the shared kernel — read each other's files via `/proc`, send signals, attach debuggers, load each other's shared libraries. With Syva, every such operation hits a kernel checkpoint that verifies zone membership first.
 
-## How It Works — Step by Step
+## How It Works
 
-**Step 1: You label your containers.**
+Syva has two layers: a **core engine** that manages eBPF enforcement, and **adapters** that tell it what to enforce.
 
-Add an annotation to your pods or containers:
+```
+ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+ │ syva-file    │  │ syva-k8s     │  │ syva-api     │
+ │ TOML/ConfigMap│  │ CRD + Pods   │  │ REST API     │
+ └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+        └─────────────────┼─────────────────┘
+                          │
+               gRPC / Unix socket
+                          │
+        ┌─────────────────▼─────────────────┐
+        │           syva-core               │
+        │   BPF maps + 7 LSM hooks          │
+        │   Health :9091 + Prometheus        │
+        └───────────────────────────────────┘
+```
+
+**The core** loads eBPF programs into the kernel and exposes a gRPC API over a Unix socket. It handles zone registration, container membership, cross-zone communication policy, and inode-level file enforcement. It never knows where commands came from.
+
+**Adapters** connect to the core and translate their domain into enforcement commands:
+- **syva-file** — reads TOML policy files, watches containerd for container events, hot-reloads on ConfigMap changes
+- **syva-k8s** — watches `SyvaZonePolicy` CRDs and Pod annotations via kube-rs
+- **syva-api** — exposes a REST API for programmatic zone management
+
+**Step 1: Label your containers.**
 
 ```yaml
 metadata:
@@ -106,39 +129,23 @@ metadata:
     syva.dev/zone: "frontend"
 ```
 
-**Step 2: You write zone policies.**
+Or define a CRD (with the k8s adapter):
 
-One TOML file per zone. The filename is the zone name.
-
-```
-/etc/syva/policies/
-  ├── frontend.toml
-  └── database.toml
-```
-
-**Step 3: Syva watches containerd.**
-
-When a container starts, Syva reads its annotation, looks up the matching policy, and writes an entry into a kernel-level map:
-
-```
- Container starts
-      │
-      ▼
- Syva sees the containerd event
-      │
-      ▼
- Reads annotation: syva.dev/zone = "frontend"
-      │
-      ▼
- Writes to BPF map:  cgroup_id → zone "frontend"
-      │
-      ▼
- Now the kernel knows this container belongs to "frontend"
+```yaml
+apiVersion: syva.dev/v1alpha1
+kind: SyvaZonePolicy
+metadata:
+  name: frontend
+spec:
+  network:
+    allowedZones: ["database"]
+  filesystem:
+    hostPaths: ["/srv/frontend/static"]
 ```
 
-**Step 4: The kernel enforces.**
+**Step 2: The kernel enforces.**
 
-From this point, every sensitive operation by that container goes through Syva's kernel hooks:
+Every sensitive operation goes through Syva's kernel hooks:
 
 ```
  Process in "frontend" zone calls open()
@@ -181,7 +188,7 @@ Syva intercepts seven operations. Together, they cover the main ways containers 
  │                                                                  │
  │   cgroup_attach()     Can this process escape its zone?          │
  │                                                                  │
- │   unix_connect()      Cross-zone Unix socket audit (visibility)  │
+ │   unix_connect()      Cross-zone Unix socket connections blocked  │
  │                                                                  │
  └──────────────────────────────────────────────────────────────────┘
 
@@ -252,19 +259,20 @@ Syva logs a warning at startup for each declarative-only field that is configure
 ### Building from Source
 
 ```bash
-# Build the agent (Linux only — aya uses Linux-specific libc)
+# Build all binaries (Linux only — aya uses Linux-specific libc)
 cargo build --release
 
 # Build the eBPF programs (requires nightly Rust)
 cargo run -p xtask -- build-ebpf --release
 
-# The agent binary is at target/release/syva
-# The eBPF object is at syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf
+# Binaries:
+#   target/release/syva-core       — enforcement engine
+#   target/release/syva-file       — file/ConfigMap adapter
+#   target/release/syva-k8s        — Kubernetes CRD adapter
+#   target/release/syva-api        — REST API adapter
 ```
 
-### Deploy on Kubernetes
-
-**1. Create policies as a ConfigMap:**
+### Deploy on Kubernetes — ConfigMap Policies
 
 ```bash
 kubectl create namespace syva-system
@@ -273,72 +281,52 @@ kubectl create configmap syva-policies \
   --from-file=frontend.toml=policies/frontend.toml \
   --from-file=database.toml=policies/database.toml \
   -n syva-system
+
+kubectl apply -f deploy/v0.2/daemonset-file.yaml
 ```
 
-**2. Deploy the DaemonSet:**
+This deploys two containers per node: `syva-core` (enforcement) + `syva-file` (policy adapter), sharing a Unix socket via `emptyDir`.
+
+### Deploy on Kubernetes — CRD Policies
 
 ```bash
-kubectl apply -f deploy/syva-daemonset.yaml
-```
+kubectl apply -f deploy/v0.2/daemonset-k8s.yaml
 
-This deploys one Syva agent per node as a DaemonSet with:
-- An init container that cleans up stale BPF pins from previous crashes
-- `CAP_BPF`, `CAP_SYS_ADMIN`, `CAP_PERFMON` (dropped to `CAP_BPF` + `CAP_PERFMON` after BPF load)
-- Read-only root filesystem, seccomp RuntimeDefault
-- Resource limits: 50m–500m CPU, 64Mi–256Mi memory
-- `hostPID: true` (required for cgroup ID resolution via `/proc/{pid}/cgroup`)
-- Mounts: `/sys/fs/bpf`, `/sys/fs/cgroup` (ro), `/sys/kernel/btf` (ro), containerd socket, containerd state (ro)
-
-**3. Label your pods:**
-
-```yaml
-apiVersion: v1
-kind: Pod
+# Define a zone via CRD
+kubectl apply -f - <<EOF
+apiVersion: syva.dev/v1alpha1
+kind: SyvaZonePolicy
 metadata:
-  annotations:
-    syva.dev/zone: "frontend"
+  name: frontend
 spec:
-  containers:
-    - name: app
-      image: your-app:latest
+  network:
+    allowedZones: ["database"]
+  filesystem:
+    hostPaths: ["/srv/frontend/static"]
+EOF
 ```
 
-Containers without `syva.dev/zone` are not enforced — they run in the global zone with no restrictions.
-
-**4. Verify:**
-
-```bash
-# Check agent status on a node
-kubectl exec -n syva-system daemonset/syva -- syva status
-```
-
-```
-syva: ACTIVE
-  pin path: /sys/fs/bpf/syva
-  hooks:
-    file_open        allow=48201  deny=3     error=0    lost=0
-    bprm_check       allow=892    deny=0     error=0    lost=0
-    ptrace_check     allow=12     deny=1     error=0    lost=0
-    task_kill        allow=340    deny=0     error=0    lost=0
-    cgroup_attach    allow=28     deny=0     error=0    lost=0
-    mmap_file        allow=15420  deny=0     error=0    lost=0
-    unix_connect     allow=84     deny=0     error=0    lost=0
-```
+Label your pods with `syva.dev/zone: "frontend"`. Containers without the annotation are not enforced.
 
 ### Deploy Standalone
 
 ```bash
-# Create policy directory
-mkdir -p /etc/syva/policies
-cp policies/standard.toml /etc/syva/policies/
+# Terminal 1: Start the core engine
+syva-core --socket-path /run/syva/syva-core.sock
 
-# Run the agent
-syva --policy-dir /etc/syva/policies
+# Terminal 2: Start the file adapter
+syva-file --policy-dir /etc/syva/policies --socket-path /run/syva/syva-core.sock
 ```
 
-Uses `/run/containerd/containerd.sock` by default. Override with `--containerd-sock`.
+### Verify
 
-Pass `--ebpf-obj` to specify a custom eBPF object file (useful during development).
+```bash
+# Check enforcement status
+kubectl exec -n syva-system -c syva-core daemonset/syva -- syva-core status
+
+# Validate policies without loading BPF
+syva-file verify --policy-dir ./policies
+```
 
 ---
 
@@ -354,12 +342,13 @@ DENY hook=ptrace    pid=992  caller_zone=1 target_zone=2 context=4
 Stream events in real time:
 
 ```bash
-syva events --follow
+syva-core events --follow
+syva-core events --follow --format json    # ndjson output
 ```
 
-Events come from a BPF ring buffer (4MB, ~75K events). Allows are tracked in per-CPU counters only — no per-event overhead for the common path. Lost events (ring buffer overflow) are counted per-hook and shown in `syva status`.
+Events come from a BPF ring buffer (4MB, ~75K events). Allows are tracked in per-CPU counters only — no per-event overhead for the common path. Lost events (ring buffer overflow) are counted per-hook and shown in `syva-core status`.
 
-Enforcement errors (kernel struct read failures) are monitored every 30 seconds. If errors are detected, a warning is logged with guidance to check `syva status`.
+Prometheus metrics are available at `:9091/metrics` — per-hook allow/deny/error/lost counters, plus agent health gauges. Enforcement errors (kernel struct read failures) are monitored every 30 seconds.
 
 ## How Syva Handles Kernel Differences
 
@@ -372,10 +361,8 @@ eBPF programs read kernel struct fields (`task_struct->cgroups`, `file->f_inode`
     ├─ Inject offsets into eBPF programs as globals
     ├─ Load programs (verified by kernel, not yet attached)
     │
-    ├─ Populate all BPF maps (zones, policies, inodes, comms)
-    ├─ Enumerate existing containers
-    │
     ├─ Attach all 7 hooks (enforcement begins)
+    ├─ Adapters connect and populate BPF maps via gRPC
     │
     ├─ Three self-tests validate offset chains:
     │   ├─ Cgroup: BPF helper vs offset chain
@@ -391,42 +378,49 @@ If BTF is unavailable, defaults for Linux 6.1+ are used (self-tests validate cor
 ## Architecture
 
 ```
- ┌───────────────────────────────────────────────────────────┐
- │                        syva                               │
- │                                                           │
- │   Policy Loader          containerd Watcher    eBPF Mgr   │
- │   reads TOML files       gRPC event stream     aya + BTF  │
- │        │                       │                   │      │
- │        └───────────────────────┼───────────────────┘      │
- │                                │                          │
- │                     BPF map read/write                    │
- └────────────────────────────────┼──────────────────────────┘
-                                  │
- ┌────────────────────────────────▼──────────────────────────┐
- │                      Linux kernel                         │
- │                                                           │
- │  ZONE_MEMBERSHIP    cgroup_id → zone      (who is where)  │
- │  ZONE_POLICY        zone → caps, flags    (Array, O(1))   │
- │  INODE_ZONE_MAP     inode → zone          (NO_PREALLOC)   │
- │  ZONE_ALLOWED_COMMS (zone, zone) → ok     (who can talk)   │
- │  ENFORCEMENT_EVENTS ring buffer, 4MB      (what happened)  │
- │                                                           │
- │  7 LSM hooks checking open/exec/mmap/kill/ptrace/cgroup/  │
- │  unix_connect                                             │
- └───────────────────────────────────────────────────────────┘
+ ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+ │   syva-file    │  │   syva-k8s     │  │   syva-api     │
+ │ TOML/ConfigMap │  │  CRD + Pods    │  │   REST API     │
+ └───────┬────────┘  └───────┬────────┘  └───────┬────────┘
+         └──────────────────┬┘───────────────────┘
+                            │
+                 gRPC / Unix socket
+                 /run/syva/syva-core.sock
+                            │
+         ┌──────────────────▼──────────────────┐
+         │            syva-core                │
+         │   ZoneRegistry + BPF map mgmt       │
+         │   Health :9091 + Prometheus          │
+         │   gRPC server (10 RPCs)             │
+         └──────────────────┬──────────────────┘
+                            │
+ ┌──────────────────────────▼──────────────────────────────┐
+ │                      Linux kernel                       │
+ │                                                         │
+ │  ZONE_MEMBERSHIP    cgroup_id → zone    (who is where)  │
+ │  ZONE_POLICY        zone → caps, flags  (Array, O(1))   │
+ │  INODE_ZONE_MAP     inode → zone        (NO_PREALLOC)   │
+ │  ZONE_ALLOWED_COMMS (zone, zone) → ok   (who can talk)  │
+ │  ENFORCEMENT_EVENTS ring buffer, 4MB    (what happened)  │
+ │                                                         │
+ │  7 LSM hooks: open/exec/mmap/kill/ptrace/cgroup/unix    │
+ └─────────────────────────────────────────────────────────┘
 ```
 
-| Crate | What it is |
-|-------|------------|
-| `syva` | The agent binary. Loads eBPF, watches containerd, manages maps. |
-| `syva-ebpf` | The 7 kernel programs. Separate build, targets `bpfel-unknown-none`. |
-| `syva-ebpf-common` | Types shared between kernel and userspace (`#[repr(C)]`, `no_std`). |
-| `xtask` | Build helper: `cargo run -p xtask -- build-ebpf` |
+| Crate | Binary | What it does |
+|-------|--------|------------|
+| `syva-core` | `syva-core` | Enforcement engine. Loads eBPF, serves gRPC, health/metrics. |
+| `syva-adapter-file` | `syva-file` | Reads TOML policies, watches containerd, hot-reloads. |
+| `syva-adapter-k8s` | `syva-k8s` | Watches SyvaZonePolicy CRDs and Pod annotations. |
+| `syva-adapter-api` | `syva-api` | REST API for programmatic zone management. |
+| `syva-proto` | — | gRPC contract between core and adapters. |
+| `syva-ebpf` | — | 7 kernel programs. Separate build, `bpfel-unknown-none`. |
+| `syva-ebpf-common` | — | `#[repr(C)]` types shared between kernel and userspace. |
 
 ## Building
 
 ```bash
-cargo build                        # agent + shared types (Linux only)
+cargo build --release              # all binaries (Linux only)
 cargo run -p xtask -- build-ebpf   # kernel programs (requires nightly Rust)
 cargo test                         # all tests
 ```
