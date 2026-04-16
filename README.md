@@ -169,6 +169,41 @@ Every sensitive operation goes through Syva's kernel hooks:
 
 This check happens **inside the kernel**, on every call. No round-trip to userspace. No daemon in the path.
 
+## Mental Model
+
+Syva is a map-population system wrapped around a small set of kernel hooks.
+
+Userspace exists to keep a few BPF maps correct:
+
+- `ZONE_MEMBERSHIP` — which cgroup belongs to which zone
+- `ZONE_POLICY` — what a zone is allowed to do
+- `INODE_ZONE_MAP` — which inode belongs to which zone
+- `ZONE_ALLOWED_COMMS` — which zone pairs may cross boundaries
+
+The kernel side exists to answer one question quickly:
+
+> Caller zone, target zone, allowed or denied?
+
+That gives Syva three layers:
+
+- **Adapters** discover external truth: TOML files, CRDs, Pods, REST requests, container lifecycle.
+- **syva-core** owns enforcement truth: zone lifecycle state and BPF map population.
+- **eBPF hooks** enforce at runtime: resolve caller, resolve target, consult maps, allow or deny.
+
+The hot-path decision is always the same:
+
+1. Who is the caller?
+2. What is the target?
+3. What zone owns that target?
+4. Is this cross-zone access allowed?
+5. If not, deny and emit an event.
+
+If you keep one idea in your head while reading the code, keep this one:
+Syva is not mainly a policy engine. It is a kernel-enforcement pipeline where
+adapters translate the world into zone state, `syva-core` turns that into BPF
+map state, and the eBPF side turns that map state into allow/deny decisions on
+sensitive kernel operations.
+
 ## Seven Kernel Hooks
 
 Syva intercepts seven operations. Together, they cover the main ways containers can interact through a shared kernel:
