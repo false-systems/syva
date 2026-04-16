@@ -1,2 +1,5 @@
 /target
 **/target
+
+# Harness run artifacts — regenerated every run.
+eval/results/*.json

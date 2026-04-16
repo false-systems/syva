@@ -19,7 +19,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use syva_proto::syva_core::syva_core_client::SyvaCoreClient;
 use syva_proto::syva_core::{
-    AllowCommRequest, AttachContainerRequest, DetachContainerRequest,
+    AllowCommRequest, AttachContainerRequest, DenyCommRequest, DetachContainerRequest,
     RegisterHostPathRequest, RegisterZoneRequest, RemoveZoneRequest,
 };
 use tonic::transport::Channel;
@@ -413,7 +413,11 @@ async fn handle_reload(
     // Apply modifications.
     for change in &changes {
         if let PolicyChange::Modified(name, new_pol) = change {
-            match apply_zone_modification(client, name, new_pol, &new_policies).await {
+            // Capture the old policy before the overwrite below so the
+            // modifier can diff allowed_zones and emit DenyComm for peers
+            // that dropped out of the bilateral allowed set.
+            let old_pol = current_policies.get(name).cloned();
+            match apply_zone_modification(client, name, new_pol, old_pol.as_ref(), &new_policies).await {
                 Ok(()) => {
                     current_policies.insert(name.clone(), new_pol.clone());
                     applied += 1;
@@ -508,10 +512,17 @@ async fn apply_zone_addition(
 }
 
 /// Update an existing zone's policy, host paths, and comms.
+///
+/// `old_policy` is the previously-applied policy for this zone (if any).
+/// When a peer was in the old bilateral-allowed set but is no longer
+/// bilaterally allowed in the new state, DenyComm is issued so the BPF map
+/// stops permitting the pair. Without this, hot-reload could only *add*
+/// allowed comms, never retract them.
 async fn apply_zone_modification(
     client: &mut SyvaCoreClient<Channel>,
     zone_name: &str,
     new_policy: &ZonePolicy,
+    old_policy: Option<&ZonePolicy>,
     all_policies: &HashMap<String, ZonePolicy>,
 ) -> anyhow::Result<()> {
     // Re-register zone with updated policy (idempotent).
@@ -536,20 +547,50 @@ async fn apply_zone_modification(
         }
     }
 
-    // Rebuild bilateral comms.
-    for peer in &new_policy.network.allowed_zones {
-        let bilateral = all_policies
-            .get(peer)
-            .map(|p| p.network.allowed_zones.contains(&zone_name.to_string()))
-            .unwrap_or(false);
-        if bilateral {
-            let _ = client
-                .allow_comm(AllowCommRequest {
+    let bilateral_now: HashSet<&String> = new_policy.network.allowed_zones.iter()
+        .filter(|peer| {
+            all_policies.get(*peer)
+                .map(|p| p.network.allowed_zones.contains(&zone_name.to_string()))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Retract comms that were bilateral under the old policy but no longer are
+    // (peer removed from allowed_zones, or the counterparty's side was removed).
+    if let Some(old) = old_policy {
+        let bilateral_before: HashSet<&String> = old.network.allowed_zones.iter()
+            .filter(|peer| {
+                // Use current all_policies for the counter-side check — the peer
+                // zone's latest policy is the source of truth at reload time.
+                all_policies.get(*peer)
+                    .map(|p| p.network.allowed_zones.contains(&zone_name.to_string()))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        for peer in bilateral_before.difference(&bilateral_now) {
+            if let Err(e) = client
+                .deny_comm(DenyCommRequest {
                     zone_a: zone_name.to_string(),
-                    zone_b: peer.clone(),
+                    zone_b: (*peer).clone(),
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(zone = zone_name, peer = peer.as_str(), %e, "failed to deny comm during modification");
+            } else {
+                tracing::info!(zone = zone_name, peer = peer.as_str(), "reload: comm retracted");
+            }
         }
+    }
+
+    // Rebuild the currently-bilateral set (idempotent on the core side).
+    for peer in &bilateral_now {
+        let _ = client
+            .allow_comm(AllowCommRequest {
+                zone_a: zone_name.to_string(),
+                zone_b: (*peer).clone(),
+            })
+            .await;
     }
 
     Ok(())

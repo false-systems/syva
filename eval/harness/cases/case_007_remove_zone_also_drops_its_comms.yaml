@@ -1,0 +1,10 @@
+id: case_007_remove_zone_also_drops_its_comms
+description: RemoveZone purges every comm pair that involved the removed zone.
+timeout_secs: 30
+spec: |
+  When a zone is removed, the BPF map cleanup path clears every comm entry
+  that involved it (remove_zone_comms). The userspace ListComms mirror must
+  stay consistent with that — after RemoveZone(a), no pair involving a may
+  appear in ListComms for any remaining zone. This is the drift case: if the
+  mirror lags the BPF map, adapters see stale pairs and may re-allow
+  retracted comms on a reload.

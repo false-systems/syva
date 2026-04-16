@@ -11,6 +11,13 @@ members = [
     "xtask",
 ]
 
+# Eval crates live outside the workspace on purpose:
+# - `eval/oracle` is a blackbox test binary against a live syva-core.
+# - `eval/harness` orchestrates specs (YAML) → oracle runs.
+# Both have their own `[workspace]` declarations so they don't pick up
+# workspace defaults, and are invoked via `--manifest-path`.
+exclude = ["eval/oracle", "eval/harness", "syva-ebpf"]
+
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

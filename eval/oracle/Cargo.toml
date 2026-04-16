@@ -1,0 +1,26 @@
+[package]
+name = "syva-oracle"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Blackbox oracle suite for syva-core. Numbered test cases against a running core."
+
+# Standalone — does NOT live in the root workspace.
+[workspace]
+
+[dependencies]
+# Public proto contracts only. The oracle must never import syva-core internals.
+syva-proto = { path = "../../syva-proto" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+tower = { version = "0.4", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+anyhow = "1"
+futures = "0.3"
+
+[[bin]]
+name = "syva-oracle"
+path = "src/main.rs"

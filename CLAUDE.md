@@ -34,7 +34,10 @@ cargo test -p syva-ebpf-common -- test_name
 # Full workspace build (Linux only — aya requires Linux libc)
 cargo build                         # All crates
 
-# eBPF programs (separate workspace, requires nightly + Linux)
+# eBPF programs (separate workspace, Linux only)
+# xtask shells out to `cargo +nightly ... -Z build-std=core` against the
+# bpfel-unknown-none target. There is NO rust-toolchain.toml — you must have
+# a nightly toolchain installed via rustup before this will work.
 cargo run -p xtask -- build-ebpf             # Debug build
 cargo run -p xtask -- build-ebpf --release   # Release build
 
@@ -46,6 +49,14 @@ RUST_LOG=syva_file=debug cargo run --bin syva-file -- --policy-dir ./policies
 
 # Legacy monolithic binary (still compiles, v0.1 compat)
 RUST_LOG=syva=debug cargo run --bin syva -- --policy-dir ./policies
+
+# Blackbox oracle suite (standalone, not in workspace — see eval/README.md)
+SYVA_SOCKET=/tmp/syva-oracle.sock \
+  cargo test --manifest-path eval/oracle/Cargo.toml -- case_001 --exact --nocapture
+
+# Spec-driven harness — runs every eval/harness/cases/*.yaml through the oracle
+SYVA_SOCKET=/tmp/syva-oracle.sock \
+  cargo run --manifest-path eval/harness/Cargo.toml
 ```
 
 Cross-platform crates: `syva-proto`, `syva-ebpf-common`, `syva-adapter-api`, `xtask`. Everything else requires Linux (aya, containerd-client).
@@ -63,12 +74,12 @@ Cross-platform crates: `syva-proto`, `syva-ebpf-common`, `syva-adapter-api`, `xt
 
 ### gRPC API (`syva-proto`)
 
-10 RPCs defined in `syva-proto/proto/syva_core.proto`:
-- **Zone lifecycle**: `RegisterZone`, `RemoveZone`
+12 RPCs defined in `syva-proto/proto/syva_core.proto`:
+- **Zone lifecycle**: `RegisterZone`, `RemoveZone`, `ListZones`
 - **Container membership**: `AttachContainer`, `DetachContainer`
-- **Communication policy**: `AllowComm`, `DenyComm`
+- **Communication policy**: `AllowComm`, `DenyComm`, `ListComms`
 - **Inode registration**: `RegisterHostPath` (supports `recursive` flag)
-- **Observability**: `Status`, `WatchEvents` (server streaming)
+- **Observability**: `Status` (includes `max_zones`), `WatchEvents` (server streaming)
 
 ### Crate Structure
 
@@ -79,7 +90,7 @@ Cross-platform crates: `syva-proto`, `syva-ebpf-common`, `syva-adapter-api`, `xt
 | `syva-adapter-file` | `syva-file` | Linux | TOML policies, containerd watcher, hot-reload |
 | `syva-adapter-k8s` | `syva-k8s` | Linux | SyvaZonePolicy CRD + Pod watcher (kube-rs) |
 | `syva-adapter-api` | `syva-api` | any | REST API proxy to core gRPC |
-| `syva` | `syva` | Linux | Legacy monolithic binary (v0.1 compat, still works) |
+| `syva` | `syva` | Linux | Frozen v0.1 monolithic binary — kept for drop-in compat only. Do NOT port new features here; all new work targets the v0.2 core/adapter split. |
 | `syva-ebpf-common` | — | `no_std` + userspace | `#[repr(C)]` types shared between kernel and userspace |
 | `syva-ebpf` | — | `bpfel-unknown-none` | 7 eBPF LSM programs (separate workspace, nightly) |
 | `xtask` | — | any | Build helper for eBPF programs |
@@ -155,6 +166,17 @@ DaemonSet probes: startup (tcpSocket, 5s interval, 12 failures), liveness (tcpSo
 - `syva-file` (no subcommand) — connect to core, load policies, watch containerd, hot-reload
 - `syva-file verify` — dry-run policy validation (standalone, no core needed)
 
+**syva-k8s**: no subcommands. Runs the CRD + Pod watcher loop. Flags only (`--socket-path`, kube-config discovery).
+
+**syva-api**: no subcommands. Flags: `--socket-path` (default `/run/syva/syva-core.sock`), `--port` (default 8080). REST surface:
+- `POST /zones` — register zone (body: `{zone_name, policy}`)
+- `DELETE /zones/{name}` — remove zone (query: `?drain=true`)
+- `POST /zones/{name}/containers` — attach container
+- `DELETE /containers/{id}` — detach container
+- `POST /zones/{name}/comms` — allow cross-zone comm
+- `GET /status` — core status snapshot
+- `GET /events` — SSE stream from the ring buffer
+
 ### Enforcement Semantics
 
 - **Fail-open on error**: `bpf_probe_read_kernel` failure → allow + increment error counter
@@ -179,6 +201,8 @@ DaemonSet probes: startup (tcpSocket, 5s interval, 12 failures), liveness (tcpSo
 - Container IDs validated (hex/dash/underscore, max 128 chars) before use.
 - `syva-core` has NO dependency on any adapter crate. Adapters have NO dependency on each other.
 - The gRPC socket path `/run/syva/syva-core.sock` is the only contract between core and adapters.
+- **Socket ownership & perms**: `syva-core` creates the parent directory if missing, removes any stale socket file, and binds with the process umask — there is no explicit `chmod`. The socket ends up root-owned (core needs `CAP_BPF`/`CAP_SYS_ADMIN` to load anyway), so adapters must either run as root or share the socket through a pod-level `emptyDir` volume (the v0.2 DaemonSets do the latter).
+- **Canonical policy shape**: read `policies/standard.toml` first — it is the worked example that every `syva-adapter-file` TOML field is derived from. `ZonePolicy` uses `#[serde(deny_unknown_fields)]`, so typos fail loudly.
 
 ## Platform Requirements
 

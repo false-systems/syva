@@ -9,6 +9,7 @@ service SyvaCore {
     // Zone lifecycle
     rpc RegisterZone(RegisterZoneRequest) returns (RegisterZoneResponse);
     rpc RemoveZone(RemoveZoneRequest) returns (RemoveZoneResponse);
+    rpc ListZones(ListZonesRequest) returns (ListZonesResponse);
 
     // Container membership
     rpc AttachContainer(AttachContainerRequest) returns (AttachContainerResponse);
@@ -17,6 +18,7 @@ service SyvaCore {
     // Communication policy
     rpc AllowComm(AllowCommRequest) returns (AllowCommResponse);
     rpc DenyComm(DenyCommRequest) returns (DenyCommResponse);
+    rpc ListComms(ListCommsRequest) returns (ListCommsResponse);
 
     // Inode registration
     rpc RegisterHostPath(RegisterHostPathRequest) returns (RegisterHostPathResponse);
@@ -47,6 +49,20 @@ message RemoveZoneRequest {
 message RemoveZoneResponse {
     bool ok = 1;
     string message = 2;
+}
+
+message ListZonesRequest {}
+
+message ListZonesResponse {
+    repeated ZoneSummary zones = 1;
+}
+
+message ZoneSummary {
+    string name = 1;
+    uint32 zone_id = 2;
+    // One of: "pending", "active", "draining"
+    string state = 3;
+    uint32 containers_active = 4;
 }
 
 // --- Container membership ---
@@ -93,6 +109,21 @@ message DenyCommResponse {
     bool ok = 1;
 }
 
+message ListCommsRequest {
+    // If empty, returns all allowed pairs across all zones.
+    // If set, returns only pairs involving this zone.
+    string zone_name = 1;
+}
+
+message ListCommsResponse {
+    repeated CommPair pairs = 1;
+}
+
+message CommPair {
+    string zone_a = 1;
+    string zone_b = 2;
+}
+
 // --- Inode registration ---
 
 message RegisterHostPathRequest {
@@ -116,6 +147,8 @@ message StatusResponse {
     uint32 containers_active = 3;
     uint64 uptime_secs = 4;
     repeated HookStatus hooks = 5;
+    // BPF Array capacity for ZONE_POLICY — registration fails past this.
+    uint32 max_zones = 6;
 }
 
 message HookStatus {

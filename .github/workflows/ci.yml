@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Cross-platform crates only — no aya, no containerd-client.
+  cross-platform:
+    name: check (${{ matrix.os }}, cross-platform crates)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check syva-proto
+        run: cargo check -p syva-proto
+      - name: Check syva-ebpf-common
+        run: cargo check -p syva-ebpf-common
+      - name: Check syva-ebpf-common (userspace feature)
+        run: cargo check -p syva-ebpf-common --features userspace
+      - name: Check syva-adapter-api
+        run: cargo check -p syva-adapter-api
+      - name: Check xtask
+        run: cargo check -p xtask
+      - name: Test cross-platform crates
+        run: |
+          cargo test -p syva-proto
+          cargo test -p syva-ebpf-common
+          cargo test -p syva-ebpf-common --features userspace
+          cargo test -p syva-adapter-api
+
+  # Full workspace — Linux only because aya uses Linux-specific libc.
+  linux-full:
+    name: build + test (ubuntu-latest, workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Test workspace
+        run: cargo test --workspace
+
+  # eBPF programs build against a separate manifest with nightly + bpfel target.
+  # Verifier-valid bytecode would require a kernel, so we only check compilation.
+  ebpf:
+    name: build eBPF (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: bpfel-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build eBPF programs
+        run: cargo run -p xtask -- build-ebpf
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (workspace, -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo clippy --workspace --all-targets -- -D warnings

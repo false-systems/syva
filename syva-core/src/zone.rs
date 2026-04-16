@@ -17,7 +17,7 @@
 //! Zone IDs are stable while a zone is registered. After `unregister_zone()`,
 //! a re-registration of the same name will allocate a new ID.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Zone lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,10 @@ pub struct ZoneRegistry {
     cgroup_to_info: HashMap<u64, (String, String)>,
     /// container_id → (zone_name, cgroup_id)
     container_to_info: HashMap<String, (String, u64)>,
+    /// Canonicalised allowed cross-zone comm pairs — the two names are
+    /// stored in lexicographic order so the set is symmetric by construction.
+    /// Mirror of BPF ZONE_ALLOWED_COMMS at the name level; purely for ListComms.
+    allowed_comms: HashSet<(String, String)>,
     /// Monotonic zone ID counter. Starts at 1. 0 is reserved for ZONE_ID_HOST.
     next_id: u32,
 }
@@ -75,6 +79,7 @@ impl ZoneRegistry {
             zones: HashMap::new(),
             cgroup_to_info: HashMap::new(),
             container_to_info: HashMap::new(),
+            allowed_comms: HashSet::new(),
             next_id: 1,
         }
     }
@@ -209,6 +214,9 @@ impl ZoneRegistry {
     }
 
     /// Remove a zone entry entirely. Only valid for zones with refcount 0.
+    /// Also wipes any allowed_comms entries involving this zone so the
+    /// mirror stays in sync with the BPF map (core clears those at the same
+    /// time via `remove_zone_comms`).
     /// Returns the zone_id that was removed (it will never be reused).
     pub fn unregister_zone(&mut self, zone_name: &str) -> anyhow::Result<u32> {
         let entry = self.zones.get(zone_name)
@@ -218,6 +226,7 @@ impl ZoneRegistry {
         }
         let zone_id = entry.zone_id;
         self.zones.remove(zone_name);
+        self.allowed_comms.retain(|(a, b)| a != zone_name && b != zone_name);
         Ok(zone_id)
     }
 
@@ -243,6 +252,36 @@ impl ZoneRegistry {
         self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
 
+    /// Full snapshot for ListZones — (name, zone_id, state, refcount).
+    pub fn zones_summary(&self) -> impl Iterator<Item = (&str, u32, ZoneState, usize)> {
+        self.zones.iter().map(|(name, e)| (name.as_str(), e.zone_id, e.state, e.refcount))
+    }
+
+    /// Record an allowed cross-zone comm pair. Idempotent.
+    /// Names are stored canonically (lexicographic) so pairs are symmetric.
+    pub fn record_allow_comm(&mut self, zone_a: &str, zone_b: &str) {
+        self.allowed_comms.insert(canon_pair(zone_a, zone_b));
+    }
+
+    /// Remove an allowed comm pair. No-op if not recorded.
+    pub fn record_deny_comm(&mut self, zone_a: &str, zone_b: &str) {
+        self.allowed_comms.remove(&canon_pair(zone_a, zone_b));
+    }
+
+    /// Iterate allowed comm pairs, optionally filtered to those involving
+    /// a specific zone name. Yields canonicalised (a, b) tuples.
+    pub fn list_allowed_comms<'a>(
+        &'a self,
+        filter_zone: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        self.allowed_comms.iter().filter_map(move |(a, b)| {
+            match filter_zone {
+                Some(z) if a != z && b != z => None,
+                _ => Some((a.as_str(), b.as_str())),
+            }
+        })
+    }
+
     /// Active container count for a zone.
     pub fn refcount(&self, zone_name: &str) -> usize {
         self.zones.get(zone_name).map(|e| e.refcount).unwrap_or(0)
@@ -256,6 +295,20 @@ impl ZoneRegistry {
     /// Total number of tracked containers.
     pub fn container_count(&self) -> usize {
         self.container_to_info.len()
+    }
+
+    /// Lookup state for a zone — used by ListZones.
+    pub fn state(&self, zone_name: &str) -> Option<ZoneState> {
+        self.zones.get(zone_name).map(|e| e.state)
+    }
+}
+
+/// Canonicalise a pair of zone names for symmetric storage.
+fn canon_pair(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
     }
 }
 
@@ -462,14 +515,18 @@ mod tests {
     }
 
     #[test]
-    fn register_zone_allows_u32_max_then_exhausts() {
+    fn register_zone_capped_at_max_zones() {
+        // Registration must fail once next_id reaches MAX_ZONES, because
+        // ZONE_POLICY is a BPF Array whose index range is [0, MAX_ZONES).
         let mut reg = ZoneRegistry::new();
-        reg.next_id = u32::MAX;
-        // u32::MAX is the last valid ID — should succeed.
+        reg.next_id = syva_ebpf_common::MAX_ZONES - 1;
+
+        // The last slot below MAX_ZONES is still usable.
         let id = reg.register_zone("last-zone").unwrap();
-        assert_eq!(id, u32::MAX);
-        // next_id has wrapped to 0 — next registration must fail.
+        assert_eq!(id, syva_ebpf_common::MAX_ZONES - 1);
+
+        // next_id is now == MAX_ZONES → next registration must fail.
         let result = reg.register_zone("one-too-many");
-        assert!(result.is_err());
+        assert!(result.is_err(), "expected registration past MAX_ZONES to fail");
     }
 }

@@ -1,0 +1,9 @@
+id: case_005_allow_comm_then_list_surfaces_pair
+description: After AllowComm(a,b), ListComms filtered by either zone returns the pair.
+timeout_secs: 30
+spec: |
+  AllowComm writes both directions of the pair to ZONE_ALLOWED_COMMS (BPF map)
+  and records it in the userspace mirror used by ListComms. ListComms must
+  then return a CommPair containing both names when filtered by either side.
+  Pair ordering within CommPair is implementation-defined; the oracle
+  canonicalises before comparing.

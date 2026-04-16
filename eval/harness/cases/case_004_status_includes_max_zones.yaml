@@ -1,0 +1,8 @@
+id: case_004_status_includes_max_zones
+description: StatusResponse exposes the BPF ZONE_POLICY Array capacity as max_zones.
+timeout_secs: 15
+spec: |
+  max_zones is the ZONE_POLICY BPF Array size — the hard upper bound on the
+  number of concurrently registered zones. Adapters use this to warn before
+  hitting the cap. Today the constant is 4096; if the BPF map grows, this
+  oracle case must be updated in lock-step with the proto and the BPF source.

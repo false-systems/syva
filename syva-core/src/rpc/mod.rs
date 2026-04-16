@@ -15,21 +15,24 @@ use syva_proto::syva_core::syva_core_server::SyvaCore;
 use syva_proto::syva_core::{
     AllowCommRequest, AllowCommResponse,
     AttachContainerRequest, AttachContainerResponse,
+    CommPair,
     DenyCommRequest, DenyCommResponse,
     DenyEvent,
     DetachContainerRequest, DetachContainerResponse,
+    ListCommsRequest, ListCommsResponse,
+    ListZonesRequest, ListZonesResponse,
     RegisterHostPathRequest, RegisterHostPathResponse,
     RegisterZoneRequest, RegisterZoneResponse,
     RemoveZoneRequest, RemoveZoneResponse,
     StatusRequest, StatusResponse, HookStatus,
-    WatchEventsRequest,
+    WatchEventsRequest, ZoneSummary,
 };
 
 use crate::ebpf::EnforceEbpf;
 use crate::events::HOOK_NAMES;
 use crate::health::{HookCounters, SharedHealth};
 use crate::types::ZoneType;
-use crate::zone::{ZoneRegistry, ZoneTransition};
+use crate::zone::{ZoneRegistry, ZoneState, ZoneTransition};
 
 /// Validate container IDs: hex digits, dashes, underscores only, max 128 chars.
 fn is_valid_container_id(id: &str) -> bool {
@@ -294,16 +297,19 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("both zone_a and zone_b are required"));
         }
 
-        let registry = self.registry.read().await;
+        let mut registry = self.registry.write().await;
         let zone_a_id = registry.zone_id(&req.zone_a)
             .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
         let zone_b_id = registry.zone_id(&req.zone_b)
             .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
-        drop(registry);
 
         let mut ebpf = self.ebpf.lock().await;
         ebpf.set_zone_allowed_comms(zone_a_id, zone_b_id)
             .map_err(|e| Status::internal(format!("failed to set allowed comms: {e}")))?;
+        drop(ebpf);
+
+        // Mirror the pair in the userspace registry so ListComms can enumerate it.
+        registry.record_allow_comm(&req.zone_a, &req.zone_b);
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm allowed via gRPC");
         Ok(Response::new(AllowCommResponse { ok: true }))
@@ -319,12 +325,11 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("both zone_a and zone_b are required"));
         }
 
-        let registry = self.registry.read().await;
+        let mut registry = self.registry.write().await;
         let zone_a_id = registry.zone_id(&req.zone_a)
             .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
         let zone_b_id = registry.zone_id(&req.zone_b)
             .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
-        drop(registry);
 
         // Remove only the requested pair in both directions, preserving
         // any unrelated comm entries involving either zone.
@@ -333,9 +338,55 @@ impl SyvaCore for SyvaCoreService {
             .map_err(|e| Status::internal(format!(
                 "failed to remove comms between '{}' and '{}': {e}", req.zone_a, req.zone_b
             )))?;
+        drop(ebpf);
+
+        registry.record_deny_comm(&req.zone_a, &req.zone_b);
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm denied via gRPC");
         Ok(Response::new(DenyCommResponse { ok: true }))
+    }
+
+    async fn list_zones(
+        &self,
+        _request: Request<ListZonesRequest>,
+    ) -> Result<Response<ListZonesResponse>, Status> {
+        let registry = self.registry.read().await;
+        let zones = registry.zones_summary()
+            .map(|(name, zone_id, state, refcount)| ZoneSummary {
+                name: name.to_string(),
+                zone_id,
+                state: match state {
+                    ZoneState::Pending => "pending",
+                    ZoneState::Active => "active",
+                    ZoneState::Draining => "draining",
+                }.to_string(),
+                containers_active: refcount as u32,
+            })
+            .collect();
+        Ok(Response::new(ListZonesResponse { zones }))
+    }
+
+    async fn list_comms(
+        &self,
+        request: Request<ListCommsRequest>,
+    ) -> Result<Response<ListCommsResponse>, Status> {
+        let req = request.into_inner();
+        let filter = if req.zone_name.is_empty() { None } else { Some(req.zone_name.as_str()) };
+
+        let registry = self.registry.read().await;
+
+        // Reject an explicit filter that points to an unknown zone — returning
+        // an empty list would hide typos.
+        if let Some(z) = filter {
+            if registry.zone_id(z).is_none() {
+                return Err(Status::not_found(format!("zone '{z}' not registered")));
+            }
+        }
+
+        let pairs = registry.list_allowed_comms(filter)
+            .map(|(a, b)| CommPair { zone_a: a.to_string(), zone_b: b.to_string() })
+            .collect();
+        Ok(Response::new(ListCommsResponse { pairs }))
     }
 
     async fn register_host_path(
@@ -420,6 +471,7 @@ impl SyvaCore for SyvaCoreService {
             containers_active: registry.container_count() as u32,
             uptime_secs,
             hooks,
+            max_zones: syva_ebpf_common::MAX_ZONES,
         }))
     }
 

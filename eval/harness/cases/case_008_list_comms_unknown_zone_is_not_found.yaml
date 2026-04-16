@@ -1,0 +1,9 @@
+id: case_008_list_comms_unknown_zone_is_not_found
+description: ListComms with an unknown zone filter returns NotFound, not an empty list.
+timeout_secs: 15
+spec: |
+  Returning an empty result for an unknown filter would silently mask
+  caller typos — a common failure mode when adapters send stale zone
+  names. ListComms must therefore verify the filter zone exists and
+  return gRPC NotFound otherwise. Empty filter (no zone_name) remains a
+  valid "return all pairs" request.
