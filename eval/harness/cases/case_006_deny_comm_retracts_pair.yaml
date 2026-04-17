@@ -1,0 +1,9 @@
+id: case_006_deny_comm_retracts_pair
+description: DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+timeout_secs: 30
+spec: |
+  DenyComm is the targeted retraction RPC — unlike the unscoped comm cleanup
+  path, it must only remove the (a,b) pair and leave any other pair
+  involving a or b intact. This case guards the "surgical retraction"
+  contract that the file and k8s adapters rely on when a policy edit shrinks
+  allowed_zones for a zone.

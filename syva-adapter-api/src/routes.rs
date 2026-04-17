@@ -78,6 +78,21 @@ pub struct StatusJson {
     pub containers_active: u32,
     pub uptime_secs: u64,
     pub hooks: Vec<HookStatusJson>,
+    pub max_zones: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ZoneSummaryJson {
+    pub name: String,
+    pub zone_id: u32,
+    pub state: String,
+    pub containers_active: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommPairJson {
+    pub zone_a: String,
+    pub zone_b: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,11 +128,12 @@ pub struct DenyEventJson {
 
 pub fn router(client: SharedClient) -> Router {
     Router::new()
-        .route("/zones", post(register_zone))
+        .route("/zones", get(list_zones).post(register_zone))
         .route("/zones/{name}", delete(remove_zone))
         .route("/zones/{name}/containers", post(attach_container))
         .route("/containers/{id}", delete(detach_container))
-        .route("/zones/{name}/comms", post(allow_comm))
+        .route("/zones/{name}/comms", get(list_comms).post(allow_comm))
+        .route("/zones/{name}/comms/{peer}", delete(deny_comm))
         .route("/status", get(status))
         .route("/events", get(watch_events))
         .with_state(client)
@@ -286,8 +302,64 @@ async fn status(State(client): State<SharedClient>) -> Response {
                 containers_active: inner.containers_active,
                 uptime_secs: inner.uptime_secs,
                 hooks,
+                max_zones: inner.max_zones,
             })
             .into_response()
+        }
+        Err(e) => grpc_error_to_response(e),
+    }
+}
+
+async fn list_zones(State(client): State<SharedClient>) -> Response {
+    let mut c = client.lock().await;
+    match c.list_zones(ListZonesRequest {}).await {
+        Ok(resp) => {
+            let out: Vec<ZoneSummaryJson> = resp
+                .into_inner()
+                .zones
+                .into_iter()
+                .map(|z| ZoneSummaryJson {
+                    name: z.name,
+                    zone_id: z.zone_id,
+                    state: z.state,
+                    containers_active: z.containers_active,
+                })
+                .collect();
+            Json(out).into_response()
+        }
+        Err(e) => grpc_error_to_response(e),
+    }
+}
+
+async fn list_comms(
+    State(client): State<SharedClient>,
+    Path(name): Path<String>,
+) -> Response {
+    let mut c = client.lock().await;
+    match c.list_comms(ListCommsRequest { zone_name: name }).await {
+        Ok(resp) => {
+            let out: Vec<CommPairJson> = resp
+                .into_inner()
+                .pairs
+                .into_iter()
+                .map(|p| CommPairJson { zone_a: p.zone_a, zone_b: p.zone_b })
+                .collect();
+            Json(out).into_response()
+        }
+        Err(e) => grpc_error_to_response(e),
+    }
+}
+
+async fn deny_comm(
+    State(client): State<SharedClient>,
+    Path((name, peer)): Path<(String, String)>,
+) -> Response {
+    let req = DenyCommRequest { zone_a: name, zone_b: peer };
+    let mut c = client.lock().await;
+    match c.deny_comm(req).await {
+        Ok(resp) => {
+            let inner = resp.into_inner();
+            Json(OkResponse { ok: inner.ok, message: None }).into_response()
         }
         Err(e) => grpc_error_to_response(e),
     }
@@ -450,6 +522,7 @@ mod tests {
                 error: 0,
                 lost: 0,
             }],
+            max_zones: 4096,
         };
         let json = serde_json::to_string(&status).expect("serialize");
         assert!(json.contains("\"attached\":true"));

@@ -429,7 +429,7 @@ impl EnforceEbpf {
         let keys_to_remove: Vec<u64> = map
             .iter()
             .filter_map(|r| r.ok())
-            .filter(|(_, &v)| v == zone_id)
+            .filter(|(_, v)| *v == zone_id)
             .map(|(k, _)| k)
             .collect();
 

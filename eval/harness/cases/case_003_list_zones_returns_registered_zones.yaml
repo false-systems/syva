@@ -1,0 +1,9 @@
+id: case_003_list_zones_returns_registered_zones
+description: ListZones surfaces every registered zone with matching id and a valid state string.
+timeout_secs: 30
+spec: |
+  ListZones is how adapters and the API surface the currently-registered zone
+  set. For each registered zone, the response must include a ZoneSummary whose
+  name equals the registered name, whose zone_id equals the value returned by
+  RegisterZone, and whose state is one of {pending, active, draining}. Unknown
+  state strings indicate a core/proto drift and must fail the case.

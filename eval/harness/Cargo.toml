@@ -1,0 +1,22 @@
+[package]
+name = "syva-harness"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Spec-driven test harness for syva. Loads YAML specs and runs the matching oracle cases."
+
+# Standalone — does NOT live in the root workspace.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "syva-harness"
+path = "src/main.rs"

@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Cross-platform crates only — no aya, no containerd-client.
+  cross-platform:
+    name: check (${{ matrix.os }}, cross-platform crates)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # syva-proto's build.rs invokes protoc via tonic-build. No prost-build
+      # "vendored-protoc" feature is enabled, so the system binary is required.
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Check syva-proto
+        run: cargo check -p syva-proto
+      - name: Check syva-ebpf-common
+        run: cargo check -p syva-ebpf-common
+      # The `userspace` feature pulls in aya, which uses Linux-only libc
+      # symbols (netlink, BPF syscalls). It's not portable to macOS.
+      - name: Check syva-ebpf-common (userspace feature, Linux only)
+        if: runner.os == 'Linux'
+        run: cargo check -p syva-ebpf-common --features userspace
+      - name: Check syva-adapter-api
+        run: cargo check -p syva-adapter-api
+      - name: Check xtask
+        run: cargo check -p xtask
+      - name: Test cross-platform crates
+        run: |
+          cargo test -p syva-proto
+          cargo test -p syva-ebpf-common
+          cargo test -p syva-adapter-api
+      - name: Test syva-ebpf-common (userspace feature, Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test -p syva-ebpf-common --features userspace
+
+  # Full workspace — Linux only because aya uses Linux-specific libc.
+  linux-full:
+    name: build + test (ubuntu-latest, workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Test workspace
+        run: cargo test --workspace
+
+  # eBPF programs build against a separate manifest with nightly.
+  # xtask uses `-Z build-std=core`, so we don't (and can't) install a prebuilt
+  # `rust-std` for `bpfel-unknown-none` — only `rust-src` is needed.
+  # Verifier-valid bytecode would require a kernel, so we only check compilation.
+  ebpf:
+    name: build eBPF (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      # aya-ebpf links via bpf-linker (wraps LLVM). Not a rustup component —
+      # comes from crates.io and takes a minute to compile.
+      - name: Install bpf-linker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: bpf-linker
+      - name: Build eBPF programs
+        run: cargo run -p xtask -- build-ebpf
+
+  # Advisory for now — the repo has pre-existing fmt drift and clippy warnings
+  # (deprecated aya::Bpf/BpfLoader aliases, dead code in the legacy `syva`
+  # binary, etc). These jobs annotate but do not gate merges; cleanup is
+  # tracked as a follow-up PR. `continue-on-error` at the step level marks
+  # the step as failed but keeps the job green.
+  fmt:
+    name: rustfmt (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: cargo clippy (no -D warnings)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets

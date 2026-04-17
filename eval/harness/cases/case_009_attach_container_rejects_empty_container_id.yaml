@@ -1,0 +1,10 @@
+id: case_009_attach_container_rejects_empty_container_id
+description: AttachContainer with an empty container_id is refused (ok=false) before BPF state is touched.
+timeout_secs: 15
+spec: |
+  is_valid_container_id() rejects empty strings. The RPC must honour that
+  check before adding any entry to ZoneRegistry or ZONE_MEMBERSHIP — a
+  refusal arrives as AttachContainerResponse { ok: false, message: "..." },
+  not as gRPC InvalidArgument, so adapters can distinguish caller error
+  from transport faults. Either ok=false with a message or an
+  InvalidArgument status is accepted; silent success is not.

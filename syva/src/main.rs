@@ -406,12 +406,13 @@ async fn cmd_status() -> anyhow::Result<()> {
     // Read enforcement counters from pinned maps.
     let counter_path = pin_path.join("ENFORCEMENT_COUNTERS");
     if counter_path.exists() {
+        let map_data = aya::maps::MapData::from_pin(&counter_path)
+            .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?;
         match PerCpuArray::<_, EnforcementCounters>::try_from(
-            aya::maps::MapData::from_pin(&counter_path)
-                .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?,
+            aya::maps::Map::PerCpuArray(map_data),
         ) {
             Ok(map) => {
-println!("  hooks:");
+                println!("  hooks:");
                 let mut total_errors: u64 = 0;
                 let mut total_lost: u64 = 0;
                 let mut had_read_error = false;
@@ -473,7 +474,7 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
 
     let map_data = aya::maps::MapData::from_pin(pin_path)
         .map_err(|e| anyhow::anyhow!("failed to open pinned ring buffer: {e}"))?;
-    let mut ring_buf = RingBuf::try_from(map_data)?;
+    let mut ring_buf = RingBuf::try_from(aya::maps::Map::RingBuf(map_data))?;
     let json_mode = matches!(format, OutputFormat::Json);
 
     eprintln!("streaming enforcement events (Ctrl+C to stop)...");

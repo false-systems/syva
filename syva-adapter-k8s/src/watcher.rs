@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -25,15 +26,29 @@ pub async fn watch_zone_policies(
 
     let mut stream = watcher::watcher(policies, watcher::Config::default()).boxed();
 
+    // Per-zone snapshot of the allowed_zones set most recently applied to core.
+    // Used on the next Apply to detect peers that were retracted from the CRD
+    // so we can emit DenyComm — without this, CRD edits could only *widen* the
+    // cross-zone allow set, never shrink it.
+    let mut last_allowed: HashMap<String, HashSet<String>> = HashMap::new();
+
     while let Some(event) = stream.next().await {
         match event {
             Ok(Event::Apply(policy)) => {
                 let name = policy.metadata.name.clone().unwrap_or_default();
                 let proto_policy = mapper::spec_to_proto_policy(&policy.spec);
 
+                let new_allowed: HashSet<String> = policy
+                    .spec
+                    .network
+                    .as_ref()
+                    .map(|n| n.allowed_zones.iter().cloned().collect())
+                    .unwrap_or_default();
+                let prev_allowed = last_allowed.get(&name).cloned().unwrap_or_default();
+
                 let mut client = client.lock().await;
 
-                match client
+                let registered = match client
                     .register_zone(RegisterZoneRequest {
                         zone_name: name.clone(),
                         policy: Some(proto_policy),
@@ -43,10 +58,22 @@ pub async fn watch_zone_policies(
                     Ok(resp) => {
                         let zone_id = resp.into_inner().zone_id;
                         tracing::info!(zone = name, zone_id, "registered zone from CRD");
+                        true
                     }
                     Err(e) => {
                         tracing::error!(zone = name, %e, "failed to register zone");
+                        false
                     }
+                };
+
+                if !registered {
+                    // Skip the rest of the apply pipeline — the zone isn't
+                    // on core, so registering host paths / comms against it
+                    // will just fail. Crucially, leave `last_allowed`
+                    // untouched so the next Apply can retry any pending
+                    // retractions/grants against the correct prior snapshot.
+                    drop(client);
+                    continue;
                 }
 
                 // Register host paths
@@ -65,20 +92,57 @@ pub async fn watch_zone_policies(
                     }
                 }
 
-                // Set up comms
-                if let Some(net) = &policy.spec.network {
-                    for peer in &net.allowed_zones {
-                        if let Err(e) = client
-                            .allow_comm(AllowCommRequest {
-                                zone_a: name.clone(),
-                                zone_b: peer.clone(),
-                            })
-                            .await
-                        {
+                // Track which retractions/grants were actually applied so
+                // `last_allowed` stays in sync with core state. A failed
+                // DenyComm stays in `prev_allowed` for the next Apply to
+                // retry; a failed AllowComm means the peer isn't in the
+                // applied set yet.
+                let mut applied_allowed: HashSet<String> = prev_allowed.clone();
+
+                // Retract peers that were in the previous allowed set but are
+                // no longer listed. DenyComm clears both directions on core,
+                // so the counterparty's CRD doesn't need to have already
+                // dropped us for this to be safe.
+                for peer in prev_allowed.difference(&new_allowed) {
+                    match client
+                        .deny_comm(DenyCommRequest {
+                            zone_a: name.clone(),
+                            zone_b: peer.clone(),
+                        })
+                        .await
+                    {
+                        Ok(_) => {
+                            applied_allowed.remove(peer);
+                            tracing::info!(zone = name, peer = peer.as_str(), "CRD retracted allowed peer — comm denied");
+                        }
+                        Err(e) => {
+                            tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to deny comm after CRD retraction");
+                        }
+                    }
+                }
+
+                // (Re-)grant currently listed peers. Idempotent on the core side.
+                for peer in &new_allowed {
+                    match client
+                        .allow_comm(AllowCommRequest {
+                            zone_a: name.clone(),
+                            zone_b: peer.clone(),
+                        })
+                        .await
+                    {
+                        Ok(_) => {
+                            applied_allowed.insert(peer.clone());
+                        }
+                        Err(e) => {
                             tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to allow comm");
                         }
                     }
                 }
+
+                drop(client);
+                // Only store what actually took effect. Next Apply will see
+                // any failed grants/retractions as still-pending diffs.
+                last_allowed.insert(name, applied_allowed);
             }
             Ok(Event::Delete(policy)) => {
                 let name = policy.metadata.name.unwrap_or_default();
@@ -93,6 +157,8 @@ pub async fn watch_zone_policies(
                     Ok(_) => tracing::info!(zone = name, "removed zone (CRD deleted)"),
                     Err(e) => tracing::error!(zone = name, %e, "failed to remove zone"),
                 }
+                drop(client);
+                last_allowed.remove(&name);
             }
             Ok(_) => {} // InitApply, InitDone
             Err(e) => {
@@ -121,14 +187,32 @@ pub async fn watch_pods(
         match event {
             Ok(Event::Apply(pod)) => {
                 if let Some(zone_name) = mapper::zone_name_from_pod(&pod) {
+                    let ns = pod.metadata.namespace.clone().unwrap_or_default();
+                    let pod_name = pod.metadata.name.clone().unwrap_or_default();
                     let container_id = pod.metadata.uid.clone().unwrap_or_default();
                     if container_id.is_empty() {
+                        tracing::warn!(
+                            namespace = ns,
+                            pod = pod_name,
+                            zone = zone_name,
+                            "skipping zoned pod: missing metadata.uid"
+                        );
                         continue;
                     }
 
-                    // Resolve cgroup_id from pod's container statuses
+                    // Resolve cgroup_id from pod's container statuses.
+                    // Returns 0 if containerStatuses is missing (pod not yet scheduled/started)
+                    // or if the scope path isn't one we know how to locate. Kubelet will
+                    // re-emit an Apply once status is populated; we rely on that rather
+                    // than retrying here.
                     let cgroup_id = cgroup_id_from_pod(&pod);
                     if cgroup_id == 0 {
+                        tracing::warn!(
+                            namespace = ns,
+                            pod = pod_name,
+                            zone = zone_name,
+                            "skipping zoned pod: could not resolve cgroup_id (containerStatuses missing or unknown scope path)"
+                        );
                         continue;
                     }
 
