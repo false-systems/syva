@@ -412,7 +412,7 @@ async fn cmd_status() -> anyhow::Result<()> {
             aya::maps::Map::PerCpuArray(map_data),
         ) {
             Ok(map) => {
-println!("  hooks:");
+                println!("  hooks:");
                 let mut total_errors: u64 = 0;
                 let mut total_lost: u64 = 0;
                 let mut had_read_error = false;

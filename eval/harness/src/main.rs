@@ -198,11 +198,14 @@ fn run_one(spec: &Spec, oracle_manifest: &Path) -> CaseResult {
 
 fn tail_kb(s: &str, limit: usize) -> String {
     if s.len() <= limit {
-        s.to_string()
-    } else {
-        let start = s.len() - limit;
-        // Avoid splitting a UTF-8 multibyte char.
-        let boundary = s[start..].char_indices().next().map(|(i, _)| start + i).unwrap_or(start);
-        format!("…{}", &s[boundary..])
+        return s.to_string();
     }
+    // Walk forward until we land on a UTF-8 char boundary. Slicing a `str`
+    // mid-codepoint would panic — `s.len() - limit` is a byte offset and
+    // has no guarantee of aligning with one.
+    let mut boundary = s.len() - limit;
+    while boundary < s.len() && !s.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    format!("…{}", &s[boundary..])
 }

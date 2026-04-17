@@ -48,7 +48,7 @@ pub async fn watch_zone_policies(
 
                 let mut client = client.lock().await;
 
-                match client
+                let registered = match client
                     .register_zone(RegisterZoneRequest {
                         zone_name: name.clone(),
                         policy: Some(proto_policy),
@@ -58,10 +58,22 @@ pub async fn watch_zone_policies(
                     Ok(resp) => {
                         let zone_id = resp.into_inner().zone_id;
                         tracing::info!(zone = name, zone_id, "registered zone from CRD");
+                        true
                     }
                     Err(e) => {
                         tracing::error!(zone = name, %e, "failed to register zone");
+                        false
                     }
+                };
+
+                if !registered {
+                    // Skip the rest of the apply pipeline — the zone isn't
+                    // on core, so registering host paths / comms against it
+                    // will just fail. Crucially, leave `last_allowed`
+                    // untouched so the next Apply can retry any pending
+                    // retractions/grants against the correct prior snapshot.
+                    drop(client);
+                    continue;
                 }
 
                 // Register host paths
@@ -80,39 +92,57 @@ pub async fn watch_zone_policies(
                     }
                 }
 
+                // Track which retractions/grants were actually applied so
+                // `last_allowed` stays in sync with core state. A failed
+                // DenyComm stays in `prev_allowed` for the next Apply to
+                // retry; a failed AllowComm means the peer isn't in the
+                // applied set yet.
+                let mut applied_allowed: HashSet<String> = prev_allowed.clone();
+
                 // Retract peers that were in the previous allowed set but are
                 // no longer listed. DenyComm clears both directions on core,
                 // so the counterparty's CRD doesn't need to have already
                 // dropped us for this to be safe.
                 for peer in prev_allowed.difference(&new_allowed) {
-                    if let Err(e) = client
+                    match client
                         .deny_comm(DenyCommRequest {
                             zone_a: name.clone(),
                             zone_b: peer.clone(),
                         })
                         .await
                     {
-                        tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to deny comm after CRD retraction");
-                    } else {
-                        tracing::info!(zone = name, peer = peer.as_str(), "CRD retracted allowed peer — comm denied");
+                        Ok(_) => {
+                            applied_allowed.remove(peer);
+                            tracing::info!(zone = name, peer = peer.as_str(), "CRD retracted allowed peer — comm denied");
+                        }
+                        Err(e) => {
+                            tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to deny comm after CRD retraction");
+                        }
                     }
                 }
 
                 // (Re-)grant currently listed peers. Idempotent on the core side.
                 for peer in &new_allowed {
-                    if let Err(e) = client
+                    match client
                         .allow_comm(AllowCommRequest {
                             zone_a: name.clone(),
                             zone_b: peer.clone(),
                         })
                         .await
                     {
-                        tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to allow comm");
+                        Ok(_) => {
+                            applied_allowed.insert(peer.clone());
+                        }
+                        Err(e) => {
+                            tracing::warn!(zone = name, peer = peer.as_str(), %e, "failed to allow comm");
+                        }
                     }
                 }
 
                 drop(client);
-                last_allowed.insert(name, new_allowed);
+                // Only store what actually took effect. Next Apply will see
+                // any failed grants/retractions as still-pending diffs.
+                last_allowed.insert(name, applied_allowed);
             }
             Ok(Event::Delete(policy)) => {
                 let name = policy.metadata.name.unwrap_or_default();

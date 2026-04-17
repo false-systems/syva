@@ -296,11 +296,6 @@ impl ZoneRegistry {
     pub fn container_count(&self) -> usize {
         self.container_to_info.len()
     }
-
-    /// Lookup state for a zone — used by ListZones.
-    pub fn state(&self, zone_name: &str) -> Option<ZoneState> {
-        self.zones.get(zone_name).map(|e| e.state)
-    }
 }
 
 /// Canonicalise a pair of zone names for symmetric storage.

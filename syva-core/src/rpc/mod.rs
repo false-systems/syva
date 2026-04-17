@@ -297,19 +297,34 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("both zone_a and zone_b are required"));
         }
 
-        let mut registry = self.registry.write().await;
-        let zone_a_id = registry.zone_id(&req.zone_a)
-            .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
-        let zone_b_id = registry.zone_id(&req.zone_b)
-            .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
+        // Resolve IDs under a read-lock, then release it before awaiting the
+        // eBPF update — holding a write-lock across the BPF syscall would
+        // block unrelated registry readers/writers for no gain. The
+        // subsequent write-lock is held just long enough to record the
+        // mirror entry. If a zone is unregistered in the window, the BPF
+        // entry will be cleared by remove_zone_comms, and the mirror
+        // re-check below skips the stale record.
+        let (zone_a_id, zone_b_id) = {
+            let registry = self.registry.read().await;
+            let a = registry.zone_id(&req.zone_a)
+                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
+            let b = registry.zone_id(&req.zone_b)
+                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
+            (a, b)
+        };
 
-        let mut ebpf = self.ebpf.lock().await;
-        ebpf.set_zone_allowed_comms(zone_a_id, zone_b_id)
-            .map_err(|e| Status::internal(format!("failed to set allowed comms: {e}")))?;
-        drop(ebpf);
+        {
+            let mut ebpf = self.ebpf.lock().await;
+            ebpf.set_zone_allowed_comms(zone_a_id, zone_b_id)
+                .map_err(|e| Status::internal(format!("failed to set allowed comms: {e}")))?;
+        }
 
-        // Mirror the pair in the userspace registry so ListComms can enumerate it.
-        registry.record_allow_comm(&req.zone_a, &req.zone_b);
+        {
+            let mut registry = self.registry.write().await;
+            if registry.zone_id(&req.zone_a).is_some() && registry.zone_id(&req.zone_b).is_some() {
+                registry.record_allow_comm(&req.zone_a, &req.zone_b);
+            }
+        }
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm allowed via gRPC");
         Ok(Response::new(AllowCommResponse { ok: true }))
@@ -325,22 +340,34 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("both zone_a and zone_b are required"));
         }
 
-        let mut registry = self.registry.write().await;
-        let zone_a_id = registry.zone_id(&req.zone_a)
-            .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
-        let zone_b_id = registry.zone_id(&req.zone_b)
-            .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
+        // Same locking shape as allow_comm — resolve IDs under a read-lock,
+        // release before the eBPF await, take a brief write-lock for the
+        // mirror update afterwards.
+        let (zone_a_id, zone_b_id) = {
+            let registry = self.registry.read().await;
+            let a = registry.zone_id(&req.zone_a)
+                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
+            let b = registry.zone_id(&req.zone_b)
+                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
+            (a, b)
+        };
 
-        // Remove only the requested pair in both directions, preserving
-        // any unrelated comm entries involving either zone.
-        let mut ebpf = self.ebpf.lock().await;
-        ebpf.remove_zone_comm_pair(zone_a_id, zone_b_id)
-            .map_err(|e| Status::internal(format!(
-                "failed to remove comms between '{}' and '{}': {e}", req.zone_a, req.zone_b
-            )))?;
-        drop(ebpf);
+        {
+            // Remove only the requested pair in both directions, preserving
+            // any unrelated comm entries involving either zone.
+            let mut ebpf = self.ebpf.lock().await;
+            ebpf.remove_zone_comm_pair(zone_a_id, zone_b_id)
+                .map_err(|e| Status::internal(format!(
+                    "failed to remove comms between '{}' and '{}': {e}", req.zone_a, req.zone_b
+                )))?;
+        }
 
-        registry.record_deny_comm(&req.zone_a, &req.zone_b);
+        {
+            // record_deny_comm is a HashSet remove — safe even if the zone
+            // was unregistered meanwhile (already wiped by unregister_zone).
+            let mut registry = self.registry.write().await;
+            registry.record_deny_comm(&req.zone_a, &req.zone_b);
+        }
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm denied via gRPC");
         Ok(Response::new(DenyCommResponse { ok: true }))
