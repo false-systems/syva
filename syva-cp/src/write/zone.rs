@@ -23,6 +23,20 @@ pub struct CreateZoneOutput {
     pub policy: Policy,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpdateZoneInput {
+    pub zone_id: Uuid,
+    pub if_version: i64,
+    pub policy: Option<PolicyInput>,
+    pub selector_json: Option<JsonValue>,
+    pub metadata_json: Option<JsonValue>,
+}
+
+pub struct UpdateZoneOutput {
+    pub zone: Zone,
+    pub new_policy: Option<Policy>,
+}
+
 impl<'a> TransactionalWriter<'a> {
     pub async fn create_zone(
         &self,
@@ -282,6 +296,304 @@ impl<'a> TransactionalWriter<'a> {
         );
 
         Ok(CreateZoneOutput { zone, policy })
+    }
+
+    pub async fn update_zone(
+        &self,
+        input: UpdateZoneInput,
+        actor: &Actor,
+    ) -> Result<UpdateZoneOutput, CpError> {
+        const OPERATION: &str = "zone.update";
+
+        if input.policy.is_none()
+            && input.selector_json.is_none()
+            && input.metadata_json.is_none()
+        {
+            let err = CpError::InvalidArgument(
+                "at least one of policy, selector_json, or metadata_json must be provided"
+                    .into(),
+            );
+            self.record_rejected_audit(OPERATION, actor, &input, &err).await;
+            return Err(err);
+        }
+
+        match self.try_update_zone(input.clone(), actor).await {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                self.record_rejected_audit(OPERATION, actor, &input, &e).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn try_update_zone(
+        &self,
+        input: UpdateZoneInput,
+        actor: &Actor,
+    ) -> Result<UpdateZoneOutput, CpError> {
+        const OPERATION: &str = "zone.update";
+        let start = Instant::now();
+
+        let event_id = Uuid::new_v4();
+        let audit_id = Uuid::new_v4();
+        let version_row_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "begin_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(zone_advisory_lock_key(input.zone_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "advisory_lock_failed");
+                CpError::Database(e)
+            })?;
+
+        let current: Option<(Uuid, i64, String, JsonValue, JsonValue)> = sqlx::query_as(
+            r#"SELECT team_id, version, status, selector_json, metadata_json
+               FROM zones
+               WHERE id = $1 AND deleted_at IS NULL
+               FOR UPDATE"#,
+        )
+        .bind(input.zone_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "zone_lookup_failed");
+            CpError::Database(e)
+        })?;
+
+        let (team_id, current_version, status, current_selector, current_metadata) = match current
+        {
+            Some(c) => c,
+            None => {
+                metrics::record_transaction_rollback(OPERATION, "zone_not_found");
+                return Err(CpError::NotFound {
+                    resource: "zone",
+                    identifier: input.zone_id.to_string(),
+                });
+            }
+        };
+
+        if status == "draining" || status == "deleted" {
+            metrics::record_transaction_rollback(OPERATION, "zone_not_mutable");
+            return Err(CpError::FailedPrecondition(format!(
+                "zone {} is {}, cannot update",
+                input.zone_id, status
+            )));
+        }
+
+        if current_version != input.if_version {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict");
+            return Err(CpError::VersionConflict {
+                resource: "zone",
+                resource_id: input.zone_id,
+                expected: input.if_version,
+            });
+        }
+
+        sqlx::query(
+            r#"INSERT INTO control_plane_events
+               (id, event_type, source, subject_type, subject_id, team_id,
+                resource_type, resource_id, occurred_at, payload_json)
+               VALUES ($1, 'zone.updated', 'api', $2, $3, $4, 'zone', $5, $6, $7)"#,
+        )
+        .bind(event_id)
+        .bind(&actor.subject_type)
+        .bind(&actor.subject_id)
+        .bind(team_id)
+        .bind(input.zone_id)
+        .bind(now)
+        .bind(json!({
+            "if_version": input.if_version,
+            "has_policy": input.policy.is_some(),
+            "has_selector": input.selector_json.is_some(),
+            "has_metadata": input.metadata_json.is_some(),
+        }))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let new_policy = if let Some(policy_input) = &input.policy {
+            let next_version: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM policies WHERE zone_id = $1",
+            )
+            .bind(input.zone_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "policy_version_calc_failed");
+                CpError::Database(e)
+            })?;
+
+            let policy_id = Uuid::new_v4();
+            let checksum = policy_input.checksum();
+            let summary = policy_input.summary_json.clone().unwrap_or_else(|| json!({}));
+
+            let policy_row = match sqlx::query(
+                r#"INSERT INTO policies
+                   (id, zone_id, version, checksum, policy_json, summary_json,
+                    created_at, created_by_subject, caused_by_event_id)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING id, zone_id, version, checksum, policy_json,
+                             summary_json, created_at, created_by_subject,
+                             caused_by_event_id"#,
+            )
+            .bind(policy_id)
+            .bind(input.zone_id)
+            .bind(next_version)
+            .bind(&checksum)
+            .bind(&policy_input.policy_json)
+            .bind(&summary)
+            .bind(now)
+            .bind(&actor.subject_id)
+            .bind(event_id)
+            .fetch_one(&mut *tx)
+            .await
+            {
+                Ok(row) => row,
+                Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                    metrics::record_transaction_rollback(OPERATION, "policy_checksum_conflict");
+                    return Err(CpError::Conflict {
+                        message: "policy content is identical to an existing version".into(),
+                    });
+                }
+                Err(e) => {
+                    metrics::record_transaction_rollback(OPERATION, "policy_insert_failed");
+                    return Err(CpError::Database(e));
+                }
+            };
+
+            Some(Policy {
+                id: policy_row.get("id"),
+                zone_id: policy_row.get("zone_id"),
+                version: policy_row.get("version"),
+                checksum: policy_row.get("checksum"),
+                policy_json: policy_row.get("policy_json"),
+                summary_json: policy_row.get("summary_json"),
+                created_at: policy_row.get("created_at"),
+                created_by_subject: policy_row.get("created_by_subject"),
+                caused_by_event_id: policy_row.get("caused_by_event_id"),
+            })
+        } else {
+            None
+        };
+
+        let next_selector = input.selector_json.clone().unwrap_or(current_selector);
+        let next_metadata = input.metadata_json.clone().unwrap_or(current_metadata);
+        let new_policy_id = new_policy.as_ref().map(|p| p.id);
+
+        let zone_row = sqlx::query(
+            r#"UPDATE zones
+                  SET current_policy_id = COALESCE($1, current_policy_id),
+                      selector_json = $2,
+                      metadata_json = $3,
+                      version = version + 1,
+                      updated_at = $4,
+                      caused_by_event_id = $5
+                WHERE id = $6 AND version = $7 AND deleted_at IS NULL
+                RETURNING id, team_id, name, display_name, status,
+                          current_policy_id, selector_json, metadata_json,
+                          created_at, updated_at, deleted_at, version,
+                          caused_by_event_id"#,
+        )
+        .bind(new_policy_id)
+        .bind(&next_selector)
+        .bind(&next_metadata)
+        .bind(now)
+        .bind(event_id)
+        .bind(input.zone_id)
+        .bind(input.if_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "zone_update_failed");
+            CpError::Database(e)
+        })?
+        .ok_or_else(|| {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict_race");
+            CpError::VersionConflict {
+                resource: "zone",
+                resource_id: input.zone_id,
+                expected: input.if_version,
+            }
+        })?;
+
+        let zone = Zone {
+            id: zone_row.get("id"),
+            team_id: zone_row.get("team_id"),
+            name: zone_row.get("name"),
+            display_name: zone_row.get("display_name"),
+            status: zone_row.get("status"),
+            current_policy_id: zone_row.get("current_policy_id"),
+            selector_json: zone_row.get("selector_json"),
+            metadata_json: zone_row.get("metadata_json"),
+            created_at: zone_row.get("created_at"),
+            updated_at: zone_row.get("updated_at"),
+            deleted_at: zone_row.get("deleted_at"),
+            version: zone_row.get("version"),
+            caused_by_event_id: zone_row.get("caused_by_event_id"),
+        };
+
+        let snapshot = serde_json::to_value(&zone).map_err(CpError::Serialization)?;
+        sqlx::query(
+            r#"INSERT INTO zone_versions
+               (id, zone_id, version, snapshot_json, created_at,
+                caused_by_event_id)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(version_row_id)
+        .bind(input.zone_id)
+        .bind(zone.version)
+        .bind(&snapshot)
+        .bind(now)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "version_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let request_json = serde_json::to_value(&input).map_err(CpError::Serialization)?;
+        sqlx::query(
+            r#"INSERT INTO audit_log
+               (id, occurred_at, actor_type, actor_id, team_id, action,
+                resource_type, resource_id, result, request_json,
+                control_plane_event_id)
+               VALUES ($1, $2, $3, $4, $5, 'zone.update', 'zone', $6,
+                       'success', $7, $8)"#,
+        )
+        .bind(audit_id)
+        .bind(now)
+        .bind(&actor.actor_type)
+        .bind(&actor.actor_id)
+        .bind(team_id)
+        .bind(input.zone_id)
+        .bind(&request_json)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "commit_failed");
+            CpError::Database(e)
+        })?;
+
+        metrics::record_transaction_duration(OPERATION, start.elapsed());
+
+        Ok(UpdateZoneOutput { zone, new_policy })
     }
 }
 
