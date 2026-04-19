@@ -2,6 +2,12 @@ pub mod syva_core {
     tonic::include_proto!("syva.core.v1");
 }
 
+pub mod syva_control {
+    pub mod v1 {
+        tonic::include_proto!("syva.control.v1");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
