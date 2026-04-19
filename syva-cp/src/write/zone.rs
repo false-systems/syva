@@ -18,6 +18,7 @@ pub struct CreateZoneInput {
     pub metadata_json: Option<JsonValue>,
 }
 
+#[derive(Debug)]
 pub struct CreateZoneOutput {
     pub zone: Zone,
     pub policy: Policy,
@@ -32,6 +33,7 @@ pub struct UpdateZoneInput {
     pub metadata_json: Option<JsonValue>,
 }
 
+#[derive(Debug)]
 pub struct UpdateZoneOutput {
     pub zone: Zone,
     pub new_policy: Option<Policy>,
