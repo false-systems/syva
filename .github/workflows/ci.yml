@@ -53,15 +53,37 @@ jobs:
         run: cargo test -p syva-ebpf-common --features userspace
 
   # Full workspace — Linux only because aya uses Linux-specific libc.
+  # Postgres service backs syva-cp's `#[sqlx::test]` suites; the DATABASE_URL
+  # env points the sqlx macro at it for per-test isolated databases.
   linux-full:
     name: build + test (ubuntu-latest, workspace)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: syva_cp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:dev@localhost:5432/syva_cp
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # ADR 0003 Rule 6 gate: mutating sqlx queries must live under
+      # syva-cp/src/write/. Run this before tests so a Rule 6 violation
+      # fails fast and doesn't spin up a 60-second workspace build first.
+      - name: Check write discipline (ADR 0003 Rule 6)
+        run: cargo run -p xtask -- check-write-discipline
       - name: Build workspace
         run: cargo build --workspace
       - name: Test workspace

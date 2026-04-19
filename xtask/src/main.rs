@@ -12,12 +12,16 @@ enum Cli {
         #[clap(long)]
         release: bool,
     },
+    /// Enforce ADR 0003 Rule 6: mutating sqlx queries only inside
+    /// `syva-cp/src/write/`. Fails the build if any are found elsewhere.
+    CheckWriteDiscipline,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli {
         Cli::BuildEbpf { release } => build_ebpf(release),
+        Cli::CheckWriteDiscipline => check_write_discipline(),
     }
 }
 
@@ -68,5 +72,70 @@ fn build_ebpf(release: bool) -> Result<()> {
         .join("syva-ebpf");
 
     println!("eBPF object built: {}", artifact.display());
+    Ok(())
+}
+
+/// Grep-based enforcement of ADR 0003 Rule 6.
+///
+/// A full clippy lint was considered overkill for a single rule and
+/// would force every contributor to install a custom cargo-plugin. A
+/// recursive regex scan of the working tree is fast, portable, and
+/// catches uncommitted edits — which matters for local "save and run"
+/// flow. CI runs the same check on the freshly checked-out branch so
+/// it still fails on committed violations.
+fn check_write_discipline() -> Result<()> {
+    let root = project_root();
+    let search_root = root.join("syva-cp").join("src");
+    let allowed_dir = root.join("syva-cp").join("src").join("write");
+
+    // Forbidden patterns: any sqlx call that contains INSERT / UPDATE /
+    // DELETE SQL. Case-insensitive because someone will lowercase
+    // keywords someday and this should still catch that.
+    let forbidden = regex::Regex::new(
+        r#"(?i)sqlx::query[^"]*"[^"]*(insert|update|delete)|\.execute\([^)]*"[^"]*(insert|update|delete)"#,
+    )
+    .context("failed to compile forbidden pattern")?;
+
+    let mut violations = Vec::new();
+
+    for entry in walkdir::WalkDir::new(&search_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if path.starts_with(&allowed_dir) {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+
+        for (lineno, line) in content.lines().enumerate() {
+            if forbidden.is_match(line) {
+                let rel = path.strip_prefix(&root).unwrap_or(path);
+                violations.push(format!("{}:{}: {}", rel.display(), lineno + 1, line.trim()));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        eprintln!(
+            "ADR 0003 Rule 6 violation: mutating sqlx queries outside \
+             syva-cp/src/write/"
+        );
+        for v in &violations {
+            eprintln!("  {v}");
+        }
+        eprintln!();
+        eprintln!("All mutating DB writes must go through TransactionalWriter.");
+        eprintln!("Move the offending call into syva-cp/src/write/<resource>.rs.");
+        bail!("write discipline check failed");
+    }
+
+    println!("write discipline check passed");
     Ok(())
 }
