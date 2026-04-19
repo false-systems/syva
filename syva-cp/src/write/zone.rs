@@ -37,6 +37,13 @@ pub struct UpdateZoneOutput {
     pub new_policy: Option<Policy>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeleteZoneInput {
+    pub zone_id: Uuid,
+    pub if_version: i64,
+    pub drain: bool,
+}
+
 impl<'a> TransactionalWriter<'a> {
     pub async fn create_zone(
         &self,
@@ -594,6 +601,214 @@ impl<'a> TransactionalWriter<'a> {
         metrics::record_transaction_duration(OPERATION, start.elapsed());
 
         Ok(UpdateZoneOutput { zone, new_policy })
+    }
+
+    pub async fn delete_zone(
+        &self,
+        input: DeleteZoneInput,
+        actor: &Actor,
+    ) -> Result<Zone, CpError> {
+        const OPERATION: &str = "zone.delete";
+
+        match self.try_delete_zone(input.clone(), actor).await {
+            Ok(zone) => Ok(zone),
+            Err(e) => {
+                self.record_rejected_audit(OPERATION, actor, &input, &e).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn try_delete_zone(
+        &self,
+        input: DeleteZoneInput,
+        actor: &Actor,
+    ) -> Result<Zone, CpError> {
+        const OPERATION: &str = "zone.delete";
+        let start = Instant::now();
+
+        let event_id = Uuid::new_v4();
+        let audit_id = Uuid::new_v4();
+        let version_row_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "begin_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(zone_advisory_lock_key(input.zone_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "advisory_lock_failed");
+                CpError::Database(e)
+            })?;
+
+        let current: Option<(Uuid, i64, String)> = sqlx::query_as(
+            r#"SELECT team_id, version, status
+               FROM zones
+               WHERE id = $1 AND deleted_at IS NULL
+               FOR UPDATE"#,
+        )
+        .bind(input.zone_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "zone_lookup_failed");
+            CpError::Database(e)
+        })?;
+
+        let (team_id, current_version, _status) = match current {
+            Some(c) => c,
+            None => {
+                metrics::record_transaction_rollback(OPERATION, "zone_not_found");
+                return Err(CpError::NotFound {
+                    resource: "zone",
+                    identifier: input.zone_id.to_string(),
+                });
+            }
+        };
+
+        if current_version != input.if_version {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict");
+            return Err(CpError::VersionConflict {
+                resource: "zone",
+                resource_id: input.zone_id,
+                expected: input.if_version,
+            });
+        }
+
+        let (new_status, new_deleted_at, event_type) = if input.drain {
+            ("draining", None::<chrono::DateTime<Utc>>, "zone.draining")
+        } else {
+            ("deleted", Some(now), "zone.deleted")
+        };
+
+        sqlx::query(
+            r#"INSERT INTO control_plane_events
+               (id, event_type, source, subject_type, subject_id, team_id,
+                resource_type, resource_id, occurred_at, payload_json)
+               VALUES ($1, $2, 'api', $3, $4, $5, 'zone', $6, $7, $8)"#,
+        )
+        .bind(event_id)
+        .bind(event_type)
+        .bind(&actor.subject_type)
+        .bind(&actor.subject_id)
+        .bind(team_id)
+        .bind(input.zone_id)
+        .bind(now)
+        .bind(json!({ "drain": input.drain }))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let zone_row = sqlx::query(
+            r#"UPDATE zones
+                  SET status = $1,
+                      deleted_at = $2,
+                      version = version + 1,
+                      updated_at = $3,
+                      caused_by_event_id = $4
+                WHERE id = $5 AND version = $6 AND deleted_at IS NULL
+                RETURNING id, team_id, name, display_name, status,
+                          current_policy_id, selector_json, metadata_json,
+                          created_at, updated_at, deleted_at, version,
+                          caused_by_event_id"#,
+        )
+        .bind(new_status)
+        .bind(new_deleted_at)
+        .bind(now)
+        .bind(event_id)
+        .bind(input.zone_id)
+        .bind(input.if_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "zone_update_failed");
+            CpError::Database(e)
+        })?
+        .ok_or_else(|| {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict_race");
+            CpError::VersionConflict {
+                resource: "zone",
+                resource_id: input.zone_id,
+                expected: input.if_version,
+            }
+        })?;
+
+        let zone = Zone {
+            id: zone_row.get("id"),
+            team_id: zone_row.get("team_id"),
+            name: zone_row.get("name"),
+            display_name: zone_row.get("display_name"),
+            status: zone_row.get("status"),
+            current_policy_id: zone_row.get("current_policy_id"),
+            selector_json: zone_row.get("selector_json"),
+            metadata_json: zone_row.get("metadata_json"),
+            created_at: zone_row.get("created_at"),
+            updated_at: zone_row.get("updated_at"),
+            deleted_at: zone_row.get("deleted_at"),
+            version: zone_row.get("version"),
+            caused_by_event_id: zone_row.get("caused_by_event_id"),
+        };
+
+        let snapshot = serde_json::to_value(&zone).map_err(CpError::Serialization)?;
+        sqlx::query(
+            r#"INSERT INTO zone_versions
+               (id, zone_id, version, snapshot_json, created_at,
+                caused_by_event_id)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(version_row_id)
+        .bind(input.zone_id)
+        .bind(zone.version)
+        .bind(&snapshot)
+        .bind(now)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "version_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let request_json = serde_json::to_value(&input).map_err(CpError::Serialization)?;
+        sqlx::query(
+            r#"INSERT INTO audit_log
+               (id, occurred_at, actor_type, actor_id, team_id, action,
+                resource_type, resource_id, result, request_json,
+                control_plane_event_id)
+               VALUES ($1, $2, $3, $4, $5, 'zone.delete', 'zone', $6,
+                       'success', $7, $8)"#,
+        )
+        .bind(audit_id)
+        .bind(now)
+        .bind(&actor.actor_type)
+        .bind(&actor.actor_id)
+        .bind(team_id)
+        .bind(input.zone_id)
+        .bind(&request_json)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "commit_failed");
+            CpError::Database(e)
+        })?;
+
+        metrics::record_transaction_duration(OPERATION, start.elapsed());
+
+        Ok(zone)
     }
 }
 
