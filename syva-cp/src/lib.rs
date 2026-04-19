@@ -6,6 +6,7 @@
 //! govern every mutating operation in this crate.
 
 pub mod config;
+pub mod db;
 
 use anyhow::Result;
 use config::Config;
