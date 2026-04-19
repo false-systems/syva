@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package syva.control.v1;
+
+// --- Team service ---
+
+service TeamService {
+    rpc CreateTeam(CreateTeamRequest) returns (CreateTeamResponse);
+    rpc GetTeam(GetTeamRequest) returns (GetTeamResponse);
+    rpc ListTeams(ListTeamsRequest) returns (ListTeamsResponse);
+}
+
+message Team {
+    string id = 1;
+    string name = 2;
+    string display_name = 3;
+    string status = 4;
+    // Unix nanoseconds — matches the existing syva.core.v1 timestamp
+    // convention and avoids a google.protobuf.Timestamp import (which
+    // would require threading the WKT include path through tonic-build).
+    int64 created_at_unix_nanos = 5;
+    int64 updated_at_unix_nanos = 6;
+    int64 version = 7;
+    string caused_by_event_id = 8;
+}
+
+message CreateTeamRequest {
+    string name = 1;
+    string display_name = 2;
+}
+
+message CreateTeamResponse {
+    Team team = 1;
+}
+
+message GetTeamRequest {
+    oneof identifier {
+        string id = 1;
+        string name = 2;
+    }
+}
+
+message GetTeamResponse {
+    Team team = 1;
+}
+
+message ListTeamsRequest {
+    int64 limit = 1;
+}
+
+message ListTeamsResponse {
+    repeated Team teams = 1;
+}
