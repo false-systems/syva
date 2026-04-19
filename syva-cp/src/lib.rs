@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod metrics;
+pub mod read;
 pub mod write;
 
 use anyhow::Result;
