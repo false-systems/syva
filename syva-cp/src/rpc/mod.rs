@@ -8,15 +8,22 @@ use tokio::task::JoinHandle;
 use tonic::transport::Server;
 
 pub mod team_service;
+pub mod zone_service;
 
 pub async fn spawn(pool: PgPool, addr: SocketAddr) -> Result<JoinHandle<()>> {
     let team_svc = team_service::TeamServiceImpl { pool: pool.clone() };
+    let zone_svc = zone_service::ZoneServiceImpl { pool: pool.clone() };
 
     let handle = tokio::spawn(async move {
         let result = Server::builder()
             .add_service(
                 syva_proto::syva_control::v1::team_service_server::TeamServiceServer::new(
                     team_svc,
+                ),
+            )
+            .add_service(
+                syva_proto::syva_control::v1::zone_service_server::ZoneServiceServer::new(
+                    zone_svc,
                 ),
             )
             .serve(addr)
