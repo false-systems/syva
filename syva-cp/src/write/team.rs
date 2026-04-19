@@ -10,6 +10,7 @@ use crate::metrics;
 use crate::write::TransactionalWriter;
 use chrono::Utc;
 use serde_json::json;
+use serde_json::Value;
 use sqlx::Row;
 use std::time::Instant;
 use uuid::Uuid;
@@ -61,6 +62,10 @@ impl<'a> TransactionalWriter<'a> {
         let event_id = Uuid::new_v4();
         let audit_id = Uuid::new_v4();
         let now = Utc::now();
+        let request_json = json!({
+            "name": &input.name,
+            "display_name": &input.display_name,
+        });
 
         // Rule 1: one transaction per operation.
         let mut tx = self.pool.begin().await.map_err(|e| {
@@ -86,15 +91,23 @@ impl<'a> TransactionalWriter<'a> {
         .bind(actor.team_id)
         .bind(team_id)
         .bind(now)
-        .bind(json!({
-            "name": input.name,
-            "display_name": input.display_name,
-        }))
+        .bind(request_json.clone())
         .execute(&mut *tx)
         .await;
 
         if let Err(e) = event_result {
             metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            let _ = tx.rollback().await;
+            record_rejected_audit(
+                self.pool,
+                actor,
+                team_id,
+                now,
+                request_json.clone(),
+                "failed",
+                &format!("event insert failed: {e}"),
+            )
+            .await;
             return Err(CpError::Database(e));
         }
 
@@ -118,17 +131,35 @@ impl<'a> TransactionalWriter<'a> {
         let team_row = match team_result {
             Ok(row) => row,
             Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-                // Name collision — surface as AlreadyExists. The transaction
-                // rolls back on drop, so the event/audit rows the caller
-                // never saw are never committed. That's the Rule-2
-                // atomicity property and it's covered by a structural test.
                 metrics::record_transaction_rollback(OPERATION, "name_conflict");
+                let _ = tx.rollback().await;
+                record_rejected_audit(
+                    self.pool,
+                    actor,
+                    team_id,
+                    now,
+                    request_json.clone(),
+                    "denied",
+                    &format!("team name '{}' already exists", input.name),
+                )
+                .await;
                 return Err(CpError::Conflict {
                     message: format!("team name '{}' already exists", input.name),
                 });
             }
             Err(e) => {
                 metrics::record_transaction_rollback(OPERATION, "team_insert_failed");
+                let _ = tx.rollback().await;
+                record_rejected_audit(
+                    self.pool,
+                    actor,
+                    team_id,
+                    now,
+                    request_json.clone(),
+                    "failed",
+                    &format!("team insert failed: {e}"),
+                )
+                .await;
                 return Err(CpError::Database(e));
             }
         };
@@ -159,16 +190,14 @@ impl<'a> TransactionalWriter<'a> {
         .bind(&actor.actor_id)
         .bind(actor.team_id)
         .bind(team_id)
-        .bind(json!({
-            "name": input.name,
-            "display_name": input.display_name,
-        }))
+        .bind(request_json)
         .bind(event_id)
         .execute(&mut *tx)
         .await;
 
         if let Err(e) = audit_result {
             metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
+            let _ = tx.rollback().await;
             return Err(CpError::Database(e));
         }
 
@@ -188,5 +217,40 @@ impl<'a> TransactionalWriter<'a> {
         );
 
         Ok(team)
+    }
+}
+
+async fn record_rejected_audit(
+    pool: &sqlx::postgres::PgPool,
+    actor: &Actor,
+    resource_id: Uuid,
+    occurred_at: chrono::DateTime<Utc>,
+    request_json: Value,
+    result: &'static str,
+    message: &str,
+) {
+    let response_json = json!({ "error": message });
+
+    if let Err(e) = sqlx::query(
+        r#"INSERT INTO audit_log
+           (id, occurred_at, actor_type, actor_id, team_id, action,
+            resource_type, resource_id, result, request_json, response_json,
+            control_plane_event_id)
+           VALUES ($1, $2, $3, $4, $5, 'team.create', 'team', $6,
+                   $7, $8, $9, NULL)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(occurred_at)
+    .bind(&actor.actor_type)
+    .bind(&actor.actor_id)
+    .bind(actor.team_id)
+    .bind(resource_id)
+    .bind(result)
+    .bind(request_json)
+    .bind(response_json)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%e, %resource_id, "failed to record rejected team.create audit row");
     }
 }

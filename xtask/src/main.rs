@@ -75,7 +75,7 @@ fn build_ebpf(release: bool) -> Result<()> {
     Ok(())
 }
 
-/// Grep-based enforcement of ADR 0003 Rule 6.
+/// Regex-based enforcement of ADR 0003 Rule 6.
 ///
 /// A full clippy lint was considered overkill for a single rule and
 /// would force every contributor to install a custom cargo-plugin. A
@@ -88,11 +88,12 @@ fn check_write_discipline() -> Result<()> {
     let search_root = root.join("syva-cp").join("src");
     let allowed_dir = root.join("syva-cp").join("src").join("write");
 
-    // Forbidden patterns: any sqlx call that contains INSERT / UPDATE /
-    // DELETE SQL. Case-insensitive because someone will lowercase
-    // keywords someday and this should still catch that.
+    // Forbidden patterns: any sqlx query-ish entry point that contains
+    // INSERT / UPDATE / DELETE in the following SQL text. We scan the
+    // whole file (not line-by-line) so multi-line raw strings are
+    // caught too.
     let forbidden = regex::Regex::new(
-        r#"(?i)sqlx::query[^"]*"[^"]*(insert|update|delete)|\.execute\([^)]*"[^"]*(insert|update|delete)"#,
+        r#"(?is)sqlx::query(?:_as|_scalar)?!?\s*\(.*?\b(insert|update|delete)\b"#,
     )
     .context("failed to compile forbidden pattern")?;
 
@@ -114,11 +115,15 @@ fn check_write_discipline() -> Result<()> {
             continue;
         };
 
-        for (lineno, line) in content.lines().enumerate() {
-            if forbidden.is_match(line) {
-                let rel = path.strip_prefix(&root).unwrap_or(path);
-                violations.push(format!("{}:{}: {}", rel.display(), lineno + 1, line.trim()));
-            }
+        for m in forbidden.find_iter(&content) {
+            let lineno = content[..m.start()].bytes().filter(|b| *b == b'\n').count() + 1;
+            let snippet = content[m.start()..m.end()]
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let rel = path.strip_prefix(&root).unwrap_or(path);
+            violations.push(format!("{}:{}: {}", rel.display(), lineno, snippet));
         }
     }
 

@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum CpError {
-    #[error("resource not found: {resource} {resource_id}")]
+    #[error("resource not found: {resource} {identifier}")]
     NotFound {
         resource: &'static str,
-        resource_id: Uuid,
+        identifier: String,
     },
 
     #[error("version conflict on {resource} {resource_id}: expected {expected}, current changed")]

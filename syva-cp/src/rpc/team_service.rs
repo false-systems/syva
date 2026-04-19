@@ -91,7 +91,7 @@ impl TeamService for TeamServiceImpl {
 }
 
 fn record_request(method: &'static str) {
-    metrics::counter!(
+    ::metrics::counter!(
         "syva_cp_grpc_requests_total",
         "service" => "TeamService",
         "method" => method

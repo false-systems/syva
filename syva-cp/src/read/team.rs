@@ -22,7 +22,7 @@ pub async fn get_team(pool: &PgPool, team_id: Uuid) -> Result<Team, CpError> {
     .await?
     .ok_or(CpError::NotFound {
         resource: "team",
-        resource_id: team_id,
+        identifier: team_id.to_string(),
     })?;
 
     Ok(row_to_team(&row))
@@ -40,10 +40,7 @@ pub async fn get_team_by_name(pool: &PgPool, name: &str) -> Result<Team, CpError
     .await?
     .ok_or_else(|| CpError::NotFound {
         resource: "team",
-        // Placeholder — the name-based lookup has no UUID to cite. The
-        // REST/gRPC layer typically echoes the name back to the caller
-        // via the Status message, not via resource_id.
-        resource_id: Uuid::nil(),
+        identifier: name.to_string(),
     })?;
 
     Ok(row_to_team(&row))

@@ -139,23 +139,39 @@ async fn create_team_rejects_duplicate_name(pool: PgPool) {
         other => panic!("expected Conflict, got {other:?}"),
     }
 
-    // Rule 1: the failed transaction must not leave orphan event/audit rows.
+    // Rule 1: the failed transaction must not leave orphan event rows.
     let event_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM control_plane_events")
         .fetch_one(&pool)
         .await
         .unwrap()
         .get("c");
-    assert_eq!(
-        event_count, 1,
-        "only the successful insert writes an event"
-    );
+    assert_eq!(event_count, 1, "only the successful insert writes an event");
 
+    // Rule 8: rejected mutations still emit an audit row outside the
+    // rolled-back write transaction.
     let audit_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM audit_log")
         .fetch_one(&pool)
         .await
         .unwrap()
         .get("c");
-    assert_eq!(audit_count, 1, "only the successful insert writes audit");
+    assert_eq!(audit_count, 2, "success + rejected attempt both write audit");
+
+    let rejected_audit = sqlx::query(
+        "SELECT result, control_plane_event_id, response_json
+           FROM audit_log
+          WHERE action = 'team.create'
+       ORDER BY occurred_at DESC
+          LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let result: String = rejected_audit.get("result");
+    let control_plane_event_id: Option<Uuid> = rejected_audit.get("control_plane_event_id");
+    let response_json: serde_json::Value = rejected_audit.get("response_json");
+    assert_eq!(result, "denied");
+    assert!(control_plane_event_id.is_none(), "rejected audit should not point at a rolled-back event");
+    assert_eq!(response_json["error"], "team name 'payments' already exists");
 }
 
 #[sqlx::test]
