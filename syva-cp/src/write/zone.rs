@@ -154,6 +154,44 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
+        let zone_row = match sqlx::query(
+            r#"INSERT INTO zones
+               (id, team_id, name, display_name, status, current_policy_id,
+                selector_json, metadata_json, created_at, updated_at,
+                version, caused_by_event_id)
+               VALUES ($1, $2, $3, $4, 'active', NULL, $5, $6, $7, $7, 1, $8)
+               RETURNING id, team_id, name, display_name, status,
+                         current_policy_id, selector_json, metadata_json,
+                         created_at, updated_at, deleted_at, version,
+                         caused_by_event_id"#,
+        )
+        .bind(zone_id)
+        .bind(input.team_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&selector)
+        .bind(&metadata)
+        .bind(now)
+        .bind(event_id)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                metrics::record_transaction_rollback(OPERATION, "name_conflict");
+                return Err(CpError::Conflict {
+                    message: format!(
+                        "zone name '{}' already exists in team",
+                        input.name
+                    ),
+                });
+            }
+            Err(e) => {
+                metrics::record_transaction_rollback(OPERATION, "zone_insert_failed");
+                return Err(CpError::Database(e));
+            }
+        };
+
         let policy_row = sqlx::query(
             r#"INSERT INTO policies
                (id, zone_id, version, checksum, policy_json, summary_json,
@@ -190,44 +228,19 @@ impl<'a> TransactionalWriter<'a> {
             caused_by_event_id: policy_row.get("caused_by_event_id"),
         };
 
-        let zone_row = match sqlx::query(
-            r#"INSERT INTO zones
-               (id, team_id, name, display_name, status, current_policy_id,
-                selector_json, metadata_json, created_at, updated_at,
-                version, caused_by_event_id)
-               VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $8, 1, $9)
-               RETURNING id, team_id, name, display_name, status,
-                         current_policy_id, selector_json, metadata_json,
-                         created_at, updated_at, deleted_at, version,
-                         caused_by_event_id"#,
+        sqlx::query(
+            r#"UPDATE zones
+                  SET current_policy_id = $1
+                WHERE id = $2"#,
         )
-        .bind(zone_id)
-        .bind(input.team_id)
-        .bind(&input.name)
-        .bind(&input.display_name)
         .bind(policy_id)
-        .bind(&selector)
-        .bind(&metadata)
-        .bind(now)
-        .bind(event_id)
-        .fetch_one(&mut *tx)
+        .bind(zone_id)
+        .execute(&mut *tx)
         .await
-        {
-            Ok(row) => row,
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-                metrics::record_transaction_rollback(OPERATION, "name_conflict");
-                return Err(CpError::Conflict {
-                    message: format!(
-                        "zone name '{}' already exists in team",
-                        input.name
-                    ),
-                });
-            }
-            Err(e) => {
-                metrics::record_transaction_rollback(OPERATION, "zone_insert_failed");
-                return Err(CpError::Database(e));
-            }
-        };
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "zone_policy_link_failed");
+            CpError::Database(e)
+        })?;
 
         let zone = Zone {
             id: zone_row.get("id"),
@@ -235,7 +248,7 @@ impl<'a> TransactionalWriter<'a> {
             name: zone_row.get("name"),
             display_name: zone_row.get("display_name"),
             status: zone_row.get("status"),
-            current_policy_id: zone_row.get("current_policy_id"),
+            current_policy_id: Some(policy_id),
             selector_json: zone_row.get("selector_json"),
             metadata_json: zone_row.get("metadata_json"),
             created_at: zone_row.get("created_at"),

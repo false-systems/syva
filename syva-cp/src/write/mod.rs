@@ -62,15 +62,17 @@ impl<'a> TransactionalWriter<'a> {
         };
 
         let resource_id = audit_resource_id(&request_json);
-        let team_id = audit_team_id(&request_json).or(actor.team_id);
+        let team_id = actor.team_id;
         let response_json = json!({ "error": err.to_string() });
         let result = match err {
             CpError::Database(_) | CpError::Serialization(_) | CpError::Internal(_) => "failed",
             _ => "denied",
         };
-        let (resource_type, action) = operation
+        let resource_type = operation
             .split_once('.')
-            .unwrap_or(("unknown", operation));
+            .map(|(resource_type, _)| resource_type)
+            .unwrap_or("unknown");
+        let action = operation;
 
         if let Err(e) = sqlx::query(
             r#"INSERT INTO audit_log
@@ -95,10 +97,6 @@ impl<'a> TransactionalWriter<'a> {
             tracing::warn!(%e, operation, %resource_id, "failed to record rejected audit row");
         }
     }
-}
-
-fn audit_team_id(request_json: &Value) -> Option<Uuid> {
-    parse_uuid_field(request_json, &["team_id"])
 }
 
 fn audit_resource_id(request_json: &Value) -> Uuid {
