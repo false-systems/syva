@@ -695,21 +695,7 @@ impl<'a> TransactionalWriter<'a> {
             }
         })?;
 
-        let zone = Zone {
-            id: zone_row.get("id"),
-            team_id: zone_row.get("team_id"),
-            name: zone_row.get("name"),
-            display_name: zone_row.get("display_name"),
-            status: zone_row.get("status"),
-            current_policy_id: zone_row.get("current_policy_id"),
-            selector_json: zone_row.get("selector_json"),
-            metadata_json: zone_row.get("metadata_json"),
-            created_at: zone_row.get("created_at"),
-            updated_at: zone_row.get("updated_at"),
-            deleted_at: zone_row.get("deleted_at"),
-            version: zone_row.get("version"),
-            caused_by_event_id: zone_row.get("caused_by_event_id"),
-        };
+        let zone = zone_from_row(&zone_row);
 
         let snapshot = serde_json::to_value(&zone).map_err(CpError::Serialization)?;
         sqlx::query(
@@ -731,7 +717,7 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
-        let request_json = serde_json::to_value(&input).map_err(CpError::Serialization)?;
+        let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
                (id, occurred_at, actor_type, actor_id, team_id, action,
