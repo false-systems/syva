@@ -295,7 +295,7 @@ impl<'a> TransactionalWriter<'a> {
             && input.metadata_json.is_none()
         {
             let err = CpError::InvalidArgument(
-                "at least one of policy, selector_json, or metadata_json must be provided"
+                "at least one of policy, selector_json, metadata_json must be provided"
                     .into(),
             );
             self.record_rejected_audit(OPERATION, actor, &input, &err).await;
@@ -456,17 +456,7 @@ impl<'a> TransactionalWriter<'a> {
                 }
             };
 
-            Some(Policy {
-                id: policy_row.get("id"),
-                zone_id: policy_row.get("zone_id"),
-                version: policy_row.get("version"),
-                checksum: policy_row.get("checksum"),
-                policy_json: policy_row.get("policy_json"),
-                summary_json: policy_row.get("summary_json"),
-                created_at: policy_row.get("created_at"),
-                created_by_subject: policy_row.get("created_by_subject"),
-                caused_by_event_id: policy_row.get("caused_by_event_id"),
-            })
+            Some(policy_from_row(&policy_row))
         } else {
             None
         };
@@ -511,21 +501,7 @@ impl<'a> TransactionalWriter<'a> {
             }
         })?;
 
-        let zone = Zone {
-            id: zone_row.get("id"),
-            team_id: zone_row.get("team_id"),
-            name: zone_row.get("name"),
-            display_name: zone_row.get("display_name"),
-            status: zone_row.get("status"),
-            current_policy_id: zone_row.get("current_policy_id"),
-            selector_json: zone_row.get("selector_json"),
-            metadata_json: zone_row.get("metadata_json"),
-            created_at: zone_row.get("created_at"),
-            updated_at: zone_row.get("updated_at"),
-            deleted_at: zone_row.get("deleted_at"),
-            version: zone_row.get("version"),
-            caused_by_event_id: zone_row.get("caused_by_event_id"),
-        };
+        let zone = zone_from_row(&zone_row);
 
         let snapshot = serde_json::to_value(&zone).map_err(CpError::Serialization)?;
         sqlx::query(
@@ -547,7 +523,7 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
-        let request_json = serde_json::to_value(&input).map_err(CpError::Serialization)?;
+        let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
                (id, occurred_at, actor_type, actor_id, team_id, action,
