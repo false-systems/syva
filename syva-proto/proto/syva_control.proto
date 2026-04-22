@@ -17,9 +17,8 @@ message Team {
     string name = 2;
     string display_name = 3;
     string status = 4;
-    // Unix nanoseconds — matches the existing syva.core.v1 timestamp
-    // convention and avoids a google.protobuf.Timestamp import (which
-    // would require threading the WKT include path through tonic-build).
+    // Unix nanoseconds — Team keeps the existing syva.core.v1 wire shape
+    // for compatibility. Zone and Policy use google.protobuf.Timestamp.
     int64 created_at_unix_nanos = 5;
     int64 updated_at_unix_nanos = 6;
     int64 version = 7;

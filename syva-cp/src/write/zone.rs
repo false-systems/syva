@@ -781,7 +781,7 @@ fn validate_create_zone(input: &CreateZoneInput) -> Result<(), CpError> {
             "zone name must be ASCII alphanumeric, dash, or underscore".into(),
         ));
     }
-    if input.policy.policy_json.is_null() {
+    if !input.policy.policy_json.is_object() {
         return Err(CpError::InvalidArgument(
             "policy_json must be a non-null JSON object".into(),
         ));

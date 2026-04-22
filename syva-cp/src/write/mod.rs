@@ -62,7 +62,7 @@ impl<'a> TransactionalWriter<'a> {
         };
 
         let resource_id = audit_resource_id(&request_json);
-        let team_id = actor.team_id;
+        let team_id = audit_team_id(self.pool, actor, &request_json).await;
         let response_json = json!({ "error": err.to_string() });
         let result = match err {
             CpError::Database(_) | CpError::Serialization(_) | CpError::Internal(_) => "failed",
@@ -101,6 +101,25 @@ impl<'a> TransactionalWriter<'a> {
 
 fn audit_resource_id(request_json: &Value) -> Uuid {
     parse_uuid_field(request_json, &["zone_id", "team_id", "id"]).unwrap_or_else(Uuid::new_v4)
+}
+
+async fn audit_team_id(pool: &PgPool, actor: &Actor, request_json: &Value) -> Option<Uuid> {
+    let candidate = actor
+        .team_id
+        .or_else(|| parse_uuid_field(request_json, &["team_id"]))?;
+
+    match sqlx::query_scalar::<_, i64>("SELECT 1 FROM teams WHERE id = $1")
+        .bind(candidate)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(_)) => Some(candidate),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(%e, team_id = %candidate, "failed to verify audit team_id");
+            None
+        }
+    }
 }
 
 fn parse_uuid_field(request_json: &Value, keys: &[&str]) -> Option<Uuid> {

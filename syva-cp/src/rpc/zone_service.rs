@@ -31,9 +31,9 @@ impl ZoneService for ZoneServiceImpl {
         let team_id = parse_uuid(&req.team_id, "team_id")?;
 
         let policy_json = parse_json(&req.policy_json, "policy_json")?;
-        let summary_json = parse_optional_json(&req.summary_json)?;
-        let selector_json = parse_optional_json(&req.selector_json)?;
-        let metadata_json = parse_optional_json(&req.metadata_json)?;
+        let summary_json = parse_optional_json(&req.summary_json, "summary_json")?;
+        let selector_json = parse_optional_json(&req.selector_json, "selector_json")?;
+        let metadata_json = parse_optional_json(&req.metadata_json, "metadata_json")?;
 
         let actor = dev_actor();
 
@@ -91,8 +91,8 @@ impl ZoneService for ZoneServiceImpl {
                     zone_id,
                     if_version: req.if_version,
                     policy,
-                    selector_json: parse_optional_json(&req.selector_json)?,
-                    metadata_json: parse_optional_json(&req.metadata_json)?,
+                    selector_json: parse_optional_json(&req.selector_json, "selector_json")?,
+                    metadata_json: parse_optional_json(&req.metadata_json, "metadata_json")?,
                 },
                 &actor,
             )
@@ -170,7 +170,7 @@ impl ZoneService for ZoneServiceImpl {
         } else {
             Some(req.status.as_str())
         };
-        let limit = if req.limit == 0 { 50 } else { req.limit };
+        let limit = if req.limit <= 0 { 50 } else { req.limit };
 
         let zones = read::zone::list_zones(&self.pool, team_id, status, limit).await?;
 
@@ -186,7 +186,7 @@ impl ZoneService for ZoneServiceImpl {
         grpc_request_counter("GetZoneHistory");
         let req = request.into_inner();
         let zone_id = parse_uuid(&req.zone_id, "zone_id")?;
-        let limit = if req.limit == 0 { 50 } else { req.limit };
+        let limit = if req.limit <= 0 { 50 } else { req.limit };
 
         let entries = read::zone::get_zone_history(&self.pool, zone_id, limit).await?;
 
@@ -250,13 +250,13 @@ fn parse_json(s: &str, field: &'static str) -> Result<JsonValue, Status> {
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_optional_json(s: &str) -> Result<Option<JsonValue>, Status> {
+fn parse_optional_json(s: &str, field: &'static str) -> Result<Option<JsonValue>, Status> {
     if s.is_empty() {
         Ok(None)
     } else {
         serde_json::from_str(s)
             .map(Some)
-            .map_err(|_| Status::invalid_argument("json field must be valid JSON"))
+            .map_err(|_| Status::invalid_argument(format!("{field} must be valid JSON")))
     }
 }
 

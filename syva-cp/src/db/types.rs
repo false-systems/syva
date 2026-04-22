@@ -8,8 +8,10 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -80,11 +82,34 @@ pub struct PolicyInput {
 }
 
 impl PolicyInput {
+    fn canonicalize_json(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => {
+                let sorted = map
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Self::canonicalize_json(value)))
+                    .collect::<BTreeMap<_, _>>();
+
+                let mut canonical = JsonMap::with_capacity(sorted.len());
+                for (key, value) in sorted {
+                    canonical.insert(key, value);
+                }
+
+                JsonValue::Object(canonical)
+            }
+            JsonValue::Array(values) => JsonValue::Array(
+                values.iter().map(Self::canonicalize_json).collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+
     /// Compute a stable checksum for deduplication and idempotency.
     /// SHA-256 of the canonical JSON form.
     pub fn checksum(&self) -> String {
         use sha2::{Digest, Sha256};
-        let canonical = serde_json::to_string(&self.policy_json).unwrap_or_default();
+        let canonical_json = Self::canonicalize_json(&self.policy_json);
+        let canonical = serde_json::to_string(&canonical_json).unwrap_or_default();
         let hash = Sha256::digest(canonical.as_bytes());
         format!("sha256:{}", hex::encode(hash))
     }
