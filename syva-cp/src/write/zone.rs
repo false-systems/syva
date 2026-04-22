@@ -154,44 +154,6 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
-        let zone_row = match sqlx::query(
-            r#"INSERT INTO zones
-               (id, team_id, name, display_name, status, current_policy_id,
-                selector_json, metadata_json, created_at, updated_at,
-                version, caused_by_event_id)
-               VALUES ($1, $2, $3, $4, 'active', NULL, $5, $6, $7, $7, 1, $8)
-               RETURNING id, team_id, name, display_name, status,
-                         current_policy_id, selector_json, metadata_json,
-                         created_at, updated_at, deleted_at, version,
-                         caused_by_event_id"#,
-        )
-        .bind(zone_id)
-        .bind(input.team_id)
-        .bind(&input.name)
-        .bind(&input.display_name)
-        .bind(&selector)
-        .bind(&metadata)
-        .bind(now)
-        .bind(event_id)
-        .fetch_one(&mut *tx)
-        .await
-        {
-            Ok(row) => row,
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-                metrics::record_transaction_rollback(OPERATION, "name_conflict");
-                return Err(CpError::Conflict {
-                    message: format!(
-                        "zone name '{}' already exists in team",
-                        input.name
-                    ),
-                });
-            }
-            Err(e) => {
-                metrics::record_transaction_rollback(OPERATION, "zone_insert_failed");
-                return Err(CpError::Database(e));
-            }
-        };
-
         let policy_row = sqlx::query(
             r#"INSERT INTO policies
                (id, zone_id, version, checksum, policy_json, summary_json,
@@ -216,47 +178,48 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
-        let policy = Policy {
-            id: policy_row.get("id"),
-            zone_id: policy_row.get("zone_id"),
-            version: policy_row.get("version"),
-            checksum: policy_row.get("checksum"),
-            policy_json: policy_row.get("policy_json"),
-            summary_json: policy_row.get("summary_json"),
-            created_at: policy_row.get("created_at"),
-            created_by_subject: policy_row.get("created_by_subject"),
-            caused_by_event_id: policy_row.get("caused_by_event_id"),
-        };
+        let policy = policy_from_row(&policy_row);
 
-        sqlx::query(
-            r#"UPDATE zones
-                  SET current_policy_id = $1
-                WHERE id = $2"#,
+        let zone_row = match sqlx::query(
+            r#"INSERT INTO zones
+               (id, team_id, name, display_name, status, current_policy_id,
+                selector_json, metadata_json, created_at, updated_at,
+                version, caused_by_event_id)
+               VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $8, 1, $9)
+               RETURNING id, team_id, name, display_name, status,
+                         current_policy_id, selector_json, metadata_json,
+                         created_at, updated_at, deleted_at, version,
+                         caused_by_event_id"#,
         )
-        .bind(policy_id)
         .bind(zone_id)
-        .execute(&mut *tx)
+        .bind(input.team_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(policy_id)
+        .bind(&selector)
+        .bind(&metadata)
+        .bind(now)
+        .bind(event_id)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| {
-            metrics::record_transaction_rollback(OPERATION, "zone_policy_link_failed");
-            CpError::Database(e)
-        })?;
-
-        let zone = Zone {
-            id: zone_row.get("id"),
-            team_id: zone_row.get("team_id"),
-            name: zone_row.get("name"),
-            display_name: zone_row.get("display_name"),
-            status: zone_row.get("status"),
-            current_policy_id: Some(policy_id),
-            selector_json: zone_row.get("selector_json"),
-            metadata_json: zone_row.get("metadata_json"),
-            created_at: zone_row.get("created_at"),
-            updated_at: zone_row.get("updated_at"),
-            deleted_at: zone_row.get("deleted_at"),
-            version: zone_row.get("version"),
-            caused_by_event_id: zone_row.get("caused_by_event_id"),
+        {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                metrics::record_transaction_rollback(OPERATION, "name_conflict");
+                return Err(CpError::Conflict {
+                    message: format!(
+                        "zone name '{}' already exists in team",
+                        input.name
+                    ),
+                });
+            }
+            Err(e) => {
+                metrics::record_transaction_rollback(OPERATION, "zone_insert_failed");
+                return Err(CpError::Database(e));
+            }
         };
+
+        let zone = zone_from_row(&zone_row);
 
         let snapshot = serde_json::to_value(&zone).map_err(CpError::Serialization)?;
         sqlx::query(
@@ -278,7 +241,7 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
-        let request_json = serde_json::to_value(&input).map_err(CpError::Serialization)?;
+        let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
                (id, occurred_at, actor_type, actor_id, team_id, action,
@@ -851,11 +814,16 @@ fn validate_create_zone(input: &CreateZoneInput) -> Result<(), CpError> {
 }
 
 fn hash_name_lock(team_id: Uuid, name: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    team_id.hash(&mut hasher);
-    name.hash(&mut hasher);
-    hasher.finish() as i64
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in team_id.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for b in name.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as i64
 }
 
 #[allow(dead_code)]
@@ -866,4 +834,36 @@ pub(crate) fn zone_advisory_lock_key(zone_id: Uuid) -> i64 {
         key |= (*b as i64) << (i * 8);
     }
     key
+}
+
+pub(crate) fn zone_from_row(row: &sqlx::postgres::PgRow) -> Zone {
+    Zone {
+        id: row.get("id"),
+        team_id: row.get("team_id"),
+        name: row.get("name"),
+        display_name: row.get("display_name"),
+        status: row.get("status"),
+        current_policy_id: row.get("current_policy_id"),
+        selector_json: row.get("selector_json"),
+        metadata_json: row.get("metadata_json"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        deleted_at: row.get("deleted_at"),
+        version: row.get("version"),
+        caused_by_event_id: row.get("caused_by_event_id"),
+    }
+}
+
+pub(crate) fn policy_from_row(row: &sqlx::postgres::PgRow) -> Policy {
+    Policy {
+        id: row.get("id"),
+        zone_id: row.get("zone_id"),
+        version: row.get("version"),
+        checksum: row.get("checksum"),
+        policy_json: row.get("policy_json"),
+        summary_json: row.get("summary_json"),
+        created_at: row.get("created_at"),
+        created_by_subject: row.get("created_by_subject"),
+        caused_by_event_id: row.get("caused_by_event_id"),
+    }
 }
