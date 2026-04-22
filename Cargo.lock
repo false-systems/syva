@@ -3082,12 +3082,14 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "hex",
  "metrics",
  "metrics-exporter-prometheus",
  "prost",
  "prost-types",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "syva-proto",
  "thiserror 1.0.69",
@@ -3111,6 +3113,7 @@ name = "syva-proto"
 version = "0.2.0"
 dependencies = [
  "prost",
+ "prost-types",
  "tonic",
  "tonic-build",
 ]

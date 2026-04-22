@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package syva.control.v1;
 
+import "google/protobuf/timestamp.proto";
+
 // --- Team service ---
 
 service TeamService {
@@ -15,9 +17,8 @@ message Team {
     string name = 2;
     string display_name = 3;
     string status = 4;
-    // Unix nanoseconds — matches the existing syva.core.v1 timestamp
-    // convention and avoids a google.protobuf.Timestamp import (which
-    // would require threading the WKT include path through tonic-build).
+    // Unix nanoseconds — Team keeps the existing syva.core.v1 wire shape
+    // for compatibility. Zone and Policy use google.protobuf.Timestamp.
     int64 created_at_unix_nanos = 5;
     int64 updated_at_unix_nanos = 6;
     int64 version = 7;
@@ -50,4 +51,150 @@ message ListTeamsRequest {
 
 message ListTeamsResponse {
     repeated Team teams = 1;
+}
+
+// ---- Zone service ----
+
+service ZoneService {
+    rpc CreateZone(CreateZoneRequest) returns (CreateZoneResponse);
+    rpc UpdateZone(UpdateZoneRequest) returns (UpdateZoneResponse);
+    rpc DeleteZone(DeleteZoneRequest) returns (DeleteZoneResponse);
+    rpc GetZone(GetZoneRequest) returns (GetZoneResponse);
+    rpc ListZones(ListZonesRequest) returns (ListZonesResponse);
+    rpc GetZoneHistory(GetZoneHistoryRequest) returns (GetZoneHistoryResponse);
+
+    // Stubbed in this session, implemented in session 3/4
+    rpc WatchZones(WatchZonesRequest) returns (stream ZoneEvent);
+    rpc PreviewZoneAssignment(PreviewZoneAssignmentRequest) returns (PreviewZoneAssignmentResponse);
+    rpc GetZoneContext(GetZoneContextRequest) returns (GetZoneContextResponse);
+}
+
+message Zone {
+    string id = 1;
+    string team_id = 2;
+    string name = 3;
+    string display_name = 4;
+    string status = 5;
+    string current_policy_id = 6;
+    string selector_json = 7;   // JSON-encoded
+    string metadata_json = 8;   // JSON-encoded
+    google.protobuf.Timestamp created_at = 9;
+    google.protobuf.Timestamp updated_at = 10;
+    google.protobuf.Timestamp deleted_at = 11;
+    int64 version = 12;
+    string caused_by_event_id = 13;
+}
+
+message Policy {
+    string id = 1;
+    string zone_id = 2;
+    int64 version = 3;
+    string checksum = 4;
+    string policy_json = 5;    // JSON-encoded
+    string summary_json = 6;   // JSON-encoded
+    google.protobuf.Timestamp created_at = 7;
+    string created_by_subject = 8;
+    string caused_by_event_id = 9;
+}
+
+message CreateZoneRequest {
+    string team_id = 1;
+    string name = 2;
+    string display_name = 3;
+    string policy_json = 4;       // required, JSON-encoded
+    string summary_json = 5;      // optional
+    string selector_json = 6;     // optional
+    string metadata_json = 7;     // optional
+}
+
+message CreateZoneResponse {
+    Zone zone = 1;
+    Policy policy = 2;
+}
+
+message UpdateZoneRequest {
+    string zone_id = 1;
+    int64 if_version = 2;         // optimistic lock, required
+    string policy_json = 3;       // optional; if set, creates new policy version
+    string selector_json = 4;     // optional; if set, updates selector
+    string metadata_json = 5;     // optional; if set, updates metadata
+}
+
+message UpdateZoneResponse {
+    Zone zone = 1;
+    Policy new_policy = 2;        // set only if policy_json was provided
+}
+
+message DeleteZoneRequest {
+    string zone_id = 1;
+    int64 if_version = 2;         // optimistic lock, required
+    bool drain = 3;               // if true, status → 'draining' until containers detach
+}
+
+message DeleteZoneResponse {
+    Zone zone = 1;
+}
+
+message GetZoneRequest {
+    oneof identifier {
+        string id = 1;
+        ZoneNameRef name_ref = 2;
+    }
+}
+
+message ZoneNameRef {
+    string team_id = 1;
+    string name = 2;
+}
+
+message GetZoneResponse {
+    Zone zone = 1;
+    Policy current_policy = 2;
+}
+
+message ListZonesRequest {
+    string team_id = 1;           // required
+    string status = 2;            // optional filter: active, pending, draining
+    int64 limit = 3;
+}
+
+message ListZonesResponse {
+    repeated Zone zones = 1;
+}
+
+message GetZoneHistoryRequest {
+    string zone_id = 1;
+    int64 limit = 2;              // default 50, max 500
+}
+
+message GetZoneHistoryResponse {
+    repeated ZoneHistoryEntry entries = 1;
+}
+
+message ZoneHistoryEntry {
+    int64 version = 1;
+    string snapshot_json = 2;
+    google.protobuf.Timestamp created_at = 3;
+    string caused_by_event_id = 4;
+}
+
+// Stubs (return UNIMPLEMENTED in session 2)
+message WatchZonesRequest {
+    string team_id = 1;
+}
+message ZoneEvent {
+    string type = 1;
+    Zone zone = 2;
+}
+message PreviewZoneAssignmentRequest {
+    string zone_id = 1;
+}
+message PreviewZoneAssignmentResponse {
+    repeated string candidate_node_ids = 1;
+}
+message GetZoneContextRequest {
+    string zone_id = 1;
+}
+message GetZoneContextResponse {
+    string context_json = 1;
 }
