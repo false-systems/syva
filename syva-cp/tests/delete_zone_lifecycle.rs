@@ -1,6 +1,7 @@
 use serde_json::json;
 use sqlx::postgres::PgPool;
 use syva_cp::db::types::{Actor, PolicyInput};
+use syva_cp::error::CpError;
 use syva_cp::write::team::CreateTeamInput;
 use syva_cp::write::zone::{CreateZoneInput, DeleteZoneInput};
 use syva_cp::write::TransactionalWriter;
@@ -71,7 +72,7 @@ async fn delete_zone_drain_sets_status_draining(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn delete_zone_immediate_sets_deleted_at(pool: PgPool) {
+async fn delete_zone_immediate_sets_deleted_at_and_hides(pool: PgPool) {
     let (zone_id, v) = seed(&pool).await;
     let writer = TransactionalWriter::new(&pool);
 
@@ -91,5 +92,25 @@ async fn delete_zone_immediate_sets_deleted_at(pool: PgPool) {
     assert!(zone.deleted_at.is_some());
 
     let err = syva_cp::read::zone::get_zone(&pool, zone_id).await.unwrap_err();
-    assert!(matches!(err, syva_cp::error::CpError::NotFound { .. }));
+    assert!(matches!(err, CpError::NotFound { .. }));
+}
+
+#[sqlx::test]
+async fn delete_zone_with_stale_version_returns_conflict(pool: PgPool) {
+    let (zone_id, v) = seed(&pool).await;
+    let writer = TransactionalWriter::new(&pool);
+
+    let err = writer
+        .delete_zone(
+            DeleteZoneInput {
+                zone_id,
+                if_version: v + 99,
+                drain: true,
+            },
+            &actor(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, CpError::VersionConflict { .. }));
 }
