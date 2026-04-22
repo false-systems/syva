@@ -64,7 +64,7 @@ cargo run -p xtask -- check-write-discipline
 The check is documented in ADR 0003 Rule 6 and wired into the Linux
 CI job ahead of the workspace build so violations fail fast.
 
-## E2E Smoke Test (Session 2)
+## E2E Smoke Test — Zone Lifecycle (Session 2)
 
 ```bash
 # 1. Start postgres
@@ -76,44 +76,56 @@ sleep 2
 # 2. Run syva-cp
 export SYVA_CP_DATABASE_URL=postgres://postgres:dev@localhost:5432/syva_cp
 cargo run --bin syva-cp &
+CP_PID=$!
 sleep 2
 
-# 3. Create a team
-grpcurl -plaintext -d '{"name":"payments","display_name":"Payments"}' \
-    localhost:50051 syva.control.v1.TeamService/CreateTeam
-# returns team JSON; note the id as $TEAM_ID
+# 3. Create a team; capture team_id
+TEAM_ID=$(grpcurl -plaintext \
+    -d '{"name":"payments","display_name":"Payments"}' \
+    localhost:50051 syva.control.v1.TeamService/CreateTeam \
+    | jq -r '.team.id')
+echo "team: $TEAM_ID"
 
-# 4. Create a zone
-grpcurl -plaintext -d "{
+# 4. Create a zone; capture zone_id
+ZONE_ID=$(grpcurl -plaintext -d "{
     \"team_id\":\"$TEAM_ID\",
     \"name\":\"api-prod\",
     \"policy_json\":\"{\\\"allowed_zones\\\":[]}\"
-}" localhost:50051 syva.control.v1.ZoneService/CreateZone
-# returns zone JSON with version=1; note the id as $ZONE_ID
+}" localhost:50051 syva.control.v1.ZoneService/CreateZone \
+    | jq -r '.zone.id')
+echo "zone: $ZONE_ID"
 
-# 5. Update the zone (new policy version)
+# 5. Update the zone with a new policy (version 2)
 grpcurl -plaintext -d "{
     \"zone_id\":\"$ZONE_ID\",
     \"if_version\":1,
     \"policy_json\":\"{\\\"allowed_zones\\\":[\\\"db\\\"]}\"
 }" localhost:50051 syva.control.v1.ZoneService/UpdateZone
-# returns zone with version=2 and new_policy with version=2
 
-# 6. Get zone history
+# 6. History shows two entries
 grpcurl -plaintext -d "{\"zone_id\":\"$ZONE_ID\"}" \
     localhost:50051 syva.control.v1.ZoneService/GetZoneHistory
-# returns 2 entries (version 1 and 2)
 
-# 7. Delete (drain mode)
+# 7. Stale-version update returns FAILED_PRECONDITION
+grpcurl -plaintext -d "{
+    \"zone_id\":\"$ZONE_ID\",
+    \"if_version\":1,
+    \"policy_json\":\"{\\\"whatever\\\":true}\"
+}" localhost:50051 syva.control.v1.ZoneService/UpdateZone || echo "expected conflict"
+
+# 8. Drain the zone
 grpcurl -plaintext -d "{
     \"zone_id\":\"$ZONE_ID\",
     \"if_version\":2,
     \"drain\":true
 }" localhost:50051 syva.control.v1.ZoneService/DeleteZone
-# returns zone with status='draining'
+
+# 9. Verify metrics recorded
+curl -s http://localhost:9092/metrics \
+    | grep 'operation="zone.create"' | head -1
 
 # Clean up
-kill %1
+kill $CP_PID
 docker rm -f syva-cp-pg
 ```
 
