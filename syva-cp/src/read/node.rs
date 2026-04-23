@@ -76,10 +76,13 @@ pub async fn load_labels(pool: &PgPool, node_id: Uuid) -> Result<NodeLabels, CpE
         .fetch_all(pool)
         .await?;
 
-    let mut labels = BTreeMap::new();
-    for row in rows {
-        labels.insert(row.get::<String, _>("key"), row.get::<String, _>("value"));
-    }
-
-    Ok(labels)
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("key"),
+                row.get::<String, _>("value"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>())
 }
