@@ -198,3 +198,186 @@ message GetZoneContextRequest {
 message GetZoneContextResponse {
     string context_json = 1;
 }
+
+// ---- Node service ----
+
+service NodeService {
+    rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc DecommissionNode(DecommissionNodeRequest) returns (DecommissionNodeResponse);
+    rpc SetNodeLabels(SetNodeLabelsRequest) returns (SetNodeLabelsResponse);
+    rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+    rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+}
+
+message Node {
+    string id = 1;
+    string node_name = 2;
+    string cluster_id = 3;
+    string status = 4;
+    string fingerprint = 5;
+    google.protobuf.Timestamp last_seen_at = 6;
+    google.protobuf.Timestamp created_at = 7;
+    google.protobuf.Timestamp updated_at = 8;
+    int64 version = 9;
+    map<string, string> labels = 10;
+    string capabilities_json = 11;
+    string metadata_json = 12;
+}
+
+message RegisterNodeRequest {
+    string node_name = 1;
+    string fingerprint = 2;
+    string cluster_id = 3;
+    map<string, string> labels = 4;
+    string capabilities_json = 5;
+    string proposed_id = 6;
+}
+
+message RegisterNodeResponse {
+    Node node = 1;
+    string assigned_id = 2;
+}
+
+message HeartbeatRequest {
+    string node_id = 1;
+    string status_hint = 2;
+}
+
+message HeartbeatResponse {
+    google.protobuf.Timestamp server_time = 1;
+}
+
+message DecommissionNodeRequest {
+    string node_id = 1;
+    int64 if_version = 2;
+}
+
+message DecommissionNodeResponse {
+    Node node = 1;
+}
+
+message SetNodeLabelsRequest {
+    string node_id = 1;
+    int64 if_version = 2;
+    map<string, string> labels = 3;
+}
+
+message SetNodeLabelsResponse {
+    Node node = 1;
+}
+
+message GetNodeRequest {
+    oneof identifier {
+        string id = 1;
+        string node_name = 2;
+    }
+}
+
+message GetNodeResponse {
+    Node node = 1;
+}
+
+message ListNodesRequest {
+    string status = 1;
+    int64 limit = 2;
+}
+
+message ListNodesResponse {
+    repeated Node nodes = 1;
+}
+
+// ---- Assignment service ----
+
+service AssignmentService {
+    rpc SubscribeAssignments(SubscribeAssignmentsRequest) returns (stream NodeAssignmentUpdate);
+    rpc ReportAssignmentState(ReportAssignmentStateRequest) returns (ReportAssignmentStateResponse);
+    rpc GetAssignment(GetAssignmentRequest) returns (GetAssignmentResponse);
+    rpc ListAssignments(ListAssignmentsRequest) returns (ListAssignmentsResponse);
+}
+
+message SubscribeAssignmentsRequest {
+    string node_id = 1;
+}
+
+message NodeAssignmentUpdate {
+    enum Kind {
+        FULL_SNAPSHOT = 0;
+        UPSERT = 1;
+        REMOVE = 2;
+    }
+
+    Kind kind = 1;
+    repeated ZoneAssignment assignments = 2;
+    string removed_zone_id = 3;
+    int64 server_revision = 4;
+}
+
+message ZoneAssignment {
+    string assignment_id = 1;
+    string zone_id = 2;
+    string zone_name = 3;
+    int64 desired_zone_version = 4;
+    string desired_policy_id = 5;
+    int64 desired_policy_version = 6;
+    string policy_json = 7;
+    string team_id = 8;
+}
+
+message ReportAssignmentStateRequest {
+    string node_id = 1;
+    repeated AppliedAssignment applied = 2;
+    repeated FailedAssignment failed = 3;
+}
+
+message AppliedAssignment {
+    string assignment_id = 1;
+    int64 actual_zone_version = 2;
+    string actual_policy_id = 3;
+}
+
+message FailedAssignment {
+    string assignment_id = 1;
+    string error_json = 2;
+}
+
+message ReportAssignmentStateResponse {
+    int32 accepted_count = 1;
+    int32 rejected_count = 2;
+}
+
+message Assignment {
+    string id = 1;
+    string zone_id = 2;
+    string node_id = 3;
+    string status = 4;
+    string desired_policy_id = 5;
+    int64 desired_zone_version = 6;
+    string actual_policy_id = 7;
+    int64 actual_zone_version = 8;
+    google.protobuf.Timestamp last_reported_at = 9;
+    string error_json = 10;
+    google.protobuf.Timestamp created_at = 11;
+    google.protobuf.Timestamp updated_at = 12;
+    int64 version = 13;
+    string caused_by_event_id = 14;
+}
+
+message GetAssignmentRequest {
+    string assignment_id = 1;
+}
+
+message GetAssignmentResponse {
+    Assignment assignment = 1;
+}
+
+message ListAssignmentsRequest {
+    string zone_id = 1;
+    string node_id = 2;
+    string status = 3;
+    int64 limit = 4;
+}
+
+message ListAssignmentsResponse {
+    repeated Assignment assignments = 1;
+}
