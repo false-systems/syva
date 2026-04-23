@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 
+pub mod assignment;
 pub mod team;
 pub mod node;
 pub mod zone;
