@@ -1,6 +1,7 @@
 //! gRPC server. Only wires services to the underlying TransactionalWriter
 //! and read module — no business logic here, no direct DB writes.
 
+use crate::bus::AssignmentBus;
 use anyhow::Result;
 use sqlx::postgres::PgPool;
 use std::net::SocketAddr;
@@ -10,7 +11,7 @@ use tonic::transport::Server;
 pub mod team_service;
 pub mod zone_service;
 
-pub async fn spawn(pool: PgPool, addr: SocketAddr) -> Result<JoinHandle<()>> {
+pub async fn spawn(pool: PgPool, _bus: AssignmentBus, addr: SocketAddr) -> Result<JoinHandle<()>> {
     let team_svc = team_service::TeamServiceImpl { pool: pool.clone() };
     let zone_svc = zone_service::ZoneServiceImpl { pool: pool.clone() };
 
