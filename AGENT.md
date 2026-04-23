@@ -5,6 +5,22 @@ Read CLAUDE.md first. This file covers *how to work*, not *what exists*.
 
 ---
 
+## Heartbeat Audit Exception
+
+Node heartbeats are the single control-plane operation exempt from ADR 0003
+Rule 8's "audit every mutation" discipline.
+
+- Heartbeats happen many times per minute per node.
+- `last_seen_at` is telemetry, not policy.
+- Auditing every heartbeat would drown the audit log in low-value noise.
+
+Heartbeats still write a `control_plane_events` row with
+`event_type = 'node.heartbeat'`, preserving the causal spine. They do **not**
+write to `audit_log`. This exception is specific to heartbeats and must not be
+copied to any other operation.
+
+---
+
 ## Mental Model: How to Think About This Codebase
 
 Syvä is a kernel enforcement boundary. Every line of eBPF code runs in a
