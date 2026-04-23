@@ -114,3 +114,89 @@ impl PolicyInput {
         format!("sha256:{}", hex::encode(hash))
     }
 }
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Node {
+    pub id: Uuid,
+    pub node_name: String,
+    pub cluster_id: Option<String>,
+    pub status: String,
+    pub fingerprint: Option<String>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub last_heartbeat_event_id: Option<Uuid>,
+    pub current_token_expires_at: Option<DateTime<Utc>>,
+    pub capabilities_json: JsonValue,
+    pub metadata_json: JsonValue,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub version: i64,
+    pub caused_by_event_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Assignment {
+    pub id: Uuid,
+    pub zone_id: Uuid,
+    pub node_id: Uuid,
+    pub status: String,
+    pub desired_policy_id: Uuid,
+    pub desired_zone_version: i64,
+    pub actual_policy_id: Option<Uuid>,
+    pub actual_zone_version: Option<i64>,
+    pub last_reported_at: Option<DateTime<Utc>>,
+    pub error_json: Option<JsonValue>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub version: i64,
+    pub caused_by_event_id: Uuid,
+}
+
+/// Node label set, keyed for deterministic selector matching.
+pub type NodeLabels = BTreeMap<String, String>;
+
+/// NodeSelector — how a zone chooses its nodes.
+///
+/// Stored in `zones.selector_json` and matched in Rust.
+///
+/// If all three fields are empty/default, the selector matches nothing.
+/// Use `all_nodes: true` to target every node.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeSelector {
+    #[serde(default)]
+    pub all_nodes: bool,
+
+    #[serde(default)]
+    pub node_names: Vec<String>,
+
+    #[serde(default)]
+    pub match_labels: BTreeMap<String, String>,
+}
+
+impl NodeSelector {
+    pub fn from_json(value: &JsonValue) -> Result<Self, serde_json::Error> {
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+
+        serde_json::from_value(value.clone())
+    }
+
+    pub fn matches(&self, node_name: &str, labels: &NodeLabels) -> bool {
+        if self.all_nodes {
+            return true;
+        }
+
+        if !self.node_names.is_empty() && self.node_names.iter().any(|n| n == node_name) {
+            return true;
+        }
+
+        if !self.match_labels.is_empty() {
+            return self
+                .match_labels
+                .iter()
+                .all(|(k, v)| labels.get(k).map(|x| x == v).unwrap_or(false));
+        }
+
+        false
+    }
+}

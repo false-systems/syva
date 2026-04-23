@@ -53,6 +53,7 @@ thiserror = { workspace = true }
 clap = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+ulid = "1.1"
 
 [dev-dependencies]
 # sqlx::test macro runs each test in an isolated database.
