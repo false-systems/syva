@@ -9,6 +9,7 @@ use crate::write::TransactionalWriter;
 use chrono::Utc;
 use serde_json::{json, Value as JsonValue};
 use sqlx::Row;
+use std::collections::BTreeMap;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -263,6 +264,465 @@ impl<'a> TransactionalWriter<'a> {
             assignments_upserted: upserted,
             assignments_removed: removed,
         })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeartbeatInput {
+    pub node_id: Uuid,
+    pub status_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SetNodeLabelsInput {
+    pub node_id: Uuid,
+    pub if_version: i64,
+    pub labels: NodeLabels,
+}
+
+pub struct SetNodeLabelsOutput {
+    pub node: Node,
+    pub labels: NodeLabels,
+    pub assignments_upserted: usize,
+    pub assignments_removed: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DecommissionNodeInput {
+    pub node_id: Uuid,
+    pub if_version: i64,
+}
+
+impl<'a> TransactionalWriter<'a> {
+    /// Heartbeat is a telemetry write, not a policy mutation.
+    ///
+    /// It still writes a control-plane event, but intentionally skips audit to
+    /// avoid turning periodic liveness pings into the dominant audit volume.
+    /// This exception is specific to heartbeats and must not be copied to
+    /// policy-changing operations.
+    pub async fn heartbeat_node(
+        &self,
+        input: HeartbeatInput,
+        actor: &Actor,
+    ) -> Result<(), CpError> {
+        const OPERATION: &str = "node.heartbeat";
+        let start = Instant::now();
+        let event_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "begin_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query(
+            r#"INSERT INTO control_plane_events
+               (id, event_type, source, subject_type, subject_id,
+                resource_type, resource_id, occurred_at, payload_json)
+               VALUES ($1, 'node.heartbeat', 'node-agent', $2, $3,
+                       'node', $4, $5, $6)"#,
+        )
+        .bind(event_id)
+        .bind(&actor.subject_type)
+        .bind(&actor.subject_id)
+        .bind(input.node_id)
+        .bind(now)
+        .bind(json!({ "status_hint": &input.status_hint }))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let updated = sqlx::query(
+            r#"UPDATE nodes
+                  SET last_seen_at = $1,
+                      last_heartbeat_event_id = $2,
+                      status = CASE WHEN status = 'offline' THEN 'online' ELSE status END
+                WHERE id = $3
+                RETURNING id"#,
+        )
+        .bind(now)
+        .bind(event_id)
+        .bind(input.node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "node_update_failed");
+            CpError::Database(e)
+        })?;
+
+        if updated.is_none() {
+            metrics::record_transaction_rollback(OPERATION, "node_not_found");
+            return Err(CpError::NotFound {
+                resource: "node",
+                identifier: input.node_id.to_string(),
+            });
+        }
+
+        tx.commit().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "commit_failed");
+            CpError::Database(e)
+        })?;
+
+        metrics::record_transaction_duration(OPERATION, start.elapsed());
+        Ok(())
+    }
+
+    pub async fn set_node_labels(
+        &self,
+        input: SetNodeLabelsInput,
+        actor: &Actor,
+    ) -> Result<SetNodeLabelsOutput, CpError> {
+        const OPERATION: &str = "node.set_labels";
+
+        match self.try_set_node_labels(input.clone(), actor).await {
+            Ok(out) => Ok(out),
+            Err(err) => {
+                self.record_rejected_audit(OPERATION, actor, &input, &err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn try_set_node_labels(
+        &self,
+        input: SetNodeLabelsInput,
+        actor: &Actor,
+    ) -> Result<SetNodeLabelsOutput, CpError> {
+        const OPERATION: &str = "node.set_labels";
+        let start = Instant::now();
+        let event_id = Uuid::new_v4();
+        let audit_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "begin_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(node_advisory_lock_key(input.node_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "advisory_lock_failed");
+                CpError::Database(e)
+            })?;
+
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT version FROM nodes WHERE id = $1 FOR UPDATE")
+                .bind(input.node_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "node_lookup_failed");
+                    CpError::Database(e)
+                })?;
+
+        match current {
+            None => {
+                metrics::record_transaction_rollback(OPERATION, "node_not_found");
+                return Err(CpError::NotFound {
+                    resource: "node",
+                    identifier: input.node_id.to_string(),
+                });
+            }
+            Some(version) if version != input.if_version => {
+                metrics::record_transaction_rollback(OPERATION, "version_conflict");
+                return Err(CpError::VersionConflict {
+                    resource: "node",
+                    resource_id: input.node_id,
+                    expected: input.if_version,
+                });
+            }
+            Some(_) => {}
+        }
+
+        sqlx::query(
+            r#"INSERT INTO control_plane_events
+               (id, event_type, source, subject_type, subject_id,
+                resource_type, resource_id, occurred_at, payload_json)
+               VALUES ($1, 'node.labeled', 'api', $2, $3,
+                       'node', $4, $5, $6)"#,
+        )
+        .bind(event_id)
+        .bind(&actor.subject_type)
+        .bind(&actor.subject_id)
+        .bind(input.node_id)
+        .bind(now)
+        .bind(json!({ "label_count": input.labels.len() }))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let node_row = sqlx::query(
+            r#"UPDATE nodes
+                  SET version = version + 1,
+                      updated_at = $1,
+                      caused_by_event_id = $2
+                WHERE id = $3 AND version = $4
+                RETURNING *"#,
+        )
+        .bind(now)
+        .bind(event_id)
+        .bind(input.node_id)
+        .bind(input.if_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "node_update_failed");
+            CpError::Database(e)
+        })?
+        .ok_or_else(|| {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict_race");
+            CpError::VersionConflict {
+                resource: "node",
+                resource_id: input.node_id,
+                expected: input.if_version,
+            }
+        })?;
+
+        let node = node_from_row(&node_row);
+
+        sqlx::query("DELETE FROM node_labels WHERE node_id = $1")
+            .bind(input.node_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "label_delete_failed");
+                CpError::Database(e)
+            })?;
+
+        for (key, value) in &input.labels {
+            sqlx::query("INSERT INTO node_labels (node_id, key, value) VALUES ($1, $2, $3)")
+                .bind(input.node_id)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "label_insert_failed");
+                    CpError::Database(e)
+                })?;
+        }
+
+        let (upserts, removes) =
+            recompute_node_assignments_in_tx(&mut tx, &node, &input.labels, event_id, now).await?;
+
+        let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
+        sqlx::query(
+            r#"INSERT INTO audit_log
+               (id, occurred_at, actor_type, actor_id, action,
+                resource_type, resource_id, result, request_json,
+                control_plane_event_id)
+               VALUES ($1, $2, $3, $4, 'node.set_labels', 'node', $5,
+                       'success', $6, $7)"#,
+        )
+        .bind(audit_id)
+        .bind(now)
+        .bind(&actor.actor_type)
+        .bind(&actor.actor_id)
+        .bind(input.node_id)
+        .bind(&request_json)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_notify('syva_cp_assignments', $1)")
+            .bind(input.node_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "notify_failed");
+                CpError::Database(e)
+            })?;
+
+        tx.commit().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "commit_failed");
+            CpError::Database(e)
+        })?;
+
+        metrics::record_transaction_duration(OPERATION, start.elapsed());
+
+        Ok(SetNodeLabelsOutput {
+            node,
+            labels: input.labels,
+            assignments_upserted: upserts,
+            assignments_removed: removes,
+        })
+    }
+
+    pub async fn decommission_node(
+        &self,
+        input: DecommissionNodeInput,
+        actor: &Actor,
+    ) -> Result<Node, CpError> {
+        const OPERATION: &str = "node.decommission";
+
+        match self.try_decommission_node(input.clone(), actor).await {
+            Ok(node) => Ok(node),
+            Err(err) => {
+                self.record_rejected_audit(OPERATION, actor, &input, &err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn try_decommission_node(
+        &self,
+        input: DecommissionNodeInput,
+        actor: &Actor,
+    ) -> Result<Node, CpError> {
+        const OPERATION: &str = "node.decommission";
+        let start = Instant::now();
+        let event_id = Uuid::new_v4();
+        let audit_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "begin_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(node_advisory_lock_key(input.node_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "advisory_lock_failed");
+                CpError::Database(e)
+            })?;
+
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT version FROM nodes WHERE id = $1 FOR UPDATE")
+                .bind(input.node_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "node_lookup_failed");
+                    CpError::Database(e)
+                })?;
+
+        match current {
+            None => {
+                metrics::record_transaction_rollback(OPERATION, "node_not_found");
+                return Err(CpError::NotFound {
+                    resource: "node",
+                    identifier: input.node_id.to_string(),
+                });
+            }
+            Some(version) if version != input.if_version => {
+                metrics::record_transaction_rollback(OPERATION, "version_conflict");
+                return Err(CpError::VersionConflict {
+                    resource: "node",
+                    resource_id: input.node_id,
+                    expected: input.if_version,
+                });
+            }
+            Some(_) => {}
+        }
+
+        sqlx::query(
+            r#"INSERT INTO control_plane_events
+               (id, event_type, source, subject_type, subject_id,
+                resource_type, resource_id, occurred_at, payload_json)
+               VALUES ($1, 'node.decommissioned', 'api', $2, $3,
+                       'node', $4, $5, $6)"#,
+        )
+        .bind(event_id)
+        .bind(&actor.subject_type)
+        .bind(&actor.subject_id)
+        .bind(input.node_id)
+        .bind(now)
+        .bind(json!({}))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "event_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        let node_row = sqlx::query(
+            r#"UPDATE nodes
+                  SET status = 'decommissioned',
+                      version = version + 1,
+                      updated_at = $1,
+                      caused_by_event_id = $2
+                WHERE id = $3 AND version = $4
+                RETURNING *"#,
+        )
+        .bind(now)
+        .bind(event_id)
+        .bind(input.node_id)
+        .bind(input.if_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "node_update_failed");
+            CpError::Database(e)
+        })?
+        .ok_or_else(|| {
+            metrics::record_transaction_rollback(OPERATION, "version_conflict_race");
+            CpError::VersionConflict {
+                resource: "node",
+                resource_id: input.node_id,
+                expected: input.if_version,
+            }
+        })?;
+
+        let node = node_from_row(&node_row);
+        let empty_labels: NodeLabels = BTreeMap::new();
+        let _ = recompute_node_assignments_in_tx(&mut tx, &node, &empty_labels, event_id, now)
+            .await?;
+
+        let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
+        sqlx::query(
+            r#"INSERT INTO audit_log
+               (id, occurred_at, actor_type, actor_id, action,
+                resource_type, resource_id, result, request_json,
+                control_plane_event_id)
+               VALUES ($1, $2, $3, $4, 'node.decommission', 'node', $5,
+                       'success', $6, $7)"#,
+        )
+        .bind(audit_id)
+        .bind(now)
+        .bind(&actor.actor_type)
+        .bind(&actor.actor_id)
+        .bind(input.node_id)
+        .bind(&request_json)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
+            CpError::Database(e)
+        })?;
+
+        sqlx::query("SELECT pg_notify('syva_cp_assignments', $1)")
+            .bind(input.node_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                metrics::record_transaction_rollback(OPERATION, "notify_failed");
+                CpError::Database(e)
+            })?;
+
+        tx.commit().await.map_err(|e| {
+            metrics::record_transaction_rollback(OPERATION, "commit_failed");
+            CpError::Database(e)
+        })?;
+
+        metrics::record_transaction_duration(OPERATION, start.elapsed());
+        Ok(node)
     }
 }
 
