@@ -9,6 +9,7 @@
 //!   syva-core status                   # Show enforcement counters
 //!   syva-core events --follow          # Stream deny events
 
+mod cp_reconcile;
 mod btf;
 mod ebpf;
 mod events;

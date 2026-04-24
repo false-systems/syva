@@ -25,3 +25,4 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
 prost = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
