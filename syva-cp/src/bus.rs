@@ -29,9 +29,18 @@ impl AssignmentBus {
     }
 
     async fn notify(&self, node_id: Uuid) {
-        let map = self.inner.read().await;
-        if let Some(sender) = map.get(&node_id) {
-            let _ = sender.send(());
+        let mut map = self.inner.write().await;
+        let should_remove = match map.get(&node_id) {
+            Some(sender) if sender.receiver_count() == 0 => true,
+            Some(sender) => {
+                let _ = sender.send(());
+                false
+            }
+            None => false,
+        };
+
+        if should_remove {
+            map.remove(&node_id);
         }
     }
 }
@@ -43,10 +52,15 @@ impl Default for AssignmentBus {
 }
 
 pub async fn spawn_listener(pool: PgPool, bus: AssignmentBus) -> Result<JoinHandle<()>> {
-    let mut listener = PgListener::connect_with(&pool).await?;
-    listener.listen(CHANNEL).await?;
-
     let handle = tokio::spawn(async move {
+        let mut listener = match connect_listener(&pool).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                tracing::error!("bus: initial listener setup failed: {err}");
+                return;
+            }
+        };
+
         loop {
             match listener.recv().await {
                 Ok(notification) => {
@@ -60,10 +74,22 @@ pub async fn spawn_listener(pool: PgPool, bus: AssignmentBus) -> Result<JoinHand
                 Err(err) => {
                     tracing::error!("bus: listener error: {err}");
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    match connect_listener(&pool).await {
+                        Ok(new_listener) => listener = new_listener,
+                        Err(reconnect_err) => {
+                            tracing::error!("bus: listener reconnect failed: {reconnect_err}");
+                        }
+                    }
                 }
             }
         }
     });
 
     Ok(handle)
+}
+
+async fn connect_listener(pool: &PgPool) -> Result<PgListener> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.listen(CHANNEL).await?;
+    Ok(listener)
 }

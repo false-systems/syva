@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use sqlx::Row;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -131,6 +132,25 @@ pub struct Node {
     pub updated_at: DateTime<Utc>,
     pub version: i64,
     pub caused_by_event_id: Option<Uuid>,
+}
+
+pub fn node_from_row(row: &sqlx::postgres::PgRow) -> Node {
+    Node {
+        id: row.get("id"),
+        node_name: row.get("node_name"),
+        cluster_id: row.get("cluster_id"),
+        status: row.get("status"),
+        fingerprint: row.get("fingerprint"),
+        last_seen_at: row.get("last_seen_at"),
+        last_heartbeat_event_id: row.get("last_heartbeat_event_id"),
+        current_token_expires_at: row.get("current_token_expires_at"),
+        capabilities_json: row.get("capabilities_json"),
+        metadata_json: row.get("metadata_json"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        version: row.get("version"),
+        caused_by_event_id: row.get("caused_by_event_id"),
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

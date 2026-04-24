@@ -1,4 +1,4 @@
-use crate::db::types::{Actor, Node, NodeLabels};
+use crate::db::types::{node_from_row, Actor, Node, NodeLabels};
 use crate::engine::assignment::{
     compute_node_assignments, diff_assignments, DesiredAssignment, ExistingAssignment,
     NodeForAssignment, ZoneForAssignment,
@@ -750,25 +750,6 @@ fn validate_register_node(input: &RegisterNodeInput) -> Result<(), CpError> {
     Ok(())
 }
 
-pub(crate) fn node_from_row(row: &sqlx::postgres::PgRow) -> Node {
-    Node {
-        id: row.get("id"),
-        node_name: row.get("node_name"),
-        cluster_id: row.get("cluster_id"),
-        status: row.get("status"),
-        fingerprint: row.get("fingerprint"),
-        last_seen_at: row.get("last_seen_at"),
-        last_heartbeat_event_id: row.get("last_heartbeat_event_id"),
-        current_token_expires_at: row.get("current_token_expires_at"),
-        capabilities_json: row.get("capabilities_json"),
-        metadata_json: row.get("metadata_json"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        version: row.get("version"),
-        caused_by_event_id: row.get("caused_by_event_id"),
-    }
-}
-
 #[allow(dead_code)]
 pub(crate) fn node_advisory_lock_key(node_id: Uuid) -> i64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -819,9 +800,9 @@ pub(crate) async fn recompute_node_assignments_in_tx(
     let desired = compute_node_assignments(&node_input, &zones);
 
     let current_rows = sqlx::query(
-        r#"SELECT id, zone_id, node_id, desired_policy_id, desired_zone_version
+        r#"SELECT id, zone_id, node_id, status, desired_policy_id, desired_zone_version
            FROM assignments
-           WHERE node_id = $1 AND status NOT IN ('removed', 'failed')"#,
+           WHERE node_id = $1 AND status NOT IN ('removed', 'failed', 'removing')"#,
     )
     .bind(node.id)
     .fetch_all(&mut **tx)
@@ -836,6 +817,7 @@ pub(crate) async fn recompute_node_assignments_in_tx(
             node_id: row.get("node_id"),
             desired_policy_id: row.get("desired_policy_id"),
             desired_zone_version: row.get("desired_zone_version"),
+            status: row.get("status"),
         })
         .collect::<Vec<_>>();
 

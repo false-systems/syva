@@ -904,22 +904,35 @@ pub(crate) async fn recompute_zone_assignments_in_tx(
             .await
             .map_err(CpError::Database)?;
 
+            let node_ids: Vec<Uuid> =
+                node_rows.iter().map(|node_row| node_row.get("id")).collect();
+            let label_rows = if node_ids.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query(
+                    r#"SELECT node_id, key, value
+                       FROM node_labels
+                       WHERE node_id = ANY($1)"#,
+                )
+                .bind(&node_ids)
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(CpError::Database)?
+            };
+
+            let mut labels_by_node_id: BTreeMap<Uuid, NodeLabels> = BTreeMap::new();
+            for label_row in label_rows {
+                let label_node_id: Uuid = label_row.get("node_id");
+                labels_by_node_id
+                    .entry(label_node_id)
+                    .or_default()
+                    .insert(label_row.get("key"), label_row.get("value"));
+            }
+
             let mut nodes = Vec::with_capacity(node_rows.len());
             for node_row in node_rows {
                 let node_id: Uuid = node_row.get("id");
-                let label_rows = sqlx::query(
-                    "SELECT key, value FROM node_labels WHERE node_id = $1",
-                )
-                .bind(node_id)
-                .fetch_all(&mut **tx)
-                .await
-                .map_err(CpError::Database)?;
-
-                let mut labels: NodeLabels = BTreeMap::new();
-                for label_row in label_rows {
-                    labels.insert(label_row.get("key"), label_row.get("value"));
-                }
-
+                let labels = labels_by_node_id.remove(&node_id).unwrap_or_default();
                 nodes.push(NodeForAssignment {
                     node_id,
                     node_name: node_row.get("node_name"),
@@ -933,9 +946,9 @@ pub(crate) async fn recompute_zone_assignments_in_tx(
     };
 
     let current_rows = sqlx::query(
-        r#"SELECT id, zone_id, node_id, desired_policy_id, desired_zone_version
+        r#"SELECT id, zone_id, node_id, status, desired_policy_id, desired_zone_version
            FROM assignments
-           WHERE zone_id = $1 AND status NOT IN ('removed', 'failed')"#,
+           WHERE zone_id = $1 AND status NOT IN ('removed', 'failed', 'removing')"#,
     )
     .bind(zone_id)
     .fetch_all(&mut **tx)
@@ -950,6 +963,7 @@ pub(crate) async fn recompute_zone_assignments_in_tx(
             node_id: row.get("node_id"),
             desired_policy_id: row.get("desired_policy_id"),
             desired_zone_version: row.get("desired_zone_version"),
+            status: row.get("status"),
         })
         .collect::<Vec<_>>();
 

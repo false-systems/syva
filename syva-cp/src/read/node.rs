@@ -1,4 +1,4 @@
-use crate::db::types::{Node, NodeLabels};
+use crate::db::types::{node_from_row, Node, NodeLabels};
 use crate::error::CpError;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
@@ -15,7 +15,7 @@ pub async fn get_node(pool: &PgPool, node_id: Uuid) -> Result<(Node, NodeLabels)
             identifier: node_id.to_string(),
         })?;
 
-    let node = crate::write::node::node_from_row(&row);
+    let node = node_from_row(&row);
     let labels = load_labels(pool, node_id).await?;
     Ok((node, labels))
 }
@@ -33,7 +33,7 @@ pub async fn get_node_by_name(
             identifier: node_name.to_string(),
         })?;
 
-    let node = crate::write::node::node_from_row(&row);
+    let node = node_from_row(&row);
     let labels = load_labels(pool, node.id).await?;
     Ok((node, labels))
 }
@@ -60,10 +60,13 @@ pub async fn list_nodes(
         }
     };
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let node = crate::write::node::node_from_row(&row);
-        let labels = load_labels(pool, node.id).await?;
+    let nodes: Vec<Node> = rows.into_iter().map(|row| node_from_row(&row)).collect();
+    let node_ids: Vec<Uuid> = nodes.iter().map(|node| node.id).collect();
+    let mut labels_by_node = load_labels_for_nodes(pool, &node_ids).await?;
+
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let labels = labels_by_node.remove(&node.id).unwrap_or_default();
         out.push((node, labels));
     }
 
@@ -85,4 +88,39 @@ pub async fn load_labels(pool: &PgPool, node_id: Uuid) -> Result<NodeLabels, CpE
             )
         })
         .collect::<BTreeMap<_, _>>())
+}
+
+async fn load_labels_for_nodes(
+    pool: &PgPool,
+    node_ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, NodeLabels>, CpError> {
+    let mut labels_by_node = node_ids
+        .iter()
+        .copied()
+        .map(|node_id| (node_id, BTreeMap::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    if node_ids.is_empty() {
+        return Ok(labels_by_node);
+    }
+
+    let rows = sqlx::query(
+        "SELECT node_id, key, value FROM node_labels WHERE node_id = ANY($1)",
+    )
+    .bind(node_ids)
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let node_id = row.get::<Uuid, _>("node_id");
+        let key = row.get::<String, _>("key");
+        let value = row.get::<String, _>("value");
+
+        labels_by_node
+            .entry(node_id)
+            .or_default()
+            .extend(std::iter::once((key, value)));
+    }
+
+    Ok(labels_by_node)
 }

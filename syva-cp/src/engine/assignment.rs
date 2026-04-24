@@ -71,7 +71,8 @@ pub fn diff_assignments(
             }) {
                 None => true,
                 Some(existing) => {
-                    existing.desired_policy_id != desired_assignment.desired_policy_id
+                    existing.status == "removing"
+                        || existing.desired_policy_id != desired_assignment.desired_policy_id
                         || existing.desired_zone_version
                             != desired_assignment.desired_zone_version
                 }
@@ -117,6 +118,7 @@ pub struct ExistingAssignment {
     pub node_id: Uuid,
     pub desired_policy_id: Uuid,
     pub desired_zone_version: i64,
+    pub status: String,
 }
 
 #[cfg(test)]
@@ -225,6 +227,7 @@ mod tests {
                 node_id: node_one,
                 desired_policy_id: old_policy,
                 desired_zone_version: 1,
+                status: "applied".into(),
             },
             ExistingAssignment {
                 id: Uuid::new_v4(),
@@ -232,6 +235,7 @@ mod tests {
                 node_id: node_two,
                 desired_policy_id: old_policy,
                 desired_zone_version: 1,
+                status: "applied".into(),
             },
         ];
 
@@ -253,5 +257,31 @@ mod tests {
         let (upsert, remove) = diff_assignments(&current, &desired);
         assert_eq!(upsert.len(), 2);
         assert_eq!(remove.len(), 1);
+    }
+
+    #[test]
+    fn diff_reactivates_removing_assignment() {
+        let zone_id = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+
+        let current = vec![ExistingAssignment {
+            id: Uuid::new_v4(),
+            zone_id,
+            node_id,
+            desired_policy_id: policy_id,
+            desired_zone_version: 1,
+            status: "removing".into(),
+        }];
+        let desired = vec![DesiredAssignment {
+            zone_id,
+            node_id,
+            desired_policy_id: policy_id,
+            desired_zone_version: 1,
+        }];
+
+        let (upsert, remove) = diff_assignments(&current, &desired);
+        assert_eq!(upsert.len(), 1);
+        assert!(remove.is_empty());
     }
 }

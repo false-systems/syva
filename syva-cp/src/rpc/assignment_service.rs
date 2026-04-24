@@ -76,7 +76,13 @@ impl AssignmentService for AssignmentServiceImpl {
             let mut bus_rx = bus.subscribe(node_id).await;
             let mut server_revision = 2_i64;
 
-            while bus_rx.recv().await.is_ok() {
+            loop {
+                match bus_rx.recv().await {
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+
                 let current = match build_assignments_for_node(&pool, node_id).await {
                     Ok(assignments) => assignments,
                     Err(err) => {
@@ -255,7 +261,7 @@ async fn build_assignments_for_node(
            FROM assignments a
            INNER JOIN zones z ON z.id = a.zone_id AND z.deleted_at IS NULL
            INNER JOIN policies p ON p.id = a.desired_policy_id
-           WHERE a.node_id = $1 AND a.status NOT IN ('removed', 'failed')"#,
+           WHERE a.node_id = $1 AND a.status NOT IN ('removing', 'removed', 'failed')"#,
     )
     .bind(node_id)
     .fetch_all(pool)
