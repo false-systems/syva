@@ -9,6 +9,7 @@
 //!   syva-core status                   # Show enforcement counters
 //!   syva-core events --follow          # Stream deny events
 
+mod cp_reconcile;
 mod btf;
 mod ebpf;
 mod events;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use syva_cp_client::CpClientConfig;
 use tokio::sync::{Mutex, RwLock};
 use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
@@ -45,6 +47,44 @@ struct Cli {
     /// Unix socket path for the gRPC server.
     #[arg(long, default_value = "/run/syva/syva-core.sock")]
     socket_path: String,
+
+    /// Optional syva-cp endpoint. When set, syva-core registers with
+    /// syva-cp and consumes assignment updates in addition to its local
+    /// adapter-facing gRPC surface.
+    #[arg(long, env = "SYVA_CP_ENDPOINT")]
+    cp_endpoint: Option<String>,
+
+    /// Hostname to report to syva-cp. Defaults to the system hostname.
+    #[arg(long, env = "SYVA_NODE_NAME")]
+    node_name: Option<String>,
+
+    /// Path to the stable node fingerprint file (for example /etc/machine-id).
+    #[arg(
+        long,
+        env = "SYVA_NODE_FINGERPRINT_PATH",
+        default_value = "/etc/machine-id"
+    )]
+    fingerprint_path: PathBuf,
+
+    /// Optional cluster identifier to report at node registration time.
+    #[arg(long, env = "SYVA_CLUSTER_ID")]
+    cluster_id: Option<String>,
+
+    /// Node labels to send at registration. Format: key=value,key=value
+    #[arg(long, env = "SYVA_NODE_LABELS", value_delimiter = ',')]
+    node_labels: Vec<String>,
+
+    /// Path where the registered node ID is persisted across restarts.
+    #[arg(
+        long,
+        env = "SYVA_NODE_ID_PATH",
+        default_value = "/var/lib/syva/node-id"
+    )]
+    node_id_path: PathBuf,
+
+    /// Heartbeat interval in seconds for CP mode.
+    #[arg(long, env = "SYVA_HEARTBEAT_SECS", default_value = "15")]
+    heartbeat_secs: u64,
 }
 
 #[derive(Subcommand)]
@@ -81,16 +121,12 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Events { follow, format }) => cmd_events(follow, format).await,
-        None => cmd_run(cli.ebpf_obj, cli.health_port, cli.socket_path).await,
+        None => cmd_run(cli).await,
     }
 }
 
 /// Main enforcement engine loop.
-async fn cmd_run(
-    ebpf_obj: Option<PathBuf>,
-    health_port: u16,
-    socket_path: String,
-) -> anyhow::Result<()> {
+async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     tracing::info!("syva-core starting");
 
     let start_time = Instant::now();
@@ -100,10 +136,10 @@ async fn cmd_run(
     let health_state = health::SharedHealth::new(RwLock::new(
         health::HealthState::new(),
     ));
-    health::spawn_health_server(health_port, health_state.clone()).await?;
+    health::spawn_health_server(config.health_port, health_state.clone()).await?;
 
     // Load eBPF programs (but do NOT attach — no enforcement yet).
-    let mut mgr = ebpf::EnforceEbpf::load(ebpf_obj.as_deref())?;
+    let mut mgr = ebpf::EnforceEbpf::load(config.ebpf_obj.as_deref())?;
 
     // Do not take the ENFORCEMENT_EVENTS ring buffer here — it is single-consumer
     // and the gRPC WatchEvents RPC needs to acquire it. Event logging for the core
@@ -132,7 +168,7 @@ async fn cmd_run(
     tracing::info!("startup complete — enforcement active, awaiting gRPC connections");
 
     // Ensure parent directory for socket path exists.
-    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+    if let Some(parent) = std::path::Path::new(&config.socket_path).parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow::anyhow!("failed to create socket directory {}: {e}", parent.display()))?;
@@ -140,9 +176,9 @@ async fn cmd_run(
     }
 
     // Remove stale socket file if it exists.
-    if std::path::Path::new(&socket_path).exists() {
-        std::fs::remove_file(&socket_path)
-            .map_err(|e| anyhow::anyhow!("failed to remove stale socket {}: {e}", socket_path))?;
+    if std::path::Path::new(&config.socket_path).exists() {
+        std::fs::remove_file(&config.socket_path)
+            .map_err(|e| anyhow::anyhow!("failed to remove stale socket {}: {e}", config.socket_path))?;
     }
 
     // Build gRPC service.
@@ -154,11 +190,11 @@ async fn cmd_run(
     };
 
     // Start gRPC server on Unix socket.
-    let uds = tokio::net::UnixListener::bind(&socket_path)
-        .map_err(|e| anyhow::anyhow!("failed to bind Unix socket {}: {e}", socket_path))?;
+    let uds = tokio::net::UnixListener::bind(&config.socket_path)
+        .map_err(|e| anyhow::anyhow!("failed to bind Unix socket {}: {e}", config.socket_path))?;
     let uds_stream = tokio_stream::wrappers::UnixListenerStream::new(uds);
 
-    tracing::info!(socket = socket_path, "gRPC server listening");
+    tracing::info!(socket = config.socket_path, "gRPC server listening");
 
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
     let mut sigterm = tokio::signal::unix::signal(
@@ -216,6 +252,54 @@ async fn cmd_run(
         }
     });
 
+    if let Some(endpoint) = config.cp_endpoint.as_ref() {
+        let node_name = config
+            .node_name
+            .clone()
+            .or_else(system_hostname)
+            .unwrap_or_else(|| "unknown".to_string());
+        let cp_config = CpClientConfig {
+            endpoint: endpoint.clone(),
+            node_name,
+            cluster_id: config.cluster_id.clone(),
+            fingerprint: read_fingerprint(&config.fingerprint_path),
+            labels: parse_labels(&config.node_labels),
+            node_id_path: config.node_id_path.clone(),
+            heartbeat_interval: std::time::Duration::from_secs(config.heartbeat_secs),
+            ..Default::default()
+        };
+
+        match syva_cp_client::CpClient::connect(cp_config).await {
+            Ok(cp) => match cp.register().await {
+                Ok(registration) => {
+                    tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
+
+                    let heartbeat_handle = cp.spawn_heartbeat_loop();
+                    let reconciler = cp_reconcile::Reconciler::new(
+                        cp,
+                        registry.clone(),
+                        ebpf.clone(),
+                        health_state.clone(),
+                    );
+                    tokio::spawn(async move {
+                        let _heartbeat = heartbeat_handle;
+                        reconciler.run().await;
+                    });
+
+                    tracing::info!("syva-core CP mode active");
+                }
+                Err(error) => {
+                    tracing::error!("could not register with syva-cp at startup: {error}");
+                    tracing::warn!("syva-core running in degraded mode (local adapters only)");
+                }
+            },
+            Err(error) => {
+                tracing::error!("could not connect to syva-cp at startup: {error}");
+                tracing::warn!("syva-core running in degraded mode (local adapters only)");
+            }
+        }
+    }
+
     // Run gRPC server with graceful shutdown.
     let grpc_server = Server::builder()
         .add_service(SyvaCoreServer::new(service))
@@ -237,6 +321,44 @@ async fn cmd_run(
     drop(ebpf);
     tracing::info!("syva-core stopped");
     Ok(())
+}
+
+pub(crate) fn parse_labels(entries: &[String]) -> std::collections::BTreeMap<String, String> {
+    let mut labels = std::collections::BTreeMap::new();
+
+    for entry in entries {
+        if let Some((key, value)) = entry.split_once('=') {
+            labels.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    labels
+}
+
+pub(crate) fn read_fingerprint(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|contents| contents.trim().to_string())
+        .filter(|contents| !contents.is_empty())
+}
+
+fn system_hostname() -> Option<String> {
+    let mut buffer = [0_u8; 256];
+    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+
+    let length = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    let hostname = String::from_utf8_lossy(&buffer[..length]).into_owned();
+    if hostname.is_empty() {
+        None
+    } else {
+        Some(hostname)
+    }
 }
 
 async fn cmd_status() -> anyhow::Result<()> {

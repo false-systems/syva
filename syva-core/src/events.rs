@@ -18,8 +18,10 @@ pub const HOOK_NAMES: [&str; 7] = [
 
 /// Maximum events to drain per tick. Prevents the blocking task from
 /// holding the thread for too long under high deny rates.
+#[allow(dead_code)]
 const MAX_EVENTS_PER_TICK: usize = 1000;
 
+#[allow(dead_code)]
 pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken) {
     tokio::spawn(async move {
         let mut ring_buf = ring_buf;

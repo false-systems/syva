@@ -30,7 +30,7 @@ use syva_proto::syva_core::{
 
 use crate::ebpf::EnforceEbpf;
 use crate::events::HOOK_NAMES;
-use crate::health::{HookCounters, SharedHealth};
+use crate::health::SharedHealth;
 use crate::types::ZoneType;
 use crate::zone::{ZoneRegistry, ZoneState, ZoneTransition};
 
@@ -49,6 +49,192 @@ pub struct SyvaCoreService {
     pub start_time: Instant,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CoreZonePolicyInput {
+    pub host_paths: Vec<String>,
+    pub allowed_zones: Vec<String>,
+    pub allow_ptrace: bool,
+    pub zone_type: ZoneType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RemoveZoneResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+pub(crate) async fn register_zone_local(
+    registry: &Arc<RwLock<ZoneRegistry>>,
+    ebpf: &Arc<Mutex<EnforceEbpf>>,
+    health: &SharedHealth,
+    zone_name: &str,
+    policy: Option<CoreZonePolicyInput>,
+) -> anyhow::Result<u32> {
+    let mut registry = registry.write().await;
+    let zone_id = registry.register_zone(zone_name)?;
+
+    if let Some(policy) = policy {
+        let mut ebpf = ebpf.lock().await;
+
+        let mut internal_policy = crate::types::ZonePolicy::default();
+        if policy.allow_ptrace {
+            internal_policy
+                .capabilities
+                .allowed
+                .push("CAP_SYS_PTRACE".to_string());
+        }
+        internal_policy.filesystem.host_paths = policy.host_paths.clone();
+        internal_policy.network.allowed_zones = policy.allowed_zones;
+
+        ebpf.set_zone_policy(zone_id, &internal_policy)?;
+
+        if !policy.host_paths.is_empty() {
+            match ebpf.populate_inode_zone_map(zone_id, &policy.host_paths) {
+                Ok(inodes) => {
+                    tracing::info!(zone = zone_name, zone_id, inodes, "inode map populated");
+                }
+                Err(error) => {
+                    tracing::warn!(zone = zone_name, %error, "inode map population failed");
+                }
+            }
+        }
+
+        let _ = policy.zone_type;
+    }
+
+    let mut health = health.write().await;
+    health.zones_loaded = registry.zone_count();
+
+    Ok(zone_id)
+}
+
+pub(crate) async fn remove_zone_local(
+    registry: &Arc<RwLock<ZoneRegistry>>,
+    ebpf: &Arc<Mutex<EnforceEbpf>>,
+    health: &SharedHealth,
+    zone_name: &str,
+    drain: bool,
+) -> anyhow::Result<RemoveZoneResult> {
+    let mut registry = registry.write().await;
+
+    if drain {
+        registry.mark_draining(zone_name)?;
+
+        let refcount = registry.refcount(zone_name);
+        if refcount == 0 {
+            let zone_id = registry.unregister_zone(zone_name)?;
+
+            let mut ebpf = ebpf.lock().await;
+            let _ = ebpf.remove_zone_policy(zone_id);
+            let _ = ebpf.remove_zone_comms(zone_id);
+            let _ = ebpf.remove_zone_inodes(zone_id);
+
+            tracing::info!(zone = zone_name, zone_id, "zone drained and removed");
+        } else {
+            tracing::info!(zone = zone_name, refcount, "zone marked as draining");
+        }
+
+        let mut health = health.write().await;
+        health.zones_loaded = registry.zone_count();
+
+        return Ok(RemoveZoneResult {
+            ok: true,
+            message: String::new(),
+        });
+    }
+
+    let refcount = registry.refcount(zone_name);
+    if refcount > 0 {
+        return Ok(RemoveZoneResult {
+            ok: false,
+            message: format!(
+                "zone '{}' has {} active containers — use drain=true or detach them first",
+                zone_name, refcount
+            ),
+        });
+    }
+
+    let zone_id = registry.unregister_zone(zone_name)?;
+
+    let mut ebpf = ebpf.lock().await;
+    let _ = ebpf.remove_zone_policy(zone_id);
+    let _ = ebpf.remove_zone_comms(zone_id);
+    let _ = ebpf.remove_zone_inodes(zone_id);
+
+    let mut health = health.write().await;
+    health.zones_loaded = registry.zone_count();
+
+    tracing::info!(zone = zone_name, zone_id, "zone removed");
+    Ok(RemoveZoneResult {
+        ok: true,
+        message: String::new(),
+    })
+}
+
+pub(crate) async fn allow_comm_local(
+    registry: &Arc<RwLock<ZoneRegistry>>,
+    ebpf: &Arc<Mutex<EnforceEbpf>>,
+    zone_a: &str,
+    zone_b: &str,
+) -> anyhow::Result<()> {
+    let (zone_a_id, zone_b_id) = {
+        let registry = registry.read().await;
+        let zone_a_id = registry
+            .zone_id(zone_a)
+            .ok_or_else(|| anyhow::anyhow!("zone '{}' not registered", zone_a))?;
+        let zone_b_id = registry
+            .zone_id(zone_b)
+            .ok_or_else(|| anyhow::anyhow!("zone '{}' not registered", zone_b))?;
+        (zone_a_id, zone_b_id)
+    };
+
+    {
+        let mut ebpf = ebpf.lock().await;
+        ebpf.set_zone_allowed_comms(zone_a_id, zone_b_id)?;
+    }
+
+    {
+        let mut registry = registry.write().await;
+        if registry.zone_id(zone_a).is_some() && registry.zone_id(zone_b).is_some() {
+            registry.record_allow_comm(zone_a, zone_b);
+        }
+    }
+
+    tracing::info!(zone_a, zone_b, "cross-zone comm allowed");
+    Ok(())
+}
+
+pub(crate) async fn deny_comm_local(
+    registry: &Arc<RwLock<ZoneRegistry>>,
+    ebpf: &Arc<Mutex<EnforceEbpf>>,
+    zone_a: &str,
+    zone_b: &str,
+) -> anyhow::Result<()> {
+    let (zone_a_id, zone_b_id) = {
+        let registry = registry.read().await;
+        let zone_a_id = registry
+            .zone_id(zone_a)
+            .ok_or_else(|| anyhow::anyhow!("zone '{}' not registered", zone_a))?;
+        let zone_b_id = registry
+            .zone_id(zone_b)
+            .ok_or_else(|| anyhow::anyhow!("zone '{}' not registered", zone_b))?;
+        (zone_a_id, zone_b_id)
+    };
+
+    {
+        let mut ebpf = ebpf.lock().await;
+        ebpf.remove_zone_comm_pair(zone_a_id, zone_b_id)?;
+    }
+
+    {
+        let mut registry = registry.write().await;
+        registry.record_deny_comm(zone_a, zone_b);
+    }
+
+    tracing::info!(zone_a, zone_b, "cross-zone comm denied");
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl SyvaCore for SyvaCoreService {
     async fn register_zone(
@@ -62,52 +248,24 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("zone_name is required"));
         }
 
-        let mut registry = self.registry.write().await;
-        let zone_id = registry.register_zone(&zone_name)
-            .map_err(|e| Status::internal(format!("failed to register zone: {e}")))?;
-
-        // If a policy was provided, set it in BPF maps.
-        if let Some(proto_policy) = req.policy {
-            let mut ebpf = self.ebpf.lock().await;
-
-            // Convert proto policy to internal ZonePolicy for BPF map population.
-            let allow_ptrace = proto_policy.allow_ptrace;
-            let zone_type = match proto_policy.zone_type {
+        let policy = req.policy.map(|proto_policy| CoreZonePolicyInput {
+            host_paths: proto_policy.host_paths,
+            allowed_zones: proto_policy.allowed_zones,
+            allow_ptrace: proto_policy.allow_ptrace,
+            zone_type: match proto_policy.zone_type {
                 1 => ZoneType::Privileged,
                 _ => ZoneType::NonGlobal,
-            };
-
-            // Build a minimal internal ZonePolicy for set_zone_policy.
-            let mut policy = crate::types::ZonePolicy::default();
-            if allow_ptrace {
-                policy.capabilities.allowed.push("CAP_SYS_PTRACE".to_string());
-            }
-            policy.filesystem.host_paths = proto_policy.host_paths.clone();
-            policy.network.allowed_zones = proto_policy.allowed_zones;
-
-            ebpf.set_zone_policy(zone_id, &policy)
-                .map_err(|e| Status::internal(format!("failed to set zone policy: {e}")))?;
-
-            // Populate inode map for host_paths.
-            if !proto_policy.host_paths.is_empty() {
-                match ebpf.populate_inode_zone_map(zone_id, &proto_policy.host_paths) {
-                    Ok(n) => {
-                        tracing::info!(zone = zone_name, zone_id, inodes = n, "inode map populated");
-                    }
-                    Err(e) => {
-                        tracing::warn!(zone = zone_name, %e, "inode map population failed");
-                    }
-                }
-            }
-
-            drop(ebpf);
-        }
-
-        // Update health state.
-        {
-            let mut h = self.health.write().await;
-            h.zones_loaded = registry.zone_count();
-        }
+            },
+        });
+        let zone_id = register_zone_local(
+            &self.registry,
+            &self.ebpf,
+            &self.health,
+            &zone_name,
+            policy,
+        )
+        .await
+        .map_err(|e| Status::internal(format!("failed to register zone: {e}")))?;
 
         tracing::info!(zone = zone_name, zone_id, "zone registered via gRPC");
         Ok(Response::new(RegisterZoneResponse { zone_id }))
@@ -123,67 +281,20 @@ impl SyvaCore for SyvaCoreService {
         if zone_name.is_empty() {
             return Err(Status::invalid_argument("zone_name is required"));
         }
+        let result = remove_zone_local(
+            &self.registry,
+            &self.ebpf,
+            &self.health,
+            &zone_name,
+            req.drain,
+        )
+        .await
+        .map_err(|e| Status::not_found(format!("{e}")))?;
 
-        let mut registry = self.registry.write().await;
-
-        if req.drain {
-            // Mark as draining — enforcement continues for existing containers.
-            registry.mark_draining(&zone_name)
-                .map_err(|e| Status::not_found(format!("{e}")))?;
-
-            // If refcount is already 0, clean up immediately.
-            let refcount = registry.refcount(&zone_name);
-            if refcount == 0 {
-                let zone_id = registry.unregister_zone(&zone_name)
-                    .map_err(|e| Status::internal(format!("{e}")))?;
-
-                let mut ebpf = self.ebpf.lock().await;
-                let _ = ebpf.remove_zone_policy(zone_id);
-                let _ = ebpf.remove_zone_comms(zone_id);
-                let _ = ebpf.remove_zone_inodes(zone_id);
-
-                tracing::info!(zone = zone_name, zone_id, "zone drained and removed");
-            } else {
-                tracing::info!(zone = zone_name, refcount, "zone marked as draining");
-            }
-
-            let mut h = self.health.write().await;
-            h.zones_loaded = registry.zone_count();
-
-            Ok(Response::new(RemoveZoneResponse {
-                ok: true,
-                message: String::new(),
-            }))
-        } else {
-            // Immediate removal — reject if containers are attached.
-            let refcount = registry.refcount(&zone_name);
-            if refcount > 0 {
-                return Ok(Response::new(RemoveZoneResponse {
-                    ok: false,
-                    message: format!(
-                        "zone '{}' has {} active containers — use drain=true or detach them first",
-                        zone_name, refcount
-                    ),
-                }));
-            }
-
-            let zone_id = registry.unregister_zone(&zone_name)
-                .map_err(|e| Status::not_found(format!("{e}")))?;
-
-            let mut ebpf = self.ebpf.lock().await;
-            let _ = ebpf.remove_zone_policy(zone_id);
-            let _ = ebpf.remove_zone_comms(zone_id);
-            let _ = ebpf.remove_zone_inodes(zone_id);
-
-            let mut h = self.health.write().await;
-            h.zones_loaded = registry.zone_count();
-
-            tracing::info!(zone = zone_name, zone_id, "zone removed via gRPC");
-            Ok(Response::new(RemoveZoneResponse {
-                ok: true,
-                message: String::new(),
-            }))
-        }
+        Ok(Response::new(RemoveZoneResponse {
+            ok: result.ok,
+            message: result.message,
+        }))
     }
 
     async fn attach_container(
@@ -304,27 +415,9 @@ impl SyvaCore for SyvaCoreService {
         // mirror entry. If a zone is unregistered in the window, the BPF
         // entry will be cleared by remove_zone_comms, and the mirror
         // re-check below skips the stale record.
-        let (zone_a_id, zone_b_id) = {
-            let registry = self.registry.read().await;
-            let a = registry.zone_id(&req.zone_a)
-                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
-            let b = registry.zone_id(&req.zone_b)
-                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
-            (a, b)
-        };
-
-        {
-            let mut ebpf = self.ebpf.lock().await;
-            ebpf.set_zone_allowed_comms(zone_a_id, zone_b_id)
-                .map_err(|e| Status::internal(format!("failed to set allowed comms: {e}")))?;
-        }
-
-        {
-            let mut registry = self.registry.write().await;
-            if registry.zone_id(&req.zone_a).is_some() && registry.zone_id(&req.zone_b).is_some() {
-                registry.record_allow_comm(&req.zone_a, &req.zone_b);
-            }
-        }
+        allow_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
+            .await
+            .map_err(|e| Status::internal(format!("failed to set allowed comms: {e}")))?;
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm allowed via gRPC");
         Ok(Response::new(AllowCommResponse { ok: true }))
@@ -343,31 +436,12 @@ impl SyvaCore for SyvaCoreService {
         // Same locking shape as allow_comm — resolve IDs under a read-lock,
         // release before the eBPF await, take a brief write-lock for the
         // mirror update afterwards.
-        let (zone_a_id, zone_b_id) = {
-            let registry = self.registry.read().await;
-            let a = registry.zone_id(&req.zone_a)
-                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_a)))?;
-            let b = registry.zone_id(&req.zone_b)
-                .ok_or_else(|| Status::not_found(format!("zone '{}' not registered", req.zone_b)))?;
-            (a, b)
-        };
-
-        {
-            // Remove only the requested pair in both directions, preserving
-            // any unrelated comm entries involving either zone.
-            let mut ebpf = self.ebpf.lock().await;
-            ebpf.remove_zone_comm_pair(zone_a_id, zone_b_id)
-                .map_err(|e| Status::internal(format!(
-                    "failed to remove comms between '{}' and '{}': {e}", req.zone_a, req.zone_b
-                )))?;
-        }
-
-        {
-            // record_deny_comm is a HashSet remove — safe even if the zone
-            // was unregistered meanwhile (already wiped by unregister_zone).
-            let mut registry = self.registry.write().await;
-            registry.record_deny_comm(&req.zone_a, &req.zone_b);
-        }
+        deny_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
+            .await
+            .map_err(|e| Status::internal(format!(
+                "failed to remove comms between '{}' and '{}': {e}",
+                req.zone_a, req.zone_b
+            )))?;
 
         tracing::info!(zone_a = req.zone_a, zone_b = req.zone_b, "cross-zone comm denied via gRPC");
         Ok(Response::new(DenyCommResponse { ok: true }))

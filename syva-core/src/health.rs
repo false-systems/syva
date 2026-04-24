@@ -100,6 +100,8 @@ async fn metrics(State(state): State<SharedHealth>) -> String {
 
 /// Pure function — testable without HTTP server.
 pub fn render_metrics(health: &HealthState) -> String {
+    type HookMetric = (&'static str, &'static str, fn(&HookCounters) -> u64);
+
     let mut out = String::with_capacity(2048);
 
     out.push_str("# HELP syva_up Whether syva is attached and enforcing.\n");
@@ -121,7 +123,7 @@ pub fn render_metrics(health: &HealthState) -> String {
     // Per-hook enforcement counters — always emitted (default 0 before first
     // snapshot) so Prometheus series exist from the start.
     let hook_names = &crate::events::HOOK_NAMES;
-    let metrics: [(&str, &str, fn(&HookCounters) -> u64); 4] = [
+    let metrics: [HookMetric; 4] = [
         ("syva_hook_allow_total", "Events allowed per hook", |c: &HookCounters| c.allow),
         ("syva_hook_deny_total", "Events denied per hook", |c: &HookCounters| c.deny),
         ("syva_hook_error_total", "Hook errors (fail-open) per hook", |c: &HookCounters| c.error),

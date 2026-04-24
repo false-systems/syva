@@ -21,6 +21,28 @@ copied to any other operation.
 
 ---
 
+## syva-core CP Mode vs Legacy Mode
+
+`syva-core` supports two zone ingestion paths that share the same in-process
+`ZoneRegistry` and `EnforceEbpf`:
+
+1. Local gRPC surface. Adapters push zones to `syva-core` directly. This is
+   the v0.2 architecture and remains the default.
+2. CP mode (`--cp-endpoint`). `syva-core` connects to a remote `syva-cp`,
+   registers as a node, and consumes assignments via server-streaming. The
+   reconcile loop lives in `syva-core/src/cp_reconcile/`.
+
+Both paths call the same in-process mutation helpers. CP mode is additive, not
+a replacement yet. Session 4b will migrate adapters to push to `syva-cp`
+instead of `syva-core`.
+
+The reconciler keeps in-memory state only (`AppliedState`). On restart, a fresh
+subscription receives a `FULL_SNAPSHOT` from `syva-cp` and reconstructs desired
+state. The only local persistence in CP mode is the `node-id` file used for
+re-registration.
+
+---
+
 ## Mental Model: How to Think About This Codebase
 
 Syvä is a kernel enforcement boundary. Every line of eBPF code runs in a
