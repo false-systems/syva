@@ -24,5 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ulid = "1.1"
 
 [dev-dependencies]
+syva-cp = { path = "../syva-cp" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
+tempfile = "3"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
