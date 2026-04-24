@@ -1,10 +1,15 @@
-use crate::db::types::{Actor, Policy, PolicyInput, Zone};
+use crate::db::types::{Actor, NodeLabels, Policy, PolicyInput, Zone};
+use crate::engine::assignment::{
+    compute_zone_assignments, diff_assignments, ExistingAssignment, NodeForAssignment,
+    ZoneForAssignment,
+};
 use crate::error::CpError;
 use crate::metrics;
 use crate::write::TransactionalWriter;
 use chrono::Utc;
 use serde_json::{json, Value as JsonValue};
 use sqlx::Row;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -255,6 +260,9 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
+        let affected_nodes =
+            recompute_zone_assignments_in_tx(&mut tx, zone.id, event_id, now, false).await?;
+
         let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
@@ -278,6 +286,17 @@ impl<'a> TransactionalWriter<'a> {
             metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
             CpError::Database(e)
         })?;
+
+        for node_id in &affected_nodes {
+            sqlx::query("SELECT pg_notify('syva_cp_assignments', $1)")
+                .bind(node_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "notify_failed");
+                    CpError::Database(e)
+                })?;
+        }
 
         tx.commit().await.map_err(|e| {
             metrics::record_transaction_rollback(OPERATION, "commit_failed");
@@ -537,6 +556,12 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
+        let affected_nodes = if input.policy.is_some() || input.selector_json.is_some() {
+            recompute_zone_assignments_in_tx(&mut tx, input.zone_id, event_id, now, false).await?
+        } else {
+            HashSet::new()
+        };
+
         let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
@@ -560,6 +585,17 @@ impl<'a> TransactionalWriter<'a> {
             metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
             CpError::Database(e)
         })?;
+
+        for node_id in &affected_nodes {
+            sqlx::query("SELECT pg_notify('syva_cp_assignments', $1)")
+                .bind(node_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "notify_failed");
+                    CpError::Database(e)
+                })?;
+        }
 
         tx.commit().await.map_err(|e| {
             metrics::record_transaction_rollback(OPERATION, "commit_failed");
@@ -731,6 +767,15 @@ impl<'a> TransactionalWriter<'a> {
             CpError::Database(e)
         })?;
 
+        let affected_nodes = recompute_zone_assignments_in_tx(
+            &mut tx,
+            input.zone_id,
+            event_id,
+            now,
+            zone.status == "deleted",
+        )
+        .await?;
+
         let request_json = serde_json::to_value(&input).unwrap_or_else(|_| json!({}));
         sqlx::query(
             r#"INSERT INTO audit_log
@@ -754,6 +799,17 @@ impl<'a> TransactionalWriter<'a> {
             metrics::record_transaction_rollback(OPERATION, "audit_insert_failed");
             CpError::Database(e)
         })?;
+
+        for node_id in &affected_nodes {
+            sqlx::query("SELECT pg_notify('syva_cp_assignments', $1)")
+                .bind(node_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    metrics::record_transaction_rollback(OPERATION, "notify_failed");
+                    CpError::Database(e)
+                })?;
+        }
 
         tx.commit().await.map_err(|e| {
             metrics::record_transaction_rollback(OPERATION, "commit_failed");
@@ -800,6 +856,135 @@ fn hash_name_lock(team_id: Uuid, name: &str) -> i64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash as i64
+}
+
+pub(crate) async fn recompute_zone_assignments_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    zone_id: Uuid,
+    event_id: Uuid,
+    now: chrono::DateTime<Utc>,
+    zone_is_deleted: bool,
+) -> Result<HashSet<Uuid>, CpError> {
+    let desired = if zone_is_deleted {
+        Vec::new()
+    } else {
+        let zone_row = sqlx::query(
+            r#"SELECT id, selector_json, current_policy_id, version, status
+               FROM zones WHERE id = $1"#,
+        )
+        .bind(zone_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(CpError::Database)?;
+
+        let status: String = zone_row.get("status");
+        let policy_id: Option<Uuid> = zone_row.get("current_policy_id");
+        if status != "active" {
+            Vec::new()
+        } else {
+            let Some(current_policy_id) = policy_id else {
+                return Ok(HashSet::new());
+            };
+
+            let zone = ZoneForAssignment {
+                zone_id,
+                selector_json: zone_row
+                    .get::<Option<JsonValue>, _>("selector_json")
+                    .unwrap_or(JsonValue::Null),
+                current_policy_id,
+                zone_version: zone_row.get("version"),
+            };
+
+            let node_rows = sqlx::query(
+                r#"SELECT id, node_name, status
+                   FROM nodes
+                   WHERE status = 'online'"#,
+            )
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(CpError::Database)?;
+
+            let node_ids: Vec<Uuid> =
+                node_rows.iter().map(|node_row| node_row.get("id")).collect();
+            let label_rows = if node_ids.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query(
+                    r#"SELECT node_id, key, value
+                       FROM node_labels
+                       WHERE node_id = ANY($1)"#,
+                )
+                .bind(&node_ids)
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(CpError::Database)?
+            };
+
+            let mut labels_by_node_id: BTreeMap<Uuid, NodeLabels> = BTreeMap::new();
+            for label_row in label_rows {
+                let label_node_id: Uuid = label_row.get("node_id");
+                labels_by_node_id
+                    .entry(label_node_id)
+                    .or_default()
+                    .insert(label_row.get("key"), label_row.get("value"));
+            }
+
+            let mut nodes = Vec::with_capacity(node_rows.len());
+            for node_row in node_rows {
+                let node_id: Uuid = node_row.get("id");
+                let labels = labels_by_node_id.remove(&node_id).unwrap_or_default();
+                nodes.push(NodeForAssignment {
+                    node_id,
+                    node_name: node_row.get("node_name"),
+                    status: node_row.get("status"),
+                    labels,
+                });
+            }
+
+            compute_zone_assignments(&zone, &nodes)
+        }
+    };
+
+    let current_rows = sqlx::query(
+        r#"SELECT id, zone_id, node_id, status, desired_policy_id, desired_zone_version
+           FROM assignments
+           WHERE zone_id = $1 AND status NOT IN ('removed', 'failed', 'removing')"#,
+    )
+    .bind(zone_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(CpError::Database)?;
+
+    let current = current_rows
+        .iter()
+        .map(|row| ExistingAssignment {
+            id: row.get("id"),
+            zone_id: row.get("zone_id"),
+            node_id: row.get("node_id"),
+            desired_policy_id: row.get("desired_policy_id"),
+            desired_zone_version: row.get("desired_zone_version"),
+            status: row.get("status"),
+        })
+        .collect::<Vec<_>>();
+
+    let (upserts, removes) = diff_assignments(&current, &desired);
+
+    let mut affected_nodes = HashSet::new();
+    for desired in &upserts {
+        crate::write::node::apply_assignment_upsert_exposed(tx, desired, event_id, now).await?;
+        affected_nodes.insert(desired.node_id);
+    }
+
+    for assignment_id in &removes {
+        if let Some(node_id) =
+            crate::write::node::apply_assignment_remove_exposed(tx, *assignment_id, event_id, now)
+                .await?
+        {
+            affected_nodes.insert(node_id);
+        }
+    }
+
+    Ok(affected_nodes)
 }
 
 #[allow(dead_code)]

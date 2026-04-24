@@ -139,3 +139,51 @@ brew install grpcurl
 curl -L https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
   | tar xz -C /tmp && sudo mv /tmp/grpcurl /usr/local/bin/
 ```
+
+## E2E Smoke Test — Nodes and Assignments (Session 3)
+
+```bash
+# Assume syva-cp is already running locally from the setup above.
+
+# 1. Create a team
+TEAM_ID=$(grpcurl -plaintext -d '{"name":"platform"}' \
+    localhost:50051 syva.control.v1.TeamService/CreateTeam \
+    | jq -r '.team.id')
+echo "team: $TEAM_ID"
+
+# 2. Create a zone with a label-based selector
+ZONE_ID=$(grpcurl -plaintext -d "{
+    \"team_id\":\"$TEAM_ID\",
+    \"name\":\"agents\",
+    \"policy_json\":\"{\\\"allowed_zones\\\":[]}\",
+    \"selector_json\":\"{\\\"match_labels\\\":{\\\"tier\\\":\\\"prod\\\"}}\"
+}" localhost:50051 syva.control.v1.ZoneService/CreateZone \
+    | jq -r '.zone.id')
+echo "zone: $ZONE_ID"
+
+# 3. Generate a node_id on the node side
+NODE_ID=$(uuidgen)
+echo "node: $NODE_ID"
+
+# 4. Register the node with a matching label
+grpcurl -plaintext -d "{
+    \"node_name\":\"n01\",
+    \"proposed_id\":\"$NODE_ID\",
+    \"labels\":{\"tier\":\"prod\"}
+}" localhost:50051 syva.control.v1.NodeService/RegisterNode
+
+# 5. In another shell, subscribe to assignment updates
+grpcurl -plaintext -d "{\"node_id\":\"$NODE_ID\"}" \
+    localhost:50051 syva.control.v1.AssignmentService/SubscribeAssignments
+
+# Expected: one FULL_SNAPSHOT with one assignment
+
+# 6. Flip the labels so the node no longer matches
+grpcurl -plaintext -d "{
+    \"node_id\":\"$NODE_ID\",
+    \"if_version\":1,
+    \"labels\":{\"tier\":\"dev\"}
+}" localhost:50051 syva.control.v1.NodeService/SetNodeLabels
+
+# Expected on the stream: a REMOVE for the zone
+```

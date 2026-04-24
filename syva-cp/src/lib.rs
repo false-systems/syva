@@ -5,8 +5,10 @@
 //! `docs/adr/0003-transactional-write-discipline.md` for the rules that
 //! govern every mutating operation in this crate.
 
+pub mod bus;
 pub mod config;
 pub mod db;
+pub mod engine;
 pub mod error;
 pub mod health;
 pub mod metrics;
@@ -15,6 +17,7 @@ pub mod rpc;
 pub mod write;
 
 use anyhow::Result;
+use bus::AssignmentBus;
 use config::Config;
 
 pub async fn run(config: Config) -> Result<()> {
@@ -27,7 +30,9 @@ pub async fn run(config: Config) -> Result<()> {
     // Mirrors syva-core's pattern: observability before enforcement.
     let (health_handle, health_ready) = health::spawn(config.health_addr, metrics_handle);
 
-    let rpc_handle = rpc::spawn(pool.clone(), config.grpc_addr).await?;
+    let bus = AssignmentBus::new();
+    let listener_handle = bus::spawn_listener(pool.clone(), bus.clone()).await?;
+    let rpc_handle = rpc::spawn(pool.clone(), bus.clone(), config.grpc_addr).await?;
 
     health_ready.set(true);
     tracing::info!("syva-cp ready");
@@ -39,6 +44,7 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     health_ready.set(false);
+    listener_handle.abort();
     rpc_handle.abort();
     health_handle.abort();
     Ok(())
