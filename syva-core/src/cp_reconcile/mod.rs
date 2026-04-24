@@ -73,7 +73,7 @@ impl Reconciler {
         }
     }
 
-    async fn run_once(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run_once(&self) -> anyhow::Result<()> {
         let mut stream = self.cp.subscribe_assignments().await?;
 
         while let Some(update) = stream.message().await? {
