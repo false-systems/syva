@@ -1,0 +1,28 @@
+[package]
+name = "syva-cp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client library for the syva control plane"
+
+[dependencies]
+syva-proto = { path = "../syva-proto" }
+
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ulid = "1.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
