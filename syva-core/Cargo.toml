@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 syva-proto = { path = "../syva-proto" }
+syva-cp-client = { path = "../syva-cp-client" }
 syva-ebpf-common = { path = "../syva-ebpf-common", features = ["userspace"] }
 aya = { workspace = true }
 tonic = { workspace = true }

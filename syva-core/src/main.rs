@@ -45,6 +45,44 @@ struct Cli {
     /// Unix socket path for the gRPC server.
     #[arg(long, default_value = "/run/syva/syva-core.sock")]
     socket_path: String,
+
+    /// Optional syva-cp endpoint. When set, syva-core registers with
+    /// syva-cp and consumes assignment updates in addition to its local
+    /// adapter-facing gRPC surface.
+    #[arg(long, env = "SYVA_CP_ENDPOINT")]
+    cp_endpoint: Option<String>,
+
+    /// Hostname to report to syva-cp. Defaults to the system hostname.
+    #[arg(long, env = "SYVA_NODE_NAME")]
+    node_name: Option<String>,
+
+    /// Path to the stable node fingerprint file (for example /etc/machine-id).
+    #[arg(
+        long,
+        env = "SYVA_NODE_FINGERPRINT_PATH",
+        default_value = "/etc/machine-id"
+    )]
+    fingerprint_path: PathBuf,
+
+    /// Optional cluster identifier to report at node registration time.
+    #[arg(long, env = "SYVA_CLUSTER_ID")]
+    cluster_id: Option<String>,
+
+    /// Node labels to send at registration. Format: key=value,key=value
+    #[arg(long, env = "SYVA_NODE_LABELS", value_delimiter = ',')]
+    node_labels: Vec<String>,
+
+    /// Path where the registered node ID is persisted across restarts.
+    #[arg(
+        long,
+        env = "SYVA_NODE_ID_PATH",
+        default_value = "/var/lib/syva/node-id"
+    )]
+    node_id_path: PathBuf,
+
+    /// Heartbeat interval in seconds for CP mode.
+    #[arg(long, env = "SYVA_HEARTBEAT_SECS", default_value = "15")]
+    heartbeat_secs: u64,
 }
 
 #[derive(Subcommand)]

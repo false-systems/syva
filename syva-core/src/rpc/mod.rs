@@ -30,7 +30,7 @@ use syva_proto::syva_core::{
 
 use crate::ebpf::EnforceEbpf;
 use crate::events::HOOK_NAMES;
-use crate::health::{HookCounters, SharedHealth};
+use crate::health::SharedHealth;
 use crate::types::ZoneType;
 use crate::zone::{ZoneRegistry, ZoneState, ZoneTransition};
 
@@ -72,7 +72,7 @@ impl SyvaCore for SyvaCoreService {
 
             // Convert proto policy to internal ZonePolicy for BPF map population.
             let allow_ptrace = proto_policy.allow_ptrace;
-            let zone_type = match proto_policy.zone_type {
+            let _zone_type = match proto_policy.zone_type {
                 1 => ZoneType::Privileged,
                 _ => ZoneType::NonGlobal,
             };
