@@ -182,3 +182,100 @@ fn canonical_pair(zone_a: &str, zone_b: &str) -> CommPair {
         (zone_b.to_string(), zone_a.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment(zone_id: Uuid, policy_id: Uuid, version: i64, name: &str) -> ZoneAssignment {
+        ZoneAssignment {
+            assignment_id: Uuid::new_v4().to_string(),
+            zone_id: zone_id.to_string(),
+            zone_name: name.to_string(),
+            desired_zone_version: version,
+            desired_policy_id: policy_id.to_string(),
+            desired_policy_version: version,
+            policy_json: "{}".to_string(),
+            team_id: Uuid::new_v4().to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_state_treats_all_as_new() {
+        let state = AppliedState::new();
+        let zone_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+
+        let desired = vec![assignment(zone_id, policy_id, 1, "z1")];
+        let (apply, remove) = state.diff_against_snapshot(&desired);
+
+        assert_eq!(apply.len(), 1);
+        assert!(remove.is_empty());
+    }
+
+    #[test]
+    fn unchanged_snapshot_is_noop() {
+        let mut state = AppliedState::new();
+        let zone_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let current = assignment(zone_id, policy_id, 1, "z1");
+        state.record_applied(&current);
+
+        let (apply, remove) = state.diff_against_snapshot(std::slice::from_ref(&current));
+
+        assert!(apply.is_empty());
+        assert!(remove.is_empty());
+    }
+
+    #[test]
+    fn policy_change_triggers_apply() {
+        let mut state = AppliedState::new();
+        let zone_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let new_policy_id = Uuid::new_v4();
+        state.record_applied(&assignment(zone_id, policy_id, 1, "z1"));
+
+        let desired = vec![assignment(zone_id, new_policy_id, 2, "z1")];
+        let (apply, remove) = state.diff_against_snapshot(&desired);
+
+        assert_eq!(apply.len(), 1);
+        assert!(remove.is_empty());
+    }
+
+    #[test]
+    fn missing_from_snapshot_triggers_remove() {
+        let mut state = AppliedState::new();
+        let zone_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        state.record_applied(&assignment(zone_id, policy_id, 1, "z1"));
+
+        let (apply, remove) = state.diff_against_snapshot(&[]);
+
+        assert!(apply.is_empty());
+        assert_eq!(remove, vec![zone_id.to_string()]);
+    }
+
+    #[test]
+    fn mixed_scenario() {
+        let mut state = AppliedState::new();
+        let zone_one = Uuid::new_v4();
+        let zone_two = Uuid::new_v4();
+        let zone_three = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let new_policy_id = Uuid::new_v4();
+
+        state.record_applied(&assignment(zone_one, policy_id, 1, "z1"));
+        state.record_applied(&assignment(zone_two, policy_id, 1, "z2"));
+
+        let desired = vec![
+            assignment(zone_one, policy_id, 1, "z1"),
+            assignment(zone_two, new_policy_id, 2, "z2"),
+            assignment(zone_three, policy_id, 1, "z3"),
+        ];
+
+        let (apply, remove) = state.diff_against_snapshot(&desired);
+
+        assert_eq!(apply.len(), 2);
+        assert!(remove.is_empty());
+    }
+}
