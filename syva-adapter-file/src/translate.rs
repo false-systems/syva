@@ -1,18 +1,48 @@
-//! Translation between adapter-local TOML policy types and proto types.
-//!
-//! The adapter owns the TOML deserialization format. The proto types are
-//! what syva-core understands. This module bridges the two.
+use crate::policy::FilePolicy;
+use anyhow::Result;
+use syva_cp_client::{CreateZoneArgs, UpdateZoneArgs, ZoneSnapshot};
+use uuid::Uuid;
 
-use crate::types::ZonePolicy;
-use syva_proto::syva_core;
+pub fn policy_to_create_args(
+    team_id: Uuid,
+    name: &str,
+    policy: &FilePolicy,
+) -> Result<CreateZoneArgs> {
+    Ok(CreateZoneArgs {
+        team_id,
+        name: name.to_string(),
+        display_name: policy.display_name.clone(),
+        policy_json: serde_json::to_value(&policy.policy)?,
+        summary_json: None,
+        selector_json: policy.selector.clone(),
+        metadata_json: None,
+    })
+}
 
-/// Convert a local ZonePolicy (deserialized from TOML) to a proto ZonePolicy.
-pub fn to_proto_policy(policy: &ZonePolicy) -> syva_core::ZonePolicy {
-    syva_core::ZonePolicy {
-        host_paths: policy.filesystem.host_paths.clone(),
-        allowed_zones: policy.network.allowed_zones.clone(),
-        allow_ptrace: policy.capabilities.allowed.iter()
-            .any(|c| c == "CAP_SYS_PTRACE"),
-        zone_type: syva_core::ZoneType::Standard.into(),
+pub fn policy_to_update_args(
+    snapshot: &ZoneSnapshot,
+    policy: &FilePolicy,
+) -> Result<Option<UpdateZoneArgs>> {
+    let desired_policy_json = serde_json::to_value(&policy.policy)?;
+    let desired_selector_json = policy.selector.clone();
+
+    let policy_matches = snapshot
+        .current_policy_json
+        .as_ref()
+        .map(|current| current == &desired_policy_json)
+        .unwrap_or(false);
+    let selector_matches = snapshot.selector_json == desired_selector_json;
+    let display_name_matches = snapshot.display_name == policy.display_name;
+
+    if policy_matches && selector_matches && display_name_matches {
+        return Ok(None);
     }
+
+    Ok(Some(UpdateZoneArgs {
+        zone_id: snapshot.zone_id,
+        if_version: snapshot.version,
+        policy_json: Some(desired_policy_json),
+        selector_json: desired_selector_json,
+        metadata_json: None,
+    }))
 }

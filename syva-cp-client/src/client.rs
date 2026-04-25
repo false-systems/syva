@@ -99,9 +99,13 @@ pub struct ZoneSnapshot {
     pub zone_id: Uuid,
     pub team_id: Uuid,
     pub name: String,
+    pub display_name: Option<String>,
     pub status: String,
     pub version: i64,
     pub current_policy_id: Option<Uuid>,
+    pub current_policy_json: Option<serde_json::Value>,
+    pub selector_json: Option<serde_json::Value>,
+    pub metadata_json: Option<serde_json::Value>,
 }
 
 impl CpClient {
@@ -348,6 +352,11 @@ impl CpClient {
             zone_id: parse_uuid(&zone.id, "zone.id")?,
             team_id: parse_uuid(&zone.team_id, "zone.team_id")?,
             name: zone.name,
+            display_name: if zone.display_name.is_empty() {
+                None
+            } else {
+                Some(zone.display_name)
+            },
             status: zone.status,
             version: zone.version,
             current_policy_id: if zone.current_policy_id.is_empty() {
@@ -358,6 +367,14 @@ impl CpClient {
                     "zone.current_policy_id",
                 )?)
             },
+            current_policy_json: response
+                .current_policy
+                .as_ref()
+                .filter(|policy| !policy.policy_json.is_empty())
+                .map(|policy| serde_json::from_str(&policy.policy_json))
+                .transpose()?,
+            selector_json: parse_optional_json(&zone.selector_json)?,
+            metadata_json: parse_optional_json(&zone.metadata_json)?,
         }))
     }
 
@@ -385,6 +402,11 @@ impl CpClient {
                     zone_id: parse_uuid(&zone.id, "zone.id")?,
                     team_id: parse_uuid(&zone.team_id, "zone.team_id")?,
                     name: zone.name,
+                    display_name: if zone.display_name.is_empty() {
+                        None
+                    } else {
+                        Some(zone.display_name)
+                    },
                     status: zone.status,
                     version: zone.version,
                     current_policy_id: if zone.current_policy_id.is_empty() {
@@ -395,6 +417,9 @@ impl CpClient {
                             "zone.current_policy_id",
                         )?)
                     },
+                    current_policy_json: None,
+                    selector_json: parse_optional_json(&zone.selector_json)?,
+                    metadata_json: parse_optional_json(&zone.metadata_json)?,
                 })
             })
             .collect()
@@ -467,4 +492,14 @@ pub struct FailedReport {
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, CpClientError> {
     Uuid::parse_str(value)
         .map_err(|error| CpClientError::Internal(format!("could not parse {field} as UUID: {error}")))
+}
+
+fn parse_optional_json(
+    value: &str,
+) -> Result<Option<serde_json::Value>, CpClientError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::from_str(value).map(Some).map_err(Into::into)
 }

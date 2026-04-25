@@ -3043,21 +3043,15 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
- "containerd-client",
- "hyper-util",
- "prost",
- "prost-types",
  "serde",
  "serde_json",
+ "syva-cp-client",
  "syva-ebpf-common",
- "syva-proto",
  "tokio",
- "tokio-stream",
  "toml",
- "tonic",
- "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
