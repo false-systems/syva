@@ -410,7 +410,7 @@ deny = []
     #[test]
     fn network_mode_rejects_pascalcase() {
         #[derive(Deserialize)]
-        struct T { mode: NetworkMode }
+        struct T { _mode: NetworkMode }
         assert!(toml::from_str::<T>("mode = \"Bridged\"").is_err());
     }
 }
