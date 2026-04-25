@@ -8,10 +8,8 @@ name = "syva-api"
 path = "src/main.rs"
 
 [dependencies]
-syva-proto = { path = "../syva-proto" }
-tonic = { workspace = true }
+syva-cp-client = { path = "../syva-cp-client" }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -19,5 +17,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }
-tower = "0.5"
-hyper-util = { version = "0.1", features = ["tokio"] }
+uuid = { version = "1", features = ["v4", "serde"] }

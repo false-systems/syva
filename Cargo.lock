@@ -3025,16 +3025,13 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "hyper-util",
  "serde",
  "serde_json",
- "syva-proto",
+ "syva-cp-client",
  "tokio",
- "tokio-stream",
- "tonic",
- "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
