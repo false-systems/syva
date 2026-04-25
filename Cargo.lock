@@ -3061,19 +3061,16 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
- "hyper-util",
  "k8s-openapi",
  "kube",
  "schemars",
  "serde",
  "serde_json",
- "syva-proto",
+ "syva-cp-client",
  "tokio",
- "tokio-stream",
- "tonic",
- "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
