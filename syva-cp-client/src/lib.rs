@@ -16,7 +16,9 @@
 pub mod client;
 pub mod error;
 
-pub use client::{AppliedReport, CpClient, CpClientConfig, FailedReport, NodeRegistration};
+pub use client::{
+    AppliedReport, CpClient, CpClientConfig, CreateZoneArgs, CreatedZone, DeleteZoneArgs,
+    FailedReport, NodeRegistration, UpdateZoneArgs, UpdatedZone, ZoneSnapshot,
+};
 pub use error::CpClientError;
 pub use syva_proto::syva_control::v1::{NodeAssignmentUpdate, ZoneAssignment};
-

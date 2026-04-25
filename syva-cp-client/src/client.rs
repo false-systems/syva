@@ -10,9 +10,12 @@ use uuid::Uuid;
 
 use syva_proto::syva_control::v1::assignment_service_client::AssignmentServiceClient;
 use syva_proto::syva_control::v1::node_service_client::NodeServiceClient;
+use syva_proto::syva_control::v1::zone_service_client::ZoneServiceClient;
 use syva_proto::syva_control::v1::{
-    AppliedAssignment, FailedAssignment, HeartbeatRequest, NodeAssignmentUpdate,
-    RegisterNodeRequest, ReportAssignmentStateRequest, SubscribeAssignmentsRequest,
+    get_zone_request::Identifier as GetZoneIdentifier, AppliedAssignment, CreateZoneRequest,
+    FailedAssignment, GetZoneRequest, HeartbeatRequest, ListZonesRequest,
+    NodeAssignmentUpdate, RegisterNodeRequest, ReportAssignmentStateRequest,
+    SubscribeAssignmentsRequest, UpdateZoneRequest, DeleteZoneRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -53,6 +56,52 @@ pub struct CpClient {
     config: CpClientConfig,
     channel: Channel,
     registration: Arc<RwLock<Option<NodeRegistration>>>,
+}
+
+pub struct CreateZoneArgs {
+    pub team_id: Uuid,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub policy_json: serde_json::Value,
+    pub summary_json: Option<serde_json::Value>,
+    pub selector_json: Option<serde_json::Value>,
+    pub metadata_json: Option<serde_json::Value>,
+}
+
+pub struct CreatedZone {
+    pub zone_id: Uuid,
+    pub policy_id: Uuid,
+    pub version: i64,
+}
+
+pub struct UpdateZoneArgs {
+    pub zone_id: Uuid,
+    pub if_version: i64,
+    pub policy_json: Option<serde_json::Value>,
+    pub selector_json: Option<serde_json::Value>,
+    pub metadata_json: Option<serde_json::Value>,
+}
+
+pub struct UpdatedZone {
+    pub zone_id: Uuid,
+    pub version: i64,
+    pub new_policy_id: Option<Uuid>,
+    pub new_policy_version: Option<i64>,
+}
+
+pub struct DeleteZoneArgs {
+    pub zone_id: Uuid,
+    pub if_version: i64,
+    pub drain: bool,
+}
+
+pub struct ZoneSnapshot {
+    pub zone_id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub version: i64,
+    pub current_policy_id: Option<Uuid>,
 }
 
 impl CpClient {
@@ -180,6 +229,177 @@ impl CpClient {
         ))
     }
 
+    pub async fn create_zone(&self, args: CreateZoneArgs) -> Result<CreatedZone, CpClientError> {
+        let mut client = ZoneServiceClient::new(self.channel.clone());
+        let response = client
+            .create_zone(CreateZoneRequest {
+                team_id: args.team_id.to_string(),
+                name: args.name,
+                display_name: args.display_name.unwrap_or_default(),
+                policy_json: args.policy_json.to_string(),
+                summary_json: args
+                    .summary_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                selector_json: args
+                    .selector_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                metadata_json: args
+                    .metadata_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            })
+            .await?
+            .into_inner();
+
+        let zone = response
+            .zone
+            .ok_or_else(|| CpClientError::Internal("CreateZoneResponse missing zone".into()))?;
+        let policy = response
+            .policy
+            .ok_or_else(|| CpClientError::Internal("CreateZoneResponse missing policy".into()))?;
+
+        Ok(CreatedZone {
+            zone_id: parse_uuid(&zone.id, "zone.id")?,
+            policy_id: parse_uuid(&policy.id, "policy.id")?,
+            version: zone.version,
+        })
+    }
+
+    pub async fn update_zone(&self, args: UpdateZoneArgs) -> Result<UpdatedZone, CpClientError> {
+        let mut client = ZoneServiceClient::new(self.channel.clone());
+        let response = client
+            .update_zone(UpdateZoneRequest {
+                zone_id: args.zone_id.to_string(),
+                if_version: args.if_version,
+                policy_json: args
+                    .policy_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                selector_json: args
+                    .selector_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                metadata_json: args
+                    .metadata_json
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            })
+            .await?
+            .into_inner();
+
+        let zone = response
+            .zone
+            .ok_or_else(|| CpClientError::Internal("UpdateZoneResponse missing zone".into()))?;
+        let new_policy = response.new_policy;
+
+        Ok(UpdatedZone {
+            zone_id: parse_uuid(&zone.id, "zone.id")?,
+            version: zone.version,
+            new_policy_id: new_policy
+                .as_ref()
+                .map(|policy| parse_uuid(&policy.id, "policy.id"))
+                .transpose()?,
+            new_policy_version: new_policy.map(|policy| policy.version),
+        })
+    }
+
+    pub async fn delete_zone(&self, args: DeleteZoneArgs) -> Result<(), CpClientError> {
+        let mut client = ZoneServiceClient::new(self.channel.clone());
+        client
+            .delete_zone(DeleteZoneRequest {
+                zone_id: args.zone_id.to_string(),
+                if_version: args.if_version,
+                drain: args.drain,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_zone_by_name(
+        &self,
+        team_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ZoneSnapshot>, CpClientError> {
+        let mut client = ZoneServiceClient::new(self.channel.clone());
+        let response = match client
+            .get_zone(GetZoneRequest {
+                identifier: Some(GetZoneIdentifier::NameRef(
+                    syva_proto::syva_control::v1::ZoneNameRef {
+                        team_id: team_id.to_string(),
+                        name: name.to_string(),
+                    },
+                )),
+            })
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) if error.code() == tonic::Code::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        let zone = match response.zone {
+            Some(zone) => zone,
+            None => return Ok(None),
+        };
+
+        Ok(Some(ZoneSnapshot {
+            zone_id: parse_uuid(&zone.id, "zone.id")?,
+            team_id: parse_uuid(&zone.team_id, "zone.team_id")?,
+            name: zone.name,
+            status: zone.status,
+            version: zone.version,
+            current_policy_id: if zone.current_policy_id.is_empty() {
+                None
+            } else {
+                Some(parse_uuid(
+                    &zone.current_policy_id,
+                    "zone.current_policy_id",
+                )?)
+            },
+        }))
+    }
+
+    pub async fn list_zones(
+        &self,
+        team_id: Uuid,
+        status_filter: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ZoneSnapshot>, CpClientError> {
+        let mut client = ZoneServiceClient::new(self.channel.clone());
+        let response = client
+            .list_zones(ListZonesRequest {
+                team_id: team_id.to_string(),
+                status: status_filter.unwrap_or_default().to_string(),
+                limit,
+            })
+            .await?
+            .into_inner();
+
+        response
+            .zones
+            .into_iter()
+            .map(|zone| {
+                Ok(ZoneSnapshot {
+                    zone_id: parse_uuid(&zone.id, "zone.id")?,
+                    team_id: parse_uuid(&zone.team_id, "zone.team_id")?,
+                    name: zone.name,
+                    status: zone.status,
+                    version: zone.version,
+                    current_policy_id: if zone.current_policy_id.is_empty() {
+                        None
+                    } else {
+                        Some(parse_uuid(
+                            &zone.current_policy_id,
+                            "zone.current_policy_id",
+                        )?)
+                    },
+                })
+            })
+            .collect()
+    }
+
     async fn require_registered(&self) -> Result<Uuid, CpClientError> {
         self.registration
             .read()
@@ -244,3 +464,7 @@ pub struct FailedReport {
     pub error_json: serde_json::Value,
 }
 
+fn parse_uuid(value: &str, field: &str) -> Result<Uuid, CpClientError> {
+    Uuid::parse_str(value)
+        .map_err(|error| CpClientError::Internal(format!("could not parse {field} as UUID: {error}")))
+}
