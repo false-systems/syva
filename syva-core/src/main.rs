@@ -1,8 +1,7 @@
-//! syva-core — eBPF enforcement engine with gRPC API.
+//! syva-core — eBPF enforcement engine.
 //!
-//! The core engine manages BPF programs and maps. Adapters connect via
-//! Unix socket gRPC to register zones, attach containers, and manage
-//! cross-zone communication policies.
+//! The core engine manages BPF programs and maps and consumes desired
+//! zone state from syva-cp.
 //!
 //! Usage:
 //!   syva-core                          # Start the enforcement engine
@@ -14,24 +13,20 @@ mod btf;
 mod ebpf;
 mod events;
 mod health;
-pub mod rpc;
+mod ingest;
 pub mod types;
 mod zone;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use syva_cp_client::CpClientConfig;
 use tokio::sync::{Mutex, RwLock};
-use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 
-use syva_proto::syva_core::syva_core_server::SyvaCoreServer;
-
 #[derive(Parser)]
-#[command(name = "syva-core", about = "eBPF enforcement engine with gRPC API")]
+#[command(name = "syva-core", about = "eBPF enforcement engine")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -44,15 +39,9 @@ struct Cli {
     #[arg(long, default_value = "9091")]
     health_port: u16,
 
-    /// Unix socket path for the gRPC server.
-    #[arg(long, default_value = "/run/syva/syva-core.sock")]
-    socket_path: String,
-
-    /// Optional syva-cp endpoint. When set, syva-core registers with
-    /// syva-cp and consumes assignment updates in addition to its local
-    /// adapter-facing gRPC surface.
+    /// syva-cp endpoint. Required.
     #[arg(long, env = "SYVA_CP_ENDPOINT")]
-    cp_endpoint: Option<String>,
+    cp_endpoint: String,
 
     /// Hostname to report to syva-cp. Defaults to the system hostname.
     #[arg(long, env = "SYVA_NODE_NAME")]
@@ -129,8 +118,6 @@ async fn main() -> anyhow::Result<()> {
 async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     tracing::info!("syva-core starting");
 
-    let start_time = Instant::now();
-
     // Health state — shared with the HTTP server. Starts as unhealthy
     // (not attached, zero zones) and transitions as startup progresses.
     let health_state = health::SharedHealth::new(RwLock::new(
@@ -165,36 +152,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     let registry = Arc::new(RwLock::new(zone::ZoneRegistry::new()));
     let ebpf = Arc::new(Mutex::new(mgr));
 
-    tracing::info!("startup complete — enforcement active, awaiting gRPC connections");
-
-    // Ensure parent directory for socket path exists.
-    if let Some(parent) = std::path::Path::new(&config.socket_path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("failed to create socket directory {}: {e}", parent.display()))?;
-        }
-    }
-
-    // Remove stale socket file if it exists.
-    if std::path::Path::new(&config.socket_path).exists() {
-        std::fs::remove_file(&config.socket_path)
-            .map_err(|e| anyhow::anyhow!("failed to remove stale socket {}: {e}", config.socket_path))?;
-    }
-
-    // Build gRPC service.
-    let service = rpc::SyvaCoreService {
-        registry: registry.clone(),
-        ebpf: ebpf.clone(),
-        health: health_state.clone(),
-        start_time,
-    };
-
-    // Start gRPC server on Unix socket.
-    let uds = tokio::net::UnixListener::bind(&config.socket_path)
-        .map_err(|e| anyhow::anyhow!("failed to bind Unix socket {}: {e}", config.socket_path))?;
-    let uds_stream = tokio_stream::wrappers::UnixListenerStream::new(uds);
-
-    tracing::info!(socket = config.socket_path, "gRPC server listening");
+    tracing::info!("startup complete — enforcement active");
 
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
     let mut sigterm = tokio::signal::unix::signal(
@@ -252,71 +210,56 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         }
     });
 
-    if let Some(endpoint) = config.cp_endpoint.as_ref() {
-        let node_name = config
-            .node_name
-            .clone()
-            .or_else(system_hostname)
-            .unwrap_or_else(|| "unknown".to_string());
-        let cp_config = CpClientConfig {
-            endpoint: endpoint.clone(),
-            node_name,
-            cluster_id: config.cluster_id.clone(),
-            fingerprint: read_fingerprint(&config.fingerprint_path),
-            labels: parse_labels(&config.node_labels),
-            node_id_path: config.node_id_path.clone(),
-            heartbeat_interval: std::time::Duration::from_secs(config.heartbeat_secs),
-            ..Default::default()
-        };
+    let node_name = config
+        .node_name
+        .clone()
+        .or_else(system_hostname)
+        .unwrap_or_else(|| "unknown".to_string());
+    let cp_config = CpClientConfig {
+        endpoint: config.cp_endpoint.clone(),
+        node_name,
+        cluster_id: config.cluster_id.clone(),
+        fingerprint: read_fingerprint(&config.fingerprint_path),
+        labels: parse_labels(&config.node_labels),
+        node_id_path: config.node_id_path.clone(),
+        heartbeat_interval: std::time::Duration::from_secs(config.heartbeat_secs),
+        ..Default::default()
+    };
 
-        match syva_cp_client::CpClient::connect(cp_config).await {
-            Ok(cp) => match cp.register().await {
-                Ok(registration) => {
-                    tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
+    let cp = syva_cp_client::CpClient::connect(cp_config)
+        .await
+        .map_err(|error| anyhow::anyhow!("connect to syva-cp at {}: {error}", config.cp_endpoint))?;
+    let registration = cp
+        .register()
+        .await
+        .map_err(|error| anyhow::anyhow!("register with syva-cp: {error}"))?;
+    tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
 
-                    let heartbeat_handle = cp.spawn_heartbeat_loop();
-                    let reconciler = cp_reconcile::Reconciler::new(
-                        cp,
-                        registry.clone(),
-                        ebpf.clone(),
-                        health_state.clone(),
-                    );
-                    tokio::spawn(async move {
-                        let _heartbeat = heartbeat_handle;
-                        reconciler.run().await;
-                    });
+    let _heartbeat = cp.spawn_heartbeat_loop();
+    let reconciler = cp_reconcile::Reconciler::new(
+        cp,
+        registry.clone(),
+        ebpf.clone(),
+        health_state.clone(),
+    );
+    let mut reconcile_task = tokio::spawn(async move {
+        reconciler.run().await;
+    });
 
-                    tracing::info!("syva-core CP mode active");
-                }
-                Err(error) => {
-                    tracing::error!("could not register with syva-cp at startup: {error}");
-                    tracing::warn!("syva-core running in degraded mode (local adapters only)");
-                }
-            },
-            Err(error) => {
-                tracing::error!("could not connect to syva-cp at startup: {error}");
-                tracing::warn!("syva-core running in degraded mode (local adapters only)");
-            }
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received SIGINT — shutting down");
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM — shutting down");
+        }
+        _ = &mut reconcile_task => {
+            tracing::warn!("reconcile loop exited");
         }
     }
 
-    // Run gRPC server with graceful shutdown.
-    let grpc_server = Server::builder()
-        .add_service(SyvaCoreServer::new(service))
-        .serve_with_incoming_shutdown(uds_stream, async {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("received SIGINT — shutting down");
-                }
-                _ = sigterm.recv() => {
-                    tracing::info!("received SIGTERM — shutting down");
-                }
-            }
-        });
-
-    grpc_server.await?;
-
     cancel.cancel();
+    reconcile_task.abort();
     // Drop ebpf manager (cleans up BPF pins).
     drop(ebpf);
     tracing::info!("syva-core stopped");
@@ -327,8 +270,17 @@ pub(crate) fn parse_labels(entries: &[String]) -> std::collections::BTreeMap<Str
     let mut labels = std::collections::BTreeMap::new();
 
     for entry in entries {
-        if let Some((key, value)) = entry.split_once('=') {
+        let trimmed = entry.trim();
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() {
+                tracing::warn!(entry = trimmed, "ignoring node label with empty key");
+                continue;
+            }
             labels.insert(key.to_string(), value.to_string());
+        } else {
+            tracing::warn!(entry = trimmed, "ignoring malformed node label");
         }
     }
 

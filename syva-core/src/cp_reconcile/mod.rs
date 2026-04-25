@@ -5,16 +5,14 @@
 //!
 //! 1. Receive a `NodeAssignmentUpdate` from syva-cp
 //! 2. Diff against the last applied state
-//! 3. Reuse the same registry/BPF mutation helpers as the local gRPC path
+//! 3. Reuse the same registry/BPF mutation helpers as the former local gRPC path
 //! 4. Report applied or failed status back to syva-cp
-
-#![allow(dead_code)]
 
 pub mod state;
 
 use crate::ebpf::EnforceEbpf;
 use crate::health::SharedHealth;
-use crate::rpc::{
+use crate::ingest::{
     allow_comm_local, deny_comm_local, register_zone_local, remove_zone_local, CoreZonePolicyInput,
 };
 use crate::types::ZoneType;
@@ -146,8 +144,6 @@ impl Reconciler {
                         );
                     }
 
-                    self.sync_allowed_comms().await;
-
                     applied_reports.push(AppliedReport {
                         assignment_id,
                         actual_zone_version: assignment.desired_zone_version,
@@ -169,6 +165,8 @@ impl Reconciler {
                 }
             }
         }
+
+        self.sync_allowed_comms().await;
 
         if !applied_reports.is_empty() || !failed_reports.is_empty() {
             if let Err(error) = self
@@ -208,12 +206,16 @@ impl Reconciler {
         )
         .await
         {
-            Ok(result) if result.ok => {
-                let mut applied = self.applied.lock().await;
-                applied.record_removed(&zone_id);
-                drop(applied);
+            Ok(result) if result.ok && result.fully_removed => {
+                {
+                    let mut applied = self.applied.lock().await;
+                    applied.record_removed(&zone_id);
+                }
                 self.sync_allowed_comms().await;
                 info!(zone_name, "zone removed");
+            }
+            Ok(result) if result.ok => {
+                info!(zone_name, "zone draining");
             }
             Ok(result) => {
                 warn!(zone_name, message = result.message, "zone remove rejected");
