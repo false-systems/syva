@@ -96,30 +96,42 @@ Without Syva, these containers can interact through the shared kernel — read e
 
 ## How It Works
 
-Syva has two layers: a **core engine** that manages eBPF enforcement, and **adapters** that tell it what to enforce.
+Syva now has three layers: adapters write desired state to the **control plane**, the control plane computes per-node assignments, and `syva-core` reconciles those assignments into kernel-enforced BPF map state.
 
 ```
  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
  │ syva-file    │  │ syva-k8s     │  │ syva-api     │
- │ TOML/ConfigMap│  │ CRD + Pods   │  │ REST API     │
+ │ TOML watcher │  │ CRD watcher  │  │ REST proxy   │
  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
         └─────────────────┼─────────────────┘
                           │
-               gRPC / Unix socket
+                      gRPC client
+                          │
+                   ┌──────▼──────┐
+                   │   syva-cp   │
+                   │ teams/zones │
+                   │ nodes/audit │
+                   └──────┬──────┘
+                          │
+               NodeAssignmentUpdate stream
                           │
         ┌─────────────────▼─────────────────┐
         │           syva-core               │
         │   BPF maps + 7 LSM hooks          │
-        │   Health :9091 + Prometheus        │
+        │   Health :9091 + Prometheus       │
         └───────────────────────────────────┘
 ```
 
-**The core** loads eBPF programs into the kernel and exposes a gRPC API over a Unix socket. It handles zone registration, container membership, cross-zone communication policy, and inode-level file enforcement. It never knows where commands came from.
+**`syva-cp`** is the source of truth. It stores teams, zones, policies, nodes, assignments, and audit history. Adapters write zones to it through `ZoneService`. Nodes register with it through `NodeService` and receive desired state through `AssignmentService`.
 
-**Adapters** connect to the core and translate their domain into enforcement commands:
-- **syva-file** — reads TOML policy files, watches containerd for container events, hot-reloads on ConfigMap changes
-- **syva-k8s** — watches `SyvaZonePolicy` CRDs and Pod annotations via kube-rs
-- **syva-api** — exposes a REST API for programmatic zone management
+**`syva-core`** is now CP-only. It no longer exposes a local adapter-facing gRPC server. It registers as a node with `syva-cp`, subscribes to assignment updates, and reconciles those assignments into the kernel.
+
+**Adapters** translate external truth into zone CRUD on `syva-cp`:
+- **syva-file** — reconciles a directory of TOML policies into zones in one team
+- **syva-k8s** — reconciles `SyvaZonePolicy` CRDs into zones in one team
+- **syva-api** — exposes a REST API and proxies zone CRUD to `syva-cp`
+
+Container and pod membership ingestion is temporarily deferred while `ContainerService` is being wired end to end. Session 4b moves zone management to `syva-cp`; membership will follow.
 
 **Step 1: Label your containers.**
 
