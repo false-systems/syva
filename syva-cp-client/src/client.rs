@@ -13,9 +13,9 @@ use syva_proto::syva_control::v1::node_service_client::NodeServiceClient;
 use syva_proto::syva_control::v1::zone_service_client::ZoneServiceClient;
 use syva_proto::syva_control::v1::{
     get_zone_request::Identifier as GetZoneIdentifier, AppliedAssignment, CreateZoneRequest,
-    FailedAssignment, GetZoneRequest, HeartbeatRequest, ListZonesRequest,
+    DeleteZoneRequest, FailedAssignment, GetZoneRequest, HeartbeatRequest, ListZonesRequest,
     NodeAssignmentUpdate, RegisterNodeRequest, ReportAssignmentStateRequest,
-    SubscribeAssignmentsRequest, UpdateZoneRequest, DeleteZoneRequest,
+    SubscribeAssignmentsRequest, UpdateZoneRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -490,13 +490,12 @@ pub struct FailedReport {
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, CpClientError> {
-    Uuid::parse_str(value)
-        .map_err(|error| CpClientError::Internal(format!("could not parse {field} as UUID: {error}")))
+    Uuid::parse_str(value).map_err(|error| {
+        CpClientError::Internal(format!("could not parse {field} as UUID: {error}"))
+    })
 }
 
-fn parse_optional_json(
-    value: &str,
-) -> Result<Option<serde_json::Value>, CpClientError> {
+fn parse_optional_json(value: &str) -> Result<Option<serde_json::Value>, CpClientError> {
     if value.is_empty() {
         return Ok(None);
     }

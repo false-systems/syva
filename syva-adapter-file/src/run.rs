@@ -1,4 +1,4 @@
-use crate::policy::load_policies_from_dir;
+use crate::policy::{load_policies_from_dir, FilePolicy};
 use crate::translate::{policy_to_create_args, policy_to_update_args};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -111,7 +111,7 @@ async fn reconcile_once(cp: &CpClient, config: &Config) -> Result<ReconcileStats
                 Err(error) => warn!(zone = %name, error = %error, "create_zone failed"),
             },
             Some(snapshot) => match policy_to_update_args(&snapshot, policy)? {
-                Some(args) => match cp.update_zone(args).await {
+                Some(args) => match update_zone_with_refresh(cp, config.team_id, name, policy, args).await {
                     Ok(output) => {
                         stats.updated += 1;
                         stats.changed += 1;
@@ -147,9 +147,70 @@ async fn reconcile_once(cp: &CpClient, config: &Config) -> Result<ReconcileStats
                 stats.changed += 1;
                 info!(zone = %name, "zone deletion requested (drain)");
             }
+            Err(error) if is_retryable_conflict(&error) => {
+                match cp.get_zone_by_name(config.team_id, name).await? {
+                    Some(refreshed) if refreshed.status != "deleted" => {
+                        match cp
+                            .delete_zone(DeleteZoneArgs {
+                                zone_id: refreshed.zone_id,
+                                if_version: refreshed.version,
+                                drain: true,
+                            })
+                            .await
+                        {
+                            Ok(()) => {
+                                stats.deleted += 1;
+                                stats.changed += 1;
+                                info!(zone = %name, "zone deletion requested (drain) after refresh");
+                            }
+                            Err(retry_error) => {
+                                warn!(zone = %name, error = %retry_error, "delete_zone failed after refresh");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Err(error) => warn!(zone = %name, error = %error, "delete_zone failed"),
         }
     }
 
     Ok(stats)
+}
+
+async fn update_zone_with_refresh(
+    cp: &CpClient,
+    team_id: Uuid,
+    name: &str,
+    policy: &FilePolicy,
+    args: syva_cp_client::UpdateZoneArgs,
+) -> Result<syva_cp_client::UpdatedZone> {
+    match cp.update_zone(args).await {
+        Ok(output) => Ok(output),
+        Err(error) if is_retryable_conflict(&error) => {
+            let Some(refreshed) = cp.get_zone_by_name(team_id, name).await? else {
+                return Err(anyhow::anyhow!("zone disappeared during update retry"));
+            };
+            let Some(retry_args) = policy_to_update_args(&refreshed, policy)? else {
+                return Ok(syva_cp_client::UpdatedZone {
+                    zone_id: refreshed.zone_id,
+                    version: refreshed.version,
+                    new_policy_id: refreshed.current_policy_id,
+                    new_policy_version: None,
+                });
+            };
+            cp.update_zone(retry_args).await.map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn is_retryable_conflict(error: &syva_cp_client::CpClientError) -> bool {
+    match error {
+        syva_cp_client::CpClientError::Grpc(status) => matches!(
+            status.code(),
+            tonic::Code::AlreadyExists | tonic::Code::Aborted | tonic::Code::FailedPrecondition
+        ),
+        _ => false,
+    }
 }

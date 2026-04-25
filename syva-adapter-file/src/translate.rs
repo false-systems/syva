@@ -32,9 +32,11 @@ pub fn policy_to_update_args(
         .map(|current| current == &desired_policy_json)
         .unwrap_or(false);
     let selector_matches = snapshot.selector_json == desired_selector_json;
-    let display_name_matches = snapshot.display_name == policy.display_name;
 
-    if policy_matches && selector_matches && display_name_matches {
+    // ZoneService::UpdateZone does not currently accept display_name updates.
+    // Ignore display_name drift here so the adapter does not generate a
+    // perpetual no-op update loop it can never resolve.
+    if policy_matches && selector_matches {
         return Ok(None);
     }
 

@@ -19,6 +19,7 @@ mod zone;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use syva_cp_client::CpClientConfig;
@@ -157,7 +158,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
     let mut sigterm = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
-    ).expect("failed to register SIGTERM handler");
+    )?;
 
     // Periodic error monitoring task.
     let monitor_ebpf = ebpf.clone();
@@ -222,17 +223,11 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         fingerprint: read_fingerprint(&config.fingerprint_path),
         labels: parse_labels(&config.node_labels),
         node_id_path: config.node_id_path.clone(),
-        heartbeat_interval: std::time::Duration::from_secs(config.heartbeat_secs),
+        heartbeat_interval: Duration::from_secs(config.heartbeat_secs),
         ..Default::default()
     };
 
-    let cp = syva_cp_client::CpClient::connect(cp_config)
-        .await
-        .map_err(|error| anyhow::anyhow!("connect to syva-cp at {}: {error}", config.cp_endpoint))?;
-    let registration = cp
-        .register()
-        .await
-        .map_err(|error| anyhow::anyhow!("register with syva-cp: {error}"))?;
+    let (cp, registration) = connect_and_register_with_retry(cp_config).await;
     tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
 
     let _heartbeat = cp.spawn_heartbeat_loop();
@@ -264,6 +259,40 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     drop(ebpf);
     tracing::info!("syva-core stopped");
     Ok(())
+}
+
+async fn connect_and_register_with_retry(
+    config: CpClientConfig,
+) -> (syva_cp_client::CpClient, syva_cp_client::NodeRegistration) {
+    let mut backoff = Duration::from_millis(250);
+    let max_backoff = Duration::from_secs(30);
+
+    loop {
+        match syva_cp_client::CpClient::connect(config.clone()).await {
+            Ok(cp) => match cp.register().await {
+                Ok(registration) => return (cp, registration),
+                Err(error) => {
+                    tracing::warn!(
+                        endpoint = %config.endpoint,
+                        error = %error,
+                        backoff_ms = backoff.as_millis(),
+                        "could not register with syva-cp; retrying"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = %config.endpoint,
+                    error = %error,
+                    backoff_ms = backoff.as_millis(),
+                    "could not connect to syva-cp; retrying"
+                );
+            }
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(max_backoff);
+    }
 }
 
 pub(crate) fn parse_labels(entries: &[String]) -> std::collections::BTreeMap<String, String> {

@@ -144,6 +144,8 @@ impl Reconciler {
                         );
                     }
 
+                    self.sync_allowed_comms().await;
+
                     applied_reports.push(AppliedReport {
                         assignment_id,
                         actual_zone_version: assignment.desired_zone_version,
@@ -165,8 +167,6 @@ impl Reconciler {
                 }
             }
         }
-
-        self.sync_allowed_comms().await;
 
         if !applied_reports.is_empty() || !failed_reports.is_empty() {
             if let Err(error) = self

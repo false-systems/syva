@@ -279,10 +279,26 @@ impl ApiError {
     }
 
     fn from_cp(error: syva_cp_client::CpClientError) -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            message: error.to_string(),
-        }
+        let status = match &error {
+            syva_cp_client::CpClientError::Grpc(grpc) => match grpc.code() {
+                tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+                tonic::Code::NotFound => StatusCode::NOT_FOUND,
+                tonic::Code::AlreadyExists
+                | tonic::Code::FailedPrecondition
+                | tonic::Code::Aborted => StatusCode::CONFLICT,
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            },
+            syva_cp_client::CpClientError::InvalidEndpoint(_)
+            | syva_cp_client::CpClientError::Serde(_)
+            | syva_cp_client::CpClientError::Internal(_) => StatusCode::BAD_GATEWAY,
+            syva_cp_client::CpClientError::Connection(_) => StatusCode::SERVICE_UNAVAILABLE,
+            syva_cp_client::CpClientError::NotRegistered => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        Self { status, message: error.to_string() }
     }
 }
 

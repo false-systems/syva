@@ -107,7 +107,7 @@ async fn initial_reconcile(
             }
             Some(snapshot) => {
                 if let Some(args) = spec_to_update_args(&snapshot, crd)? {
-                    match cp.update_zone(args).await {
+                    match update_zone_with_refresh(cp, team_id, &name, crd, args).await {
                         Ok(_) => info!(zone = %name, "zone updated from CRD (initial)"),
                         Err(error) => warn!(zone = %name, error = %error, "initial update failed"),
                     }
@@ -129,6 +129,24 @@ async fn initial_reconcile(
             .await
         {
             Ok(()) => info!(zone = %name, "zone deleted (no matching CRD)"),
+            Err(error) if is_retryable_conflict(&error) => {
+                match cp.get_zone_by_name(team_id, name).await? {
+                    Some(refreshed) if refreshed.status != "deleted" => {
+                        match cp
+                            .delete_zone(DeleteZoneArgs {
+                                zone_id: refreshed.zone_id,
+                                if_version: refreshed.version,
+                                drain: true,
+                            })
+                            .await
+                        {
+                            Ok(()) => info!(zone = %name, "zone deleted (no matching CRD) after refresh"),
+                            Err(retry_error) => warn!(zone = %name, error = %retry_error, "initial delete failed after refresh"),
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Err(error) => warn!(zone = %name, error = %error, "initial delete failed"),
         }
     }
@@ -151,7 +169,7 @@ async fn handle_apply(cp: &CpClient, team_id: Uuid, crd: &SyvaZonePolicy) -> Res
         }
         Some(snapshot) => {
             if let Some(args) = spec_to_update_args(&snapshot, crd)? {
-                cp.update_zone(args).await?;
+                update_zone_with_refresh(cp, team_id, &name, crd, args).await?;
                 info!(zone = %name, "zone updated from CRD");
             }
         }
@@ -171,12 +189,65 @@ async fn handle_delete(cp: &CpClient, team_id: Uuid, crd: &SyvaZonePolicy) -> Re
         return Ok(());
     };
 
-    cp.delete_zone(DeleteZoneArgs {
-        zone_id: snapshot.zone_id,
-        if_version: snapshot.version,
-        drain: true,
-    })
-    .await?;
+    match cp
+        .delete_zone(DeleteZoneArgs {
+            zone_id: snapshot.zone_id,
+            if_version: snapshot.version,
+            drain: true,
+        })
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if is_retryable_conflict(&error) => {
+            let Some(refreshed) = cp.get_zone_by_name(team_id, &name).await? else {
+                return Ok(());
+            };
+            cp.delete_zone(DeleteZoneArgs {
+                zone_id: refreshed.zone_id,
+                if_version: refreshed.version,
+                drain: true,
+            })
+            .await?;
+        }
+        Err(error) => return Err(error.into()),
+    }
     info!(zone = %name, "zone deleted (CRD removed)");
     Ok(())
+}
+
+async fn update_zone_with_refresh(
+    cp: &CpClient,
+    team_id: Uuid,
+    name: &str,
+    crd: &SyvaZonePolicy,
+    args: syva_cp_client::UpdateZoneArgs,
+) -> Result<syva_cp_client::UpdatedZone> {
+    match cp.update_zone(args).await {
+        Ok(output) => Ok(output),
+        Err(error) if is_retryable_conflict(&error) => {
+            let Some(refreshed) = cp.get_zone_by_name(team_id, name).await? else {
+                anyhow::bail!("zone disappeared during update retry");
+            };
+            let Some(retry_args) = spec_to_update_args(&refreshed, crd)? else {
+                return Ok(syva_cp_client::UpdatedZone {
+                    zone_id: refreshed.zone_id,
+                    version: refreshed.version,
+                    new_policy_id: refreshed.current_policy_id,
+                    new_policy_version: None,
+                });
+            };
+            cp.update_zone(retry_args).await.map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn is_retryable_conflict(error: &syva_cp_client::CpClientError) -> bool {
+    match error {
+        syva_cp_client::CpClientError::Grpc(status) => matches!(
+            status.code(),
+            tonic::Code::AlreadyExists | tonic::Code::Aborted | tonic::Code::FailedPrecondition
+        ),
+        _ => false,
+    }
 }

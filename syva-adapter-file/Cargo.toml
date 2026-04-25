@@ -21,5 +21,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true }
+tonic = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 syva-ebpf-common = { path = "../syva-ebpf-common", features = ["userspace"] }
