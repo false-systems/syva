@@ -21,25 +21,22 @@ copied to any other operation.
 
 ---
 
-## syva-core CP Mode vs Legacy Mode
+## syva-core ingests zones via syva-cp
 
-`syva-core` supports two zone ingestion paths that share the same in-process
-`ZoneRegistry` and `EnforceEbpf`:
+After session 4b, `syva-core` has one and only one ingestion path: the
+`NodeAssignmentUpdate` stream from `syva-cp`. The local gRPC surface that
+existed in v0.2 is deleted. `--cp-endpoint` is mandatory.
 
-1. Local gRPC surface. Adapters push zones to `syva-core` directly. This is
-   the v0.2 architecture and remains the default.
-2. CP mode (`--cp-endpoint`). `syva-core` connects to a remote `syva-cp`,
-   registers as a node, and consumes assignments via server-streaming. The
-   reconcile loop lives in `syva-core/src/cp_reconcile/`.
+Adapters (`syva-file`, `syva-k8s`, `syva-api`) push zones to `syva-cp`
+directly via `syva-cp-client`. They do not connect to `syva-core`.
 
-Both paths call the same in-process mutation helpers. CP mode is additive, not
-a replacement yet. Session 4b will migrate adapters to push to `syva-cp`
-instead of `syva-core`.
+Single-node operation (laptop, demo, CI) is achieved by running both
+`syva-cp` and `syva-core` on the same machine, with `syva-cp` using a local
+Postgres. There is no separate "local mode" code path.
 
-The reconciler keeps in-memory state only (`AppliedState`). On restart, a fresh
-subscription receives a `FULL_SNAPSHOT` from `syva-cp` and reconstructs desired
-state. The only local persistence in CP mode is the `node-id` file used for
-re-registration.
+If easier single-node operation becomes important, the future plan is to ship a
+`syva-cp --embedded` mode that bundles Postgres or SQLite into the control
+plane binary. That work is not in scope here.
 
 ---
 

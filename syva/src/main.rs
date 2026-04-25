@@ -414,7 +414,6 @@ async fn cmd_status() -> anyhow::Result<()> {
             Ok(map) => {
                 println!("  hooks:");
                 let mut total_errors: u64 = 0;
-                let mut total_lost: u64 = 0;
                 let mut had_read_error = false;
                 for (idx, hook) in events::HOOK_NAMES.iter().enumerate() {
                     match map.get(&(idx as u32), 0) {
@@ -427,7 +426,6 @@ async fn cmd_status() -> anyhow::Result<()> {
                                 total.lost += cpu_val.lost;
                             }
                             total_errors += total.error;
-                            total_lost += total.lost;
                             let flag = if total.error > 0 || total.lost > 0 { " ⚠" } else { "" };
                             println!(
                                 "    {:<16} allow={:<8} deny={:<8} error={:<6} lost={}{}",
@@ -580,7 +578,6 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
     // 2. Resolve BTF offsets (read-only — no BPF loaded).
     println!();
     let btf_path = std::path::Path::new("/sys/kernel/btf/vmlinux");
-    let mut btf_ok = true;
     if btf_path.exists() {
         match btf::BtfData::from_sys_fs() {
             Ok(btf_data) => {
@@ -602,22 +599,21 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
                         }
                         None => {
                             println!("  {:<40} NOT FOUND \u{2717}", format!("{struct_name}.{field_name}"));
-                            btf_ok = false;
                         }
                     }
                 }
-                if !btf_ok {
+                if offset_defs.iter().any(|(struct_name, field_name)| {
+                    btf_data.struct_field_offset(struct_name, field_name).is_none()
+                }) {
                     errors.push("some BTF offsets could not be resolved".to_string());
                 }
             }
             Err(e) => {
-                btf_ok = false;
                 errors.push(format!("BTF resolution failed: {e}"));
                 println!("BTF resolution: FAILED \u{2014} {e}");
             }
         }
     } else {
-        btf_ok = false;
         errors.push("BTF not available \u{2014} enforcement will use default offsets".to_string());
         println!("BTF: not available at {} (will use defaults)", btf_path.display());
     }
@@ -653,7 +649,7 @@ async fn cmd_verify(policy_dir: PathBuf) -> anyhow::Result<()> {
 
     // 4. Summary.
     println!();
-    let valid = policies.len() > 0 && errors.is_empty();
+    let valid = !policies.is_empty() && errors.is_empty();
     if valid {
         println!("Result: \u{2713} VALID \u{2014} ready to deploy");
     } else {

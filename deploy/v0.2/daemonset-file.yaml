@@ -1,6 +1,6 @@
-# syva v0.2 — Standalone / ConfigMap deployment
-# Two containers: syva-core (enforcement) + syva-file (policy adapter)
-# Use this when managing policies via TOML files or Kubernetes ConfigMaps.
+# syva v0.2 — Legacy local-socket deployment
+# Historical reference only. Session 4b removed syva-core's local gRPC surface.
+# For current deployments, use deploy/v0.3/daemonset-cp-mode.yaml instead.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

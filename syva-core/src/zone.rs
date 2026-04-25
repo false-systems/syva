@@ -33,6 +33,7 @@ pub enum ZoneState {
 
 /// Result of a container removal — what happened to the zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum ZoneTransition {
     /// Zone still has containers.
     StillActive,
@@ -62,8 +63,10 @@ pub struct ZoneRegistry {
     /// zone_name → ZoneEntry
     zones: HashMap<String, ZoneEntry>,
     /// cgroup_id → (container_id, zone_name) — enables hint-based removal
+    #[cfg_attr(not(test), allow(dead_code))]
     cgroup_to_info: HashMap<u64, (String, String)>,
     /// container_id → (zone_name, cgroup_id)
+    #[cfg_attr(not(test), allow(dead_code))]
     container_to_info: HashMap<String, (String, u64)>,
     /// Canonicalised allowed cross-zone comm pairs — the two names are
     /// stored in lexicographic order so the set is symmetric by construction.
@@ -116,6 +119,7 @@ impl ZoneRegistry {
     /// Record that a container has joined a zone.
     /// Transitions zone from Pending → Active.
     /// Returns Err if zone_name is not registered or container_id is already tracked.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn add_container(
         &mut self,
         container_id: &str,
@@ -153,6 +157,7 @@ impl ZoneRegistry {
     /// Record that a container has left.
     /// Decrements refcount. Returns the zone transition that occurred.
     /// Returns None if the container_id is unknown (no-op for Delete-before-Start).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_container(
         &mut self,
         container_id: &str,
@@ -232,6 +237,7 @@ impl ZoneRegistry {
 
     /// Remove a zone entry by ID. Reverse-lookup by scanning zones.
     /// Only valid for zones with refcount 0.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn unregister_zone_by_id(&mut self, zone_id: u32) -> anyhow::Result<()> {
         let zone_name = self.zones.iter()
             .find(|(_, e)| e.zone_id == zone_id)
@@ -248,11 +254,13 @@ impl ZoneRegistry {
     }
 
     /// All registered zone names and their IDs.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn all_zones(&self) -> impl Iterator<Item = (&str, u32)> {
         self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
 
     /// Full snapshot for ListZones — (name, zone_id, state, refcount).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn zones_summary(&self) -> impl Iterator<Item = (&str, u32, ZoneState, usize)> {
         self.zones.iter().map(|(name, e)| (name.as_str(), e.zone_id, e.state, e.refcount))
     }
@@ -270,6 +278,7 @@ impl ZoneRegistry {
 
     /// Iterate allowed comm pairs, optionally filtered to those involving
     /// a specific zone name. Yields canonicalised (a, b) tuples.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn list_allowed_comms<'a>(
         &'a self,
         filter_zone: Option<&'a str>,
@@ -293,6 +302,7 @@ impl ZoneRegistry {
     }
 
     /// Total number of tracked containers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn container_count(&self) -> usize {
         self.container_to_info.len()
     }

@@ -3,7 +3,6 @@
 //! Loads and attaches the 5 LSM programs. Provides typed
 //! wrappers for BPF map operations (zone membership, policy, comms).
 
-use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use std::path::{Path, PathBuf};
 use aya::maps::HashMap as AyaHashMap;
 use aya::maps::RingBuf;
 use aya::programs::Lsm;
-use aya::{Bpf, BpfLoader, Btf};
+use aya::{Ebpf, EbpfLoader, Btf};
 use crate::types::{ZonePolicy, ZoneType, NetworkMode};
 use syva_ebpf_common::{
     ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, SelfTestInodeResult,
@@ -44,7 +43,7 @@ const MAP_NAMES: &[&str] = &[
 
 /// eBPF manager for the standalone enforce agent.
 pub struct EnforceEbpf {
-    bpf: Bpf,
+    bpf: Ebpf,
     pin_path: PathBuf,
 }
 
@@ -83,7 +82,7 @@ impl EnforceEbpf {
         let obj_data = fs::read(&obj_path)
             .map_err(|e| anyhow::anyhow!("failed to read eBPF object {}: {e}", obj_path.display()))?;
 
-        let mut loader = BpfLoader::new();
+        let mut loader = EbpfLoader::new();
         loader.btf(Some(&btf)).map_pin_path(&pin_path);
 
         for (name, val) in &offsets {
@@ -406,8 +405,6 @@ impl EnforceEbpf {
             .filter(|k| k.src_zone == zone_id || k.dst_zone == zone_id)
             .collect();
 
-        drop(map);
-
         let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
             self.bpf.map_mut("ZONE_ALLOWED_COMMS")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
@@ -432,8 +429,6 @@ impl EnforceEbpf {
             .filter(|(_, v)| *v == zone_id)
             .map(|(k, _)| k)
             .collect();
-
-        drop(map);
 
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
             self.bpf.map_mut("INODE_ZONE_MAP")

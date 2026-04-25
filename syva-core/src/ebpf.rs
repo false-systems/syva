@@ -126,12 +126,14 @@ impl EnforceEbpf {
     }
 
     /// Take ownership of the ring buffer for event streaming.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_event_ring_buf(&mut self) -> Option<RingBuf<aya::maps::MapData>> {
         let map = self.bpf.take_map("ENFORCEMENT_EVENTS")?;
         RingBuf::try_from(map).ok()
     }
 
     /// Register a cgroup as belonging to a zone.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn add_zone_member(
         &mut self,
         cgroup_id: u64,
@@ -158,6 +160,7 @@ impl EnforceEbpf {
     }
 
     /// Remove a cgroup from zone membership.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_zone_member(&mut self, cgroup_id: u64) -> anyhow::Result<()> {
         let mut map: AyaHashMap<_, u64, ZoneInfoKernel> = AyaHashMap::try_from(
             self.bpf.map_mut("ZONE_MEMBERSHIP")
@@ -459,6 +462,7 @@ impl EnforceEbpf {
     }
 
     /// Register a single path's inode in INODE_ZONE_MAP (non-recursive).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_single_inode(&mut self, zone_id: u32, path: &str) -> anyhow::Result<usize> {
         let canon = fs::canonicalize(path)
             .map_err(|e| anyhow::anyhow!("failed to canonicalize '{}': {e}", path))?;

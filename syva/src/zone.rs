@@ -232,6 +232,7 @@ impl ZoneRegistry {
     }
 
     /// All registered zone names and their IDs.
+    #[allow(dead_code)]
     pub fn all_zones(&self) -> impl Iterator<Item = (&str, u32)> {
         self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
@@ -347,7 +348,7 @@ mod tests {
     #[test]
     fn duplicate_container_id_returns_error() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
+        let _ = reg.register_zone("frontend");
         reg.add_container("c1", "frontend", 1000).unwrap();
 
         // Second add with same container_id must fail.
@@ -361,8 +362,8 @@ mod tests {
     #[test]
     fn duplicate_container_id_different_zone_returns_error() {
         let mut reg = ZoneRegistry::new();
-        reg.register_zone("frontend");
-        reg.register_zone("database");
+        let _ = reg.register_zone("frontend");
+        let _ = reg.register_zone("database");
         reg.add_container("c1", "frontend", 1000).unwrap();
 
         // Same container_id in a different zone must also fail.

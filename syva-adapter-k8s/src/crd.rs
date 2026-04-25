@@ -1,6 +1,7 @@
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
@@ -19,6 +20,8 @@ pub struct SyvaZonePolicySpec {
     pub network: Option<NetworkSpec>,
     #[serde(default)]
     pub process: Option<ProcessSpec>,
+    #[serde(default)]
+    pub selector: Option<SelectorSpec>,
     #[serde(default)]
     pub zone_type: Option<ZoneTypeSpec>,
 }
@@ -44,18 +47,24 @@ pub struct ProcessSpec {
     pub allow_ptrace: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectorSpec {
+    #[serde(default)]
+    pub all_nodes: bool,
+    #[serde(default)]
+    pub node_names: Vec<String>,
+    #[serde(default)]
+    pub match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ZoneTypeSpec {
+    #[default]
     Standard,
     Privileged,
     Isolated,
-}
-
-impl Default for ZoneTypeSpec {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -88,7 +97,7 @@ mod tests {
 
     #[test]
     fn spec_deserializes_minimal() {
-        let json = r#"{"filesystem":null,"network":null,"process":null,"zoneType":null}"#;
+        let json = r#"{"filesystem":null,"network":null,"process":null,"selector":null,"zoneType":null}"#;
         let spec: SyvaZonePolicySpec = serde_json::from_str(json).unwrap();
         assert!(spec.filesystem.is_none());
     }
@@ -99,10 +108,15 @@ mod tests {
             "filesystem": {"hostPaths": ["/data"]},
             "network": {"allowedZones": ["db"]},
             "process": {"allowPtrace": true},
+            "selector": {"matchLabels": {"tier": "prod"}},
             "zoneType": "privileged"
         }"#;
         let spec: SyvaZonePolicySpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.filesystem.unwrap().host_paths, vec!["/data"]);
         assert!(spec.process.unwrap().allow_ptrace);
+        assert_eq!(
+            spec.selector.unwrap().match_labels.get("tier").map(String::as_str),
+            Some("prod")
+        );
     }
 }

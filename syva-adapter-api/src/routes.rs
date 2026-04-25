@@ -1,560 +1,337 @@
-//! REST API route handlers that proxy to syva-core gRPC.
-
-use std::convert::Infallible;
-use std::sync::Arc;
-
+use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{
-        sse::{Event, KeepAlive},
-        IntoResponse, Response, Sse,
-    },
-    routing::{delete, get, post},
+    response::{IntoResponse, Response},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use syva_proto::syva_core::syva_core_client::SyvaCoreClient;
-use syva_proto::syva_core::*;
-use tokio::sync::Mutex;
-use tokio_stream::StreamExt;
-use tonic::transport::Channel;
+use serde_json::Value as JsonValue;
+use std::net::SocketAddr;
+use std::time::Duration;
+use syva_cp_client::{CpClient, CpClientConfig, CreateZoneArgs, DeleteZoneArgs, UpdateZoneArgs};
+use tracing::warn;
+use uuid::Uuid;
 
-pub type SharedClient = Arc<Mutex<SyvaCoreClient<Channel>>>;
-
-// ---------------------------------------------------------------------------
-// Request / Response types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct RegisterZoneBody {
-    pub zone_name: String,
-    pub policy: PolicyBody,
+#[derive(Clone)]
+pub struct AppState {
+    cp: CpClient,
+    team_id: Uuid,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PolicyBody {
-    #[serde(default)]
-    pub host_paths: Vec<String>,
-    #[serde(default)]
-    pub allowed_zones: Vec<String>,
-    #[serde(default)]
-    pub allow_ptrace: bool,
+pub struct Config {
+    pub listen: SocketAddr,
+    pub cp_endpoint: String,
+    pub team_id: Uuid,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ZoneIdResponse {
-    pub zone_id: u32,
+#[derive(Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct OkResponse {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+#[derive(Serialize)]
+struct ErrorBody {
+    error: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RemoveZoneQuery {
-    #[serde(default)]
-    pub drain: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AttachContainerBody {
-    pub container_id: String,
-    pub cgroup_id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AllowCommBody {
-    pub peer_zone: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StatusJson {
-    pub attached: bool,
-    pub zones_active: u32,
-    pub containers_active: u32,
-    pub uptime_secs: u64,
-    pub hooks: Vec<HookStatusJson>,
-    pub max_zones: u32,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ZoneSummaryJson {
+#[derive(Deserialize)]
+pub struct CreateZoneBody {
     pub name: String,
-    pub zone_id: u32,
-    pub state: String,
-    pub containers_active: u32,
+    pub display_name: Option<String>,
+    pub policy_json: JsonValue,
+    pub selector_json: Option<JsonValue>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CommPairJson {
-    pub zone_a: String,
-    pub zone_b: String,
+#[derive(Deserialize)]
+pub struct UpdateZoneBody {
+    pub if_version: i64,
+    pub policy_json: Option<JsonValue>,
+    pub selector_json: Option<JsonValue>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct HookStatusJson {
-    pub hook: String,
-    pub allow: u64,
-    pub deny: u64,
-    pub error: u64,
-    pub lost: u64,
+#[derive(Deserialize)]
+pub struct ListZonesQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WatchEventsQuery {
-    #[serde(default)]
-    pub follow: bool,
+#[derive(Serialize)]
+pub struct CreateZoneOut {
+    pub zone_id: String,
+    pub policy_id: String,
+    pub version: i64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DenyEventJson {
-    pub timestamp_ns: u64,
-    pub hook: String,
-    pub zone_id: u32,
-    pub target_zone_id: u32,
-    pub pid: u32,
-    pub comm: String,
-    pub inode: u64,
-    pub context: String,
+#[derive(Serialize)]
+pub struct ZoneOut {
+    pub zone_id: String,
+    pub team_id: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub status: String,
+    pub version: i64,
+    pub current_policy_id: Option<String>,
+    pub current_policy_json: Option<JsonValue>,
+    pub selector_json: Option<JsonValue>,
+    pub metadata_json: Option<JsonValue>,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
-pub fn router(client: SharedClient) -> Router {
-    Router::new()
-        .route("/zones", get(list_zones).post(register_zone))
-        .route("/zones/{name}", delete(remove_zone))
-        .route("/zones/{name}/containers", post(attach_container))
-        .route("/containers/{id}", delete(detach_container))
-        .route("/zones/{name}/comms", get(list_comms).post(allow_comm))
-        .route("/zones/{name}/comms/{peer}", delete(deny_comm))
-        .route("/status", get(status))
-        .route("/events", get(watch_events))
-        .with_state(client)
+#[derive(Serialize)]
+pub struct HealthOut {
+    pub ok: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
-async fn register_zone(
-    State(client): State<SharedClient>,
-    Json(body): Json<RegisterZoneBody>,
-) -> Response {
-    let policy = ZonePolicy {
-        host_paths: body.policy.host_paths,
-        allowed_zones: body.policy.allowed_zones,
-        allow_ptrace: body.policy.allow_ptrace,
-        zone_type: ZoneType::Standard.into(),
-    };
-
-    let req = RegisterZoneRequest {
-        zone_name: body.zone_name,
-        policy: Some(policy),
-    };
-
-    let mut c = client.lock().await;
-    match c.register_zone(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            (
-                StatusCode::CREATED,
-                Json(ZoneIdResponse {
-                    zone_id: inner.zone_id,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn remove_zone(
-    State(client): State<SharedClient>,
-    Path(name): Path<String>,
-    Query(q): Query<RemoveZoneQuery>,
-) -> Response {
-    let req = RemoveZoneRequest {
-        zone_name: name,
-        drain: q.drain,
-    };
-
-    let mut c = client.lock().await;
-    match c.remove_zone(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            Json(OkResponse {
-                ok: inner.ok,
-                message: if inner.message.is_empty() {
-                    None
-                } else {
-                    Some(inner.message)
-                },
-            })
-            .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn attach_container(
-    State(client): State<SharedClient>,
-    Path(name): Path<String>,
-    Json(body): Json<AttachContainerBody>,
-) -> Response {
-    let req = AttachContainerRequest {
-        container_id: body.container_id,
-        zone_name: name,
-        cgroup_id: body.cgroup_id,
-    };
-
-    let mut c = client.lock().await;
-    match c.attach_container(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            (
-                StatusCode::CREATED,
-                Json(OkResponse {
-                    ok: inner.ok,
-                    message: if inner.message.is_empty() {
-                        None
-                    } else {
-                        Some(inner.message)
-                    },
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn detach_container(
-    State(client): State<SharedClient>,
-    Path(id): Path<String>,
-) -> Response {
-    let req = DetachContainerRequest { container_id: id };
-
-    let mut c = client.lock().await;
-    match c.detach_container(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            Json(OkResponse {
-                ok: inner.ok,
-                message: None,
-            })
-            .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn allow_comm(
-    State(client): State<SharedClient>,
-    Path(name): Path<String>,
-    Json(body): Json<AllowCommBody>,
-) -> Response {
-    let req = AllowCommRequest {
-        zone_a: name,
-        zone_b: body.peer_zone,
-    };
-
-    let mut c = client.lock().await;
-    match c.allow_comm(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            Json(OkResponse {
-                ok: inner.ok,
-                message: None,
-            })
-            .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn status(State(client): State<SharedClient>) -> Response {
-    let mut c = client.lock().await;
-    match c.status(StatusRequest {}).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            let hooks = inner
-                .hooks
-                .into_iter()
-                .map(|h| HookStatusJson {
-                    hook: h.hook,
-                    allow: h.allow,
-                    deny: h.deny,
-                    error: h.error,
-                    lost: h.lost,
-                })
-                .collect();
-
-            Json(StatusJson {
-                attached: inner.attached,
-                zones_active: inner.zones_active,
-                containers_active: inner.containers_active,
-                uptime_secs: inner.uptime_secs,
-                hooks,
-                max_zones: inner.max_zones,
-            })
-            .into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn list_zones(State(client): State<SharedClient>) -> Response {
-    let mut c = client.lock().await;
-    match c.list_zones(ListZonesRequest {}).await {
-        Ok(resp) => {
-            let out: Vec<ZoneSummaryJson> = resp
-                .into_inner()
-                .zones
-                .into_iter()
-                .map(|z| ZoneSummaryJson {
-                    name: z.name,
-                    zone_id: z.zone_id,
-                    state: z.state,
-                    containers_active: z.containers_active,
-                })
-                .collect();
-            Json(out).into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn list_comms(
-    State(client): State<SharedClient>,
-    Path(name): Path<String>,
-) -> Response {
-    let mut c = client.lock().await;
-    match c.list_comms(ListCommsRequest { zone_name: name }).await {
-        Ok(resp) => {
-            let out: Vec<CommPairJson> = resp
-                .into_inner()
-                .pairs
-                .into_iter()
-                .map(|p| CommPairJson { zone_a: p.zone_a, zone_b: p.zone_b })
-                .collect();
-            Json(out).into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn deny_comm(
-    State(client): State<SharedClient>,
-    Path((name, peer)): Path<(String, String)>,
-) -> Response {
-    let req = DenyCommRequest { zone_a: name, zone_b: peer };
-    let mut c = client.lock().await;
-    match c.deny_comm(req).await {
-        Ok(resp) => {
-            let inner = resp.into_inner();
-            Json(OkResponse { ok: inner.ok, message: None }).into_response()
-        }
-        Err(e) => grpc_error_to_response(e),
-    }
-}
-
-async fn watch_events(
-    State(client): State<SharedClient>,
-    Query(q): Query<WatchEventsQuery>,
-) -> Response {
-    let req = WatchEventsRequest { follow: q.follow };
-
-    let mut c = client.lock().await;
-    let stream = match c.watch_events(req).await {
-        Ok(resp) => resp.into_inner(),
-        Err(e) => return grpc_error_to_response(e),
-    };
-    // Release the lock before streaming.
-    drop(c);
-
-    let sse_stream = stream.map(|result| -> Result<Event, Infallible> {
-        match result {
-            Ok(event) => {
-                let json = DenyEventJson {
-                    timestamp_ns: event.timestamp_ns,
-                    hook: event.hook,
-                    zone_id: event.zone_id,
-                    target_zone_id: event.target_zone_id,
-                    pid: event.pid,
-                    comm: event.comm,
-                    inode: event.inode,
-                    context: event.context,
-                };
-                // Best-effort JSON serialization; on failure send raw debug.
-                let data = serde_json::to_string(&json)
-                    .unwrap_or_else(|_| format!("{json:?}"));
-                Ok(Event::default().event("deny").data(data))
-            }
-            Err(e) => Ok(Event::default()
-                .event("error")
-                .data(format!("gRPC stream error: {e}"))),
-        }
+pub async fn serve(config: Config) -> Result<()> {
+    let cp = connect_with_retry(&config.cp_endpoint).await;
+    let app = router(AppState {
+        cp,
+        team_id: config.team_id,
     });
 
-    Sse::new(sse_stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .with_context(|| format!("bind {}", config.listen))?;
+    tracing::info!(listen = %config.listen, "syva-api listening");
+
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/zones", post(create_zone).get(list_zones))
+        .route("/v1/zones/{name}", get(get_zone).put(update_zone).delete(delete_zone))
+        .route("/healthz", get(healthz))
+        .with_state(state)
+}
 
-fn grpc_error_to_response(e: tonic::Status) -> Response {
-    let status = match e.code() {
-        tonic::Code::NotFound => StatusCode::NOT_FOUND,
-        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
-        tonic::Code::AlreadyExists => StatusCode::CONFLICT,
-        tonic::Code::FailedPrecondition => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
+async fn connect_with_retry(endpoint: &str) -> CpClient {
+    let mut backoff = Duration::from_millis(250);
+    let max_backoff = Duration::from_secs(30);
 
-    (
-        status,
-        Json(OkResponse {
-            ok: false,
-            message: Some(e.message().to_string()),
+    loop {
+        match CpClient::connect(CpClientConfig {
+            endpoint: endpoint.to_string(),
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(client) => return client,
+            Err(error) => {
+                warn!(
+                    endpoint,
+                    error = %error,
+                    backoff_ms = backoff.as_millis(),
+                    "could not connect to syva-cp; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        }
+    }
+}
+
+pub async fn create_zone(
+    State(state): State<AppState>,
+    Json(body): Json<CreateZoneBody>,
+) -> Result<(StatusCode, Json<CreateZoneOut>), ApiError> {
+    let output = state
+        .cp
+        .create_zone(CreateZoneArgs {
+            team_id: state.team_id,
+            name: body.name,
+            display_name: body.display_name,
+            policy_json: body.policy_json,
+            summary_json: None,
+            selector_json: body.selector_json,
+            metadata_json: None,
+        })
+        .await
+        .map_err(ApiError::from_cp)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateZoneOut {
+            zone_id: output.zone_id.to_string(),
+            policy_id: output.policy_id.to_string(),
+            version: output.version,
         }),
-    )
-        .into_response()
+    ))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+pub async fn list_zones(
+    State(state): State<AppState>,
+    Query(query): Query<ListZonesQuery>,
+) -> Result<Json<Vec<ZoneOut>>, ApiError> {
+    let zones = state
+        .cp
+        .list_zones(
+            state.team_id,
+            query.status.as_deref(),
+            query.limit.unwrap_or(100),
+        )
+        .await
+        .map_err(ApiError::from_cp)?;
+
+    Ok(Json(zones.into_iter().map(zone_to_out).collect()))
+}
+
+pub async fn get_zone(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ZoneOut>, ApiError> {
+    let zone = state
+        .cp
+        .get_zone_by_name(state.team_id, &name)
+        .await
+        .map_err(ApiError::from_cp)?
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
+
+    Ok(Json(zone_to_out(zone)))
+}
+
+pub async fn update_zone(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateZoneBody>,
+) -> Result<Json<ZoneOut>, ApiError> {
+    let snapshot = state
+        .cp
+        .get_zone_by_name(state.team_id, &name)
+        .await
+        .map_err(ApiError::from_cp)?
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
+
+    state
+        .cp
+        .update_zone(UpdateZoneArgs {
+            zone_id: snapshot.zone_id,
+            if_version: body.if_version,
+            policy_json: body.policy_json,
+            selector_json: body.selector_json,
+            metadata_json: None,
+        })
+        .await
+        .map_err(ApiError::from_cp)?;
+
+    let refreshed = state
+        .cp
+        .get_zone_by_name(state.team_id, &name)
+        .await
+        .map_err(ApiError::from_cp)?
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found after update")))?;
+
+    Ok(Json(zone_to_out(refreshed)))
+}
+
+pub async fn delete_zone(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let snapshot = state
+        .cp
+        .get_zone_by_name(state.team_id, &name)
+        .await
+        .map_err(ApiError::from_cp)?
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
+
+    state
+        .cp
+        .delete_zone(DeleteZoneArgs {
+            zone_id: snapshot.zone_id,
+            if_version: snapshot.version,
+            drain: true,
+        })
+        .await
+        .map_err(ApiError::from_cp)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn healthz() -> Json<HealthOut> {
+    Json(HealthOut { ok: true })
+}
+
+fn zone_to_out(zone: syva_cp_client::ZoneSnapshot) -> ZoneOut {
+    ZoneOut {
+        zone_id: zone.zone_id.to_string(),
+        team_id: zone.team_id.to_string(),
+        name: zone.name,
+        display_name: zone.display_name,
+        status: zone.status,
+        version: zone.version,
+        current_policy_id: zone.current_policy_id.map(|id| id.to_string()),
+        current_policy_json: zone.current_policy_json,
+        selector_json: zone.selector_json,
+        metadata_json: zone.metadata_json,
+    }
+}
+
+impl ApiError {
+    fn not_found(message: String) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message,
+        }
+    }
+
+    fn from_cp(error: syva_cp_client::CpClientError) -> Self {
+        let status = match &error {
+            syva_cp_client::CpClientError::Grpc(grpc) => match grpc.code() {
+                tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+                tonic::Code::NotFound => StatusCode::NOT_FOUND,
+                tonic::Code::AlreadyExists
+                | tonic::Code::FailedPrecondition
+                | tonic::Code::Aborted => StatusCode::CONFLICT,
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            },
+            syva_cp_client::CpClientError::InvalidEndpoint(_)
+            | syva_cp_client::CpClientError::Serde(_)
+            | syva_cp_client::CpClientError::Internal(_) => StatusCode::BAD_GATEWAY,
+            syva_cp_client::CpClientError::Connection(_) => StatusCode::SERVICE_UNAVAILABLE,
+            syva_cp_client::CpClientError::NotRegistered => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        Self { status, message: error.to_string() }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(ErrorBody { error: self.message })).into_response()
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn register_zone_body_deserializes() {
+    fn create_zone_body_deserializes() {
         let json = r#"{
-            "zone_name": "web",
-            "policy": {
-                "host_paths": ["/data"],
-                "allowed_zones": ["db"],
-                "allow_ptrace": false
-            }
+            "name":"web",
+            "display_name":"Web",
+            "policy_json":{"host_paths":["/data"]},
+            "selector_json":{"all_nodes":true}
         }"#;
-        let body: RegisterZoneBody = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(body.zone_name, "web");
-        assert_eq!(body.policy.host_paths, vec!["/data"]);
-        assert_eq!(body.policy.allowed_zones, vec!["db"]);
-        assert!(!body.policy.allow_ptrace);
+        let body: CreateZoneBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.name, "web");
+        assert_eq!(body.display_name.as_deref(), Some("Web"));
+        assert_eq!(body.policy_json["host_paths"], serde_json::json!(["/data"]));
+        assert_eq!(body.selector_json.unwrap()["all_nodes"], serde_json::json!(true));
     }
 
     #[test]
-    fn register_zone_body_defaults() {
-        let json = r#"{"zone_name": "minimal", "policy": {}}"#;
-        let body: RegisterZoneBody = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(body.zone_name, "minimal");
-        assert!(body.policy.host_paths.is_empty());
-        assert!(body.policy.allowed_zones.is_empty());
-        assert!(!body.policy.allow_ptrace);
-    }
-
-    #[test]
-    fn zone_id_response_serializes() {
-        let resp = ZoneIdResponse { zone_id: 42 };
-        let json = serde_json::to_string(&resp).expect("serialize");
-        assert_eq!(json, r#"{"zone_id":42}"#);
-    }
-
-    #[test]
-    fn ok_response_skips_none_message() {
-        let resp = OkResponse {
-            ok: true,
-            message: None,
-        };
-        let json = serde_json::to_string(&resp).expect("serialize");
-        assert_eq!(json, r#"{"ok":true}"#);
-    }
-
-    #[test]
-    fn ok_response_includes_message() {
-        let resp = OkResponse {
-            ok: false,
-            message: Some("zone not found".into()),
-        };
-        let json = serde_json::to_string(&resp).expect("serialize");
-        assert!(json.contains("zone not found"));
-    }
-
-    #[test]
-    fn attach_container_body_deserializes() {
-        let json = r#"{"container_id": "abc123", "cgroup_id": 99999}"#;
-        let body: AttachContainerBody = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(body.container_id, "abc123");
-        assert_eq!(body.cgroup_id, 99999);
-    }
-
-    #[test]
-    fn allow_comm_body_deserializes() {
-        let json = r#"{"peer_zone": "backend"}"#;
-        let body: AllowCommBody = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(body.peer_zone, "backend");
-    }
-
-    #[test]
-    fn status_json_serializes() {
-        let status = StatusJson {
-            attached: true,
-            zones_active: 3,
-            containers_active: 7,
-            uptime_secs: 3600,
-            hooks: vec![HookStatusJson {
-                hook: "file_open".into(),
-                allow: 100,
-                deny: 5,
-                error: 0,
-                lost: 0,
-            }],
-            max_zones: 4096,
-        };
-        let json = serde_json::to_string(&status).expect("serialize");
-        assert!(json.contains("\"attached\":true"));
-        assert!(json.contains("\"file_open\""));
-    }
-
-    #[test]
-    fn deny_event_json_serializes() {
-        let event = DenyEventJson {
-            timestamp_ns: 1234567890,
-            hook: "exec_guard".into(),
-            zone_id: 1,
-            target_zone_id: 2,
-            pid: 42,
-            comm: "cat".into(),
-            inode: 12345,
-            context: "cross-zone exec".into(),
-        };
-        let json = serde_json::to_string(&event).expect("serialize");
-        assert!(json.contains("exec_guard"));
-        assert!(json.contains("cross-zone exec"));
-    }
-
-    #[test]
-    fn remove_zone_query_defaults() {
-        let q: RemoveZoneQuery = serde_json::from_str("{}").expect("deserialize");
-        assert!(!q.drain);
-    }
-
-    #[test]
-    fn watch_events_query_defaults() {
-        let q: WatchEventsQuery = serde_json::from_str("{}").expect("deserialize");
-        assert!(!q.follow);
+    fn update_zone_body_deserializes() {
+        let json = r#"{"if_version":7,"policy_json":{"allow_ptrace":true}}"#;
+        let body: UpdateZoneBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.if_version, 7);
+        assert_eq!(body.policy_json.unwrap()["allow_ptrace"], serde_json::json!(true));
     }
 }

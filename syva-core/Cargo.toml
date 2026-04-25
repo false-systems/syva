@@ -12,9 +12,7 @@ syva-proto = { path = "../syva-proto" }
 syva-cp-client = { path = "../syva-cp-client" }
 syva-ebpf-common = { path = "../syva-ebpf-common", features = ["userspace"] }
 aya = { workspace = true }
-tonic = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -24,5 +22,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
-prost = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }

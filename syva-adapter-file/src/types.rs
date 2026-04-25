@@ -104,7 +104,7 @@ pub struct ZoneMetadata {
 }
 
 /// Declarative policy defining what a zone can do.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ZonePolicy {
     /// Optional metadata section — parsed but not used for enforcement.
@@ -116,20 +116,6 @@ pub struct ZonePolicy {
     pub filesystem: FilesystemPolicy,
     pub devices: DevicePolicy,
     pub syscalls: SyscallPolicy,
-}
-
-impl Default for ZonePolicy {
-    fn default() -> Self {
-        Self {
-            zone: ZoneMetadata::default(),
-            capabilities: CapabilityPolicy::default(),
-            resources: ResourcePolicy::default(),
-            network: NetworkPolicy::default(),
-            filesystem: FilesystemPolicy::default(),
-            devices: DevicePolicy::default(),
-            syscalls: SyscallPolicy::default(),
-        }
-    }
 }
 
 impl ZonePolicy {
@@ -424,7 +410,7 @@ deny = []
     #[test]
     fn network_mode_rejects_pascalcase() {
         #[derive(Deserialize)]
-        struct T { mode: NetworkMode }
+        struct T { _mode: NetworkMode }
         assert!(toml::from_str::<T>("mode = \"Bridged\"").is_err());
     }
 }

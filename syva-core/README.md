@@ -1,29 +1,10 @@
 # syva-core
 
-Kernel enforcement engine for Syva. `syva-core` owns the in-process
-`ZoneRegistry` and `EnforceEbpf` state and exposes a local gRPC surface for
-adapters.
+Kernel enforcement engine for Syva. After session 4b, `syva-core` has one
+ingestion path only: it connects to `syva-cp`, registers as a node, subscribes
+to `NodeAssignmentUpdate`, and reconciles its BPF maps to the desired state.
 
-## Operational Modes
-
-`syva-core` runs in one of two modes:
-
-### Legacy Mode
-
-Adapters (`syva-adapter-file`, `syva-adapter-k8s`, `syva-adapter-api`) connect
-to the local gRPC surface and push zones directly.
-
-Start:
-
-```bash
-syva-core --socket-path /run/syva/syva-core.sock
-```
-
-### CP Mode
-
-`syva-core` connects to a remote `syva-cp`, registers as a node, subscribes to
-assignment updates, and reconciles its BPF maps to match desired state. Legacy
-adapters can still push to the local gRPC surface in addition.
+## CP Mode
 
 Start:
 
@@ -38,3 +19,6 @@ syva-core \
 
 The node ID is persisted to `--node-id-path` so restarts appear as
 re-registration of the same node rather than fresh registration.
+
+There is no local adapter-facing gRPC surface anymore. Adapters now push zones
+to `syva-cp` directly.

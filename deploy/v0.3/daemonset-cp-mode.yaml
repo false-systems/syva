@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: syva-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: syva
+  namespace: syva-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: syva-core
+  namespace: syva-system
+spec:
+  selector:
+    matchLabels:
+      app: syva-core
+  template:
+    metadata:
+      labels:
+        app: syva-core
+    spec:
+      hostPID: true
+      serviceAccountName: syva
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      containers:
+        - name: syva-core
+          image: ghcr.io/false-systems/syva-core:0.3.0
+          args:
+            - --cp-endpoint=http://syva-cp.syva-system.svc:50051
+            - --node-labels=$(NODE_LABELS)
+          env:
+            - name: SYVA_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SYVA_CLUSTER_ID
+              value: production
+            - name: NODE_LABELS
+              value: "tier=prod"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+            - name: node-state
+              mountPath: /var/lib/syva
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+      volumes:
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: node-state
+          hostPath:
+            path: /var/lib/syva
+            type: DirectoryOrCreate
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syva-file-adapter
+  namespace: syva-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syva-file-adapter
+  template:
+    metadata:
+      labels:
+        app: syva-file-adapter
+    spec:
+      serviceAccountName: syva
+      containers:
+        - name: syva-file
+          image: ghcr.io/false-systems/syva-adapter-file:0.3.0
+          args:
+            - --cp-endpoint=http://syva-cp.syva-system.svc:50051
+            - --team-id=$(TEAM_ID)
+            - --policy-dir=/etc/syva/policies
+          env:
+            - name: TEAM_ID
+              value: "00000000-0000-0000-0000-000000000000"
+          volumeMounts:
+            - name: policies
+              mountPath: /etc/syva/policies
+              readOnly: true
+      volumes:
+        - name: policies
+          configMap:
+            name: syva-policies
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syva-k8s-adapter
+  namespace: syva-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syva-k8s-adapter
+  template:
+    metadata:
+      labels:
+        app: syva-k8s-adapter
+    spec:
+      serviceAccountName: syva
+      containers:
+        - name: syva-k8s
+          image: ghcr.io/false-systems/syva-adapter-k8s:0.3.0
+          args:
+            - --cp-endpoint=http://syva-cp.syva-system.svc:50051
+            - --team-id=$(TEAM_ID)
+            - --namespace=$(WATCH_NAMESPACE)
+          env:
+            - name: TEAM_ID
+              value: "00000000-0000-0000-0000-000000000000"
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syva-api-adapter
+  namespace: syva-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syva-api-adapter
+  template:
+    metadata:
+      labels:
+        app: syva-api-adapter
+    spec:
+      serviceAccountName: syva
+      containers:
+        - name: syva-api
+          image: ghcr.io/false-systems/syva-adapter-api:0.3.0
+          args:
+            - --cp-endpoint=http://syva-cp.syva-system.svc:50051
+            - --team-id=$(TEAM_ID)
+            - --listen=0.0.0.0:8080
+          env:
+            - name: TEAM_ID
+              value: "00000000-0000-0000-0000-000000000000"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: syva-k8s
+rules:
+  - apiGroups: ["syva.dev"]
+    resources: ["syvazonepolicies"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: syva-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: syva-k8s
+subjects:
+  - kind: ServiceAccount
+    name: syva
+    namespace: syva-system

@@ -1,57 +1,40 @@
-mod connect;
 mod routes;
 
+use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use std::net::SocketAddr;
+use uuid::Uuid;
 
-#[derive(Parser)]
-#[command(name = "syva-api", about = "REST API adapter for syva-core")]
+#[derive(Parser, Debug)]
+#[command(name = "syva-api", version)]
 struct Cli {
-    /// Path to the syva-core Unix socket.
-    #[arg(long, default_value = "/run/syva/syva-core.sock")]
-    socket_path: String,
+    /// Address to listen on for the REST API.
+    #[arg(long, env = "SYVA_API_LISTEN", default_value = "0.0.0.0:8080")]
+    listen: SocketAddr,
 
-    /// Port for the REST API server.
-    #[arg(long, default_value = "8080")]
-    port: u16,
+    /// syva-cp gRPC endpoint.
+    #[arg(long, env = "SYVA_CP_ENDPOINT")]
+    cp_endpoint: String,
+
+    /// Team UUID this proxy creates and updates zones in.
+    #[arg(long, env = "SYVA_TEAM_ID")]
+    team_id: Uuid,
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("syva_api=info".parse()?),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "syva_api=info".into()),
         )
         .init();
 
     let cli = Cli::parse();
-    tracing::info!("syva-api starting");
-
-    let client = connect::connect_with_retry(&cli.socket_path, 30).await?;
-    tracing::info!(socket = cli.socket_path, "connected to syva-core");
-
-    let shared = std::sync::Arc::new(tokio::sync::Mutex::new(client));
-    let app = routes::router(shared);
-
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cli.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "REST API listening");
-
-    // Shutdown on SIGTERM/SIGINT
-    let shutdown = async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => tracing::info!("received SIGINT"),
-            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
-        }
-    };
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-
-    tracing::info!("syva-api stopped");
-    Ok(())
+    routes::serve(routes::Config {
+        listen: cli.listen,
+        cp_endpoint: cli.cp_endpoint,
+        team_id: cli.team_id,
+    })
+    .await
 }
