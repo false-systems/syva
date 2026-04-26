@@ -1,48 +1,106 @@
 use crate::crd::SyvaZonePolicy;
-use crate::mapper::{spec_to_create_args, spec_to_update_args};
+use crate::mapper::{spec_to_core_register, spec_to_create_args, spec_to_update_args};
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig, Event};
 use kube::{Api, Client as KubeClient};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
+use syva_core_client::syva_core::{ListZonesRequest, RemoveZoneRequest};
 use syva_cp_client::{CpClient, CpClientConfig, DeleteZoneArgs, ZoneSnapshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 pub struct Config {
     pub namespace: String,
-    pub cp_endpoint: String,
-    pub team_id: Uuid,
+    pub cp_endpoint: Option<String>,
+    pub core_socket: Option<PathBuf>,
+    pub team_id: Option<Uuid>,
 }
 
 pub async fn run(config: Config) -> Result<()> {
-    let cp = connect_with_retry(&config.cp_endpoint).await;
+    match (&config.cp_endpoint, &config.core_socket) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--cp-endpoint and --core-socket are mutually exclusive")
+        }
+        (None, None) => anyhow::bail!("exactly one of --cp-endpoint or --core-socket is required"),
+        (Some(_), None) if config.team_id.is_none() => {
+            anyhow::bail!("--team-id is required when using --cp-endpoint")
+        }
+        _ => {}
+    }
 
     let kube = KubeClient::try_default().await?;
     let crds: Api<SyvaZonePolicy> = Api::namespaced(kube.clone(), &config.namespace);
 
-    info!(
-        namespace = %config.namespace,
-        team_id = %config.team_id,
-        "syva-k8s starting"
-    );
+    match (config.cp_endpoint.clone(), config.core_socket.clone()) {
+        (Some(endpoint), None) => run_cp_mode(config, crds, &endpoint).await,
+        (None, Some(socket_path)) => run_core_mode(config, crds, socket_path).await,
+        _ => unreachable!("validated above"),
+    }
+}
+
+async fn run_cp_mode(config: Config, crds: Api<SyvaZonePolicy>, endpoint: &str) -> Result<()> {
+    let cp = connect_with_retry(endpoint).await;
+    let team_id = config.team_id.context("missing team_id")?;
+
+    info!(namespace = %config.namespace, team_id = %team_id, "syva-k8s starting");
     info!(
         "pod annotation and container membership reconciliation are deferred until ContainerService is implemented"
     );
 
-    initial_reconcile(&cp, &crds, config.team_id).await?;
+    initial_reconcile(&cp, &crds, team_id).await?;
 
     let mut stream = watcher(crds, WatcherConfig::default()).boxed();
     while let Some(event) = stream.next().await {
         match event {
             Ok(Event::Apply(crd)) => {
-                if let Err(error) = handle_apply(&cp, config.team_id, &crd).await {
+                if let Err(error) = handle_apply(&cp, team_id, &crd).await {
                     warn!(name = ?crd.metadata.name, error = %error, "apply failed");
                 }
             }
             Ok(Event::Delete(crd)) => {
-                if let Err(error) = handle_delete(&cp, config.team_id, &crd).await {
+                if let Err(error) = handle_delete(&cp, team_id, &crd).await {
+                    warn!(name = ?crd.metadata.name, error = %error, "delete failed");
+                }
+            }
+            Ok(Event::Init) | Ok(Event::InitDone) | Ok(Event::InitApply(_)) => {}
+            Err(error) => warn!("watcher error: {error}"),
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_core_mode(
+    config: Config,
+    crds: Api<SyvaZonePolicy>,
+    socket_path: PathBuf,
+) -> Result<()> {
+    let mut core = syva_core_client::connect_unix_socket_with_retry(socket_path.clone()).await;
+
+    info!(
+        namespace = %config.namespace,
+        socket = %socket_path.display(),
+        "syva-k8s starting in local-core mode"
+    );
+    info!(
+        "pod annotation and container membership reconciliation are deferred until ContainerService is implemented"
+    );
+
+    initial_reconcile_core(&mut core, &crds).await?;
+
+    let mut stream = watcher(crds, WatcherConfig::default()).boxed();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Apply(crd)) => {
+                if let Err(error) = handle_apply_core(&mut core, &crd).await {
+                    warn!(name = ?crd.metadata.name, error = %error, "apply failed");
+                }
+            }
+            Ok(Event::Delete(crd)) => {
+                if let Err(error) = handle_delete_core(&mut core, &crd).await {
                     warn!(name = ?crd.metadata.name, error = %error, "delete failed");
                 }
             }
@@ -80,15 +138,13 @@ async fn connect_with_retry(endpoint: &str) -> CpClient {
     }
 }
 
-async fn initial_reconcile(
-    cp: &CpClient,
-    crds: &Api<SyvaZonePolicy>,
-    team_id: Uuid,
-) -> Result<()> {
+async fn initial_reconcile(cp: &CpClient, crds: &Api<SyvaZonePolicy>, team_id: Uuid) -> Result<()> {
     let crd_list = crds.list(&Default::default()).await?;
     let in_cp = cp.list_zones(team_id, None, 500).await?;
-    let in_cp_by_name: HashMap<String, ZoneSnapshot> =
-        in_cp.into_iter().map(|zone| (zone.name.clone(), zone)).collect();
+    let in_cp_by_name: HashMap<String, ZoneSnapshot> = in_cp
+        .into_iter()
+        .map(|zone| (zone.name.clone(), zone))
+        .collect();
 
     let mut crd_names = HashSet::new();
     for crd in &crd_list {
@@ -140,8 +196,12 @@ async fn initial_reconcile(
                             })
                             .await
                         {
-                            Ok(()) => info!(zone = %name, "zone deleted (no matching CRD) after refresh"),
-                            Err(retry_error) => warn!(zone = %name, error = %retry_error, "initial delete failed after refresh"),
+                            Ok(()) => {
+                                info!(zone = %name, "zone deleted (no matching CRD) after refresh")
+                            }
+                            Err(retry_error) => {
+                                warn!(zone = %name, error = %retry_error, "initial delete failed after refresh")
+                            }
                         }
                     }
                     _ => {}
@@ -149,6 +209,41 @@ async fn initial_reconcile(
             }
             Err(error) => warn!(zone = %name, error = %error, "initial delete failed"),
         }
+    }
+
+    Ok(())
+}
+
+async fn initial_reconcile_core(
+    core: &mut syva_core_client::SyvaCoreClient,
+    crds: &Api<SyvaZonePolicy>,
+) -> Result<()> {
+    let crd_list = crds.list(&Default::default()).await?;
+    let in_core = core
+        .list_zones(ListZonesRequest {})
+        .await?
+        .into_inner()
+        .zones;
+    let in_core_by_name: HashSet<String> = in_core.into_iter().map(|zone| zone.name).collect();
+
+    let mut crd_names = HashSet::new();
+    for crd in &crd_list {
+        let Some(name) = crd.metadata.name.clone() else {
+            continue;
+        };
+        crd_names.insert(name.clone());
+        core.register_zone(spec_to_core_register(&name, crd))
+            .await?;
+        info!(zone = %name, "zone registered from CRD (initial)");
+    }
+
+    for name in in_core_by_name.difference(&crd_names) {
+        core.remove_zone(RemoveZoneRequest {
+            zone_name: name.clone(),
+            drain: true,
+        })
+        .await?;
+        info!(zone = %name, "zone removed from local core (no matching CRD)");
     }
 
     Ok(())
@@ -211,6 +306,41 @@ async fn handle_delete(cp: &CpClient, team_id: Uuid, crd: &SyvaZonePolicy) -> Re
         }
         Err(error) => return Err(error.into()),
     }
+    info!(zone = %name, "zone deleted (CRD removed)");
+    Ok(())
+}
+
+pub(crate) async fn handle_apply_core(
+    core: &mut syva_core_client::SyvaCoreClient,
+    crd: &SyvaZonePolicy,
+) -> Result<()> {
+    let name = crd
+        .metadata
+        .name
+        .clone()
+        .context("CRD missing metadata.name")?;
+
+    core.register_zone(spec_to_core_register(&name, crd))
+        .await?;
+    info!(zone = %name, "zone registered from CRD");
+    Ok(())
+}
+
+pub(crate) async fn handle_delete_core(
+    core: &mut syva_core_client::SyvaCoreClient,
+    crd: &SyvaZonePolicy,
+) -> Result<()> {
+    let name = crd
+        .metadata
+        .name
+        .clone()
+        .context("CRD missing metadata.name")?;
+
+    core.remove_zone(RemoveZoneRequest {
+        zone_name: name.clone(),
+        drain: true,
+    })
+    .await?;
     info!(zone = %name, "zone deleted (CRD removed)");
     Ok(())
 }

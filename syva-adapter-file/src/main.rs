@@ -8,16 +8,24 @@ use uuid::Uuid;
 struct Cli {
     /// Directory containing TOML zone policies. One file per zone.
     /// Filename (without .toml) becomes the zone name.
-    #[arg(long, env = "SYVA_FILE_POLICY_DIR", default_value = "/etc/syva/policies")]
+    #[arg(
+        long,
+        env = "SYVA_FILE_POLICY_DIR",
+        default_value = "/etc/syva/policies"
+    )]
     policy_dir: PathBuf,
 
     /// syva-cp gRPC endpoint.
-    #[arg(long, env = "SYVA_CP_ENDPOINT")]
-    cp_endpoint: String,
+    #[arg(long, env = "SYVA_CP_ENDPOINT", conflicts_with = "core_socket")]
+    cp_endpoint: Option<String>,
+
+    /// Local syva-core Unix socket.
+    #[arg(long, env = "SYVA_CORE_SOCKET", conflicts_with = "cp_endpoint")]
+    core_socket: Option<PathBuf>,
 
     /// Team UUID this adapter manages zones for.
     #[arg(long, env = "SYVA_TEAM_ID")]
-    team_id: Uuid,
+    team_id: Option<Uuid>,
 
     /// Reconcile interval in seconds.
     #[arg(long, env = "SYVA_RECONCILE_SECS", default_value = "5")]
@@ -51,6 +59,7 @@ async fn main() -> Result<()> {
     syva_file::run::run(syva_file::run::Config {
         policy_dir: cli.policy_dir,
         cp_endpoint: cli.cp_endpoint,
+        core_socket: cli.core_socket,
         team_id: cli.team_id,
         reconcile_interval: std::time::Duration::from_secs(cli.reconcile_secs),
     })

@@ -1,0 +1,13 @@
+[package]
+name = "syva-core-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+syva-proto = { path = "../syva-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
