@@ -8,22 +8,30 @@
 //!   syva-core status                   # Show enforcement counters
 //!   syva-core events --follow          # Stream deny events
 
-mod cp_reconcile;
 mod btf;
+mod container_id;
+mod cp_reconcile;
 mod ebpf;
 mod events;
 mod health;
 mod ingest;
+mod rpc;
 pub mod types;
 mod zone;
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use syva_cp_client::CpClientConfig;
+use syva_proto::syva_core::syva_core_server::SyvaCoreServer;
+use tokio::net::UnixListener;
 use tokio::sync::{Mutex, RwLock};
+use tokio_stream::wrappers::UnixListenerStream;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -40,9 +48,17 @@ struct Cli {
     #[arg(long, default_value = "9091")]
     health_port: u16,
 
-    /// syva-cp endpoint. Required.
+    /// Policy ingestion source.
+    #[arg(long, default_value = "cp")]
+    policy_source: PolicySource,
+
+    /// Local syva.core.v1 Unix socket path.
+    #[arg(long, default_value = "/run/syva/syva-core.sock")]
+    socket_path: PathBuf,
+
+    /// syva-cp endpoint. Required when --policy-source=cp.
     #[arg(long, env = "SYVA_CP_ENDPOINT")]
-    cp_endpoint: String,
+    cp_endpoint: Option<String>,
 
     /// Hostname to report to syva-cp. Defaults to the system hostname.
     #[arg(long, env = "SYVA_NODE_NAME")]
@@ -92,6 +108,12 @@ enum Commands {
     },
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum PolicySource {
+    Cp,
+    Local,
+}
+
 #[derive(Clone, Debug, clap::ValueEnum)]
 enum OutputFormat {
     Text,
@@ -101,9 +123,7 @@ enum OutputFormat {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive("syva_core=info".parse()?),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("syva_core=info".parse()?))
         .init();
 
     let cli = Cli::parse();
@@ -118,12 +138,11 @@ async fn main() -> anyhow::Result<()> {
 /// Main enforcement engine loop.
 async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     tracing::info!("syva-core starting");
+    let start_time = Instant::now();
 
     // Health state — shared with the HTTP server. Starts as unhealthy
     // (not attached, zero zones) and transitions as startup progresses.
-    let health_state = health::SharedHealth::new(RwLock::new(
-        health::HealthState::new(),
-    ));
+    let health_state = health::SharedHealth::new(RwLock::new(health::HealthState::new()));
     health::spawn_health_server(config.health_port, health_state.clone()).await?;
 
     // Load eBPF programs (but do NOT attach — no enforcement yet).
@@ -153,12 +172,26 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     let registry = Arc::new(RwLock::new(zone::ZoneRegistry::new()));
     let ebpf = Arc::new(Mutex::new(mgr));
 
+    let local_server_task = if matches!(config.policy_source, PolicySource::Local) {
+        Some(
+            spawn_local_core_server(
+                config.socket_path.clone(),
+                registry.clone(),
+                ebpf.clone(),
+                health_state.clone(),
+                start_time,
+                cancel.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     tracing::info!("startup complete — enforcement active");
 
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     // Periodic error monitoring task.
     let monitor_ebpf = ebpf.clone();
@@ -211,54 +244,201 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         }
     });
 
-    let node_name = config
-        .node_name
-        .clone()
-        .or_else(system_hostname)
-        .unwrap_or_else(|| "unknown".to_string());
-    let cp_config = CpClientConfig {
-        endpoint: config.cp_endpoint.clone(),
-        node_name,
-        cluster_id: config.cluster_id.clone(),
-        fingerprint: read_fingerprint(&config.fingerprint_path),
-        labels: parse_labels(&config.node_labels),
-        node_id_path: config.node_id_path.clone(),
-        heartbeat_interval: Duration::from_secs(config.heartbeat_secs),
-        ..Default::default()
-    };
+    match config.policy_source {
+        PolicySource::Cp => {
+            let cp_endpoint = config.cp_endpoint.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--cp-endpoint or SYVA_CP_ENDPOINT is required when --policy-source=cp"
+                )
+            })?;
+            let node_name = config
+                .node_name
+                .clone()
+                .or_else(system_hostname)
+                .unwrap_or_else(|| "unknown".to_string());
+            let cp_config = CpClientConfig {
+                endpoint: cp_endpoint,
+                node_name,
+                cluster_id: config.cluster_id.clone(),
+                fingerprint: read_fingerprint(&config.fingerprint_path),
+                labels: parse_labels(&config.node_labels),
+                node_id_path: config.node_id_path.clone(),
+                heartbeat_interval: Duration::from_secs(config.heartbeat_secs),
+                ..Default::default()
+            };
 
-    let (cp, registration) = connect_and_register_with_retry(cp_config).await;
-    tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
+            let (cp, registration) = connect_and_register_with_retry(cp_config).await;
+            tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
 
-    let _heartbeat = cp.spawn_heartbeat_loop();
-    let reconciler = cp_reconcile::Reconciler::new(
-        cp,
-        registry.clone(),
-        ebpf.clone(),
-        health_state.clone(),
-    );
-    let mut reconcile_task = tokio::spawn(async move {
-        reconciler.run().await;
-    });
+            let _heartbeat = cp.spawn_heartbeat_loop();
+            let reconciler = cp_reconcile::Reconciler::new(
+                cp,
+                registry.clone(),
+                ebpf.clone(),
+                health_state.clone(),
+            );
+            let mut reconcile_task = tokio::spawn(async move {
+                reconciler.run().await;
+            });
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received SIGINT — shutting down");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("received SIGINT; shutting down");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM; shutting down");
+                }
+                _ = &mut reconcile_task => {
+                    tracing::warn!("reconcile loop exited");
+                }
+            }
+
+            reconcile_task.abort();
         }
-        _ = sigterm.recv() => {
-            tracing::info!("received SIGTERM — shutting down");
-        }
-        _ = &mut reconcile_task => {
-            tracing::warn!("reconcile loop exited");
+        PolicySource::Local => {
+            let mut local_server_task = local_server_task
+                .ok_or_else(|| anyhow::anyhow!("local server task was not started"))?;
+            let mut local_server_exited = false;
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("received SIGINT; shutting down");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM; shutting down");
+                }
+                result = &mut local_server_task => {
+                    local_server_exited = true;
+                    match result {
+                        Ok(Ok(())) => tracing::info!("local gRPC server exited"),
+                        Ok(Err(error)) => tracing::warn!(%error, "local gRPC server exited with error"),
+                        Err(error) => tracing::warn!(%error, "local gRPC server task failed"),
+                    }
+                }
+            }
+
+            cancel.cancel();
+            if !local_server_exited {
+                match tokio::time::timeout(Duration::from_secs(10), local_server_task).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(%error, "local gRPC server shutdown failed")
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "local gRPC server task failed during shutdown")
+                    }
+                    Err(_) => tracing::warn!("timed out waiting for local gRPC server shutdown"),
+                }
+            }
         }
     }
 
     cancel.cancel();
-    reconcile_task.abort();
     // Drop ebpf manager (cleans up BPF pins).
     drop(ebpf);
     tracing::info!("syva-core stopped");
     Ok(())
+}
+
+async fn spawn_local_core_server(
+    socket_path: PathBuf,
+    registry: Arc<RwLock<zone::ZoneRegistry>>,
+    ebpf: Arc<Mutex<ebpf::EnforceEbpf>>,
+    health: health::SharedHealth,
+    start_time: Instant,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    if socket_path.exists() {
+        anyhow::bail!(
+            "refusing to replace existing syva-core socket at {}",
+            socket_path.display()
+        );
+    }
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)?;
+    if let Err(error) = configure_socket_permissions(&socket_path) {
+        drop(listener);
+        cleanup_socket_file(&socket_path).map_err(|cleanup_error| {
+            anyhow::anyhow!(
+                "failed to configure syva-core socket permissions at {}: {error}; additionally failed to remove the socket file: {cleanup_error}",
+                socket_path.display()
+            )
+        })?;
+        return Err(error);
+    }
+
+    let service = rpc::SyvaCoreService {
+        registry,
+        ebpf,
+        health,
+        start_time,
+    };
+    let incoming = UnixListenerStream::new(listener);
+    let shutdown = cancel.cancelled_owned();
+    let display_path = socket_path.display().to_string();
+
+    let task = tokio::spawn(async move {
+        tracing::info!(socket = display_path, "local syva.core.v1 server listening");
+        let result = tonic::transport::Server::builder()
+            .add_service(SyvaCoreServer::new(service))
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .map_err(|error| anyhow::anyhow!("local gRPC server failed: {error}"));
+        cleanup_socket_file(&socket_path)?;
+        result
+    });
+
+    Ok(task)
+}
+
+fn cleanup_socket_file(socket_path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn configure_socket_permissions(socket_path: &std::path::Path) -> anyhow::Result<()> {
+    let permissions = std::fs::Permissions::from_mode(0o660);
+    std::fs::set_permissions(socket_path, permissions)?;
+
+    let gid = syva_group_gid().ok_or_else(|| {
+        anyhow::anyhow!(
+            "group 'syva' is required for {} ownership",
+            socket_path.display()
+        )
+    })?;
+    let c_path = CString::new(socket_path.as_os_str().as_bytes())?;
+    let result = unsafe { libc::chown(c_path.as_ptr(), 0, gid) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        anyhow::bail!(
+            "failed to chown {} to root:syva: {error}",
+            socket_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn syva_group_gid() -> Option<u32> {
+    let groups = std::fs::read_to_string("/etc/group").ok()?;
+    groups.lines().find_map(|line| {
+        let mut parts = line.split(':');
+        let name = parts.next()?;
+        let _password = parts.next()?;
+        let gid = parts.next()?;
+        if name == "syva" {
+            gid.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 async fn connect_and_register_with_retry(
@@ -362,9 +542,8 @@ async fn cmd_status() -> anyhow::Result<()> {
         // pinned data in the matching variant before converting.
         let map_data = aya::maps::MapData::from_pin(&counter_path)
             .map_err(|e| anyhow::anyhow!("failed to open pinned counters: {e}"))?;
-        match PerCpuArray::<_, EnforcementCounters>::try_from(
-            aya::maps::Map::PerCpuArray(map_data),
-        ) {
+        match PerCpuArray::<_, EnforcementCounters>::try_from(aya::maps::Map::PerCpuArray(map_data))
+        {
             Ok(map) => {
                 println!("  hooks:");
                 let mut total_errors: u64 = 0;
@@ -373,7 +552,12 @@ async fn cmd_status() -> anyhow::Result<()> {
                 for (idx, hook) in events::HOOK_NAMES.iter().enumerate() {
                     match map.get(&(idx as u32), 0) {
                         Ok(per_cpu) => {
-                            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0, lost: 0 };
+                            let mut total = EnforcementCounters {
+                                allow: 0,
+                                deny: 0,
+                                error: 0,
+                                lost: 0,
+                            };
                             for cpu_val in per_cpu.iter() {
                                 total.allow += cpu_val.allow;
                                 total.deny += cpu_val.deny;
@@ -382,13 +566,19 @@ async fn cmd_status() -> anyhow::Result<()> {
                             }
                             total_errors += total.error;
                             total_lost += total.lost;
-                            let flag = if total.error > 0 || total.lost > 0 { " !" } else { "" };
+                            let flag = if total.error > 0 || total.lost > 0 {
+                                " !"
+                            } else {
+                                ""
+                            };
                             println!(
                                 "    {:<16} allow={:<8} deny={:<8} error={:<6} lost={}{}",
                                 hook, total.allow, total.deny, total.error, total.lost, flag
                             );
                         }
-                        Err(_) => { had_read_error = true; }
+                        Err(_) => {
+                            had_read_error = true;
+                        }
                     }
                 }
 
@@ -397,10 +587,15 @@ async fn cmd_status() -> anyhow::Result<()> {
                     println!("  counters: some reads failed");
                 } else if total_errors > 0 {
                     println!();
-                    println!("  WARNING: {} total enforcement errors detected.", total_errors);
+                    println!(
+                        "  WARNING: {} total enforcement errors detected.",
+                        total_errors
+                    );
                     println!("  Errors cause fail-open behavior -- operations are ALLOWED");
                     println!("  when kernel struct reads fail. This may indicate wrong");
-                    println!("  kernel struct offsets. Check BTF availability and restart syva-core.");
+                    println!(
+                        "  kernel struct offsets. Check BTF availability and restart syva-core."
+                    );
                 }
 
                 // Suppress unused variable warning for total_lost (used for flag above).
@@ -498,16 +693,17 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
 /// Drop capabilities that are no longer needed after BPF programs are loaded
 /// and maps are populated. BPF map operations use already-open file descriptors.
 fn drop_unnecessary_capabilities() {
-    const CAPS_TO_DROP: &[(libc::c_int, &str)] = &[
-        (21, "CAP_SYS_ADMIN"),
-    ];
+    const CAPS_TO_DROP: &[(libc::c_int, &str)] = &[(21, "CAP_SYS_ADMIN")];
 
     for &(cap, name) in CAPS_TO_DROP {
         let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) };
         if ret == 0 {
             tracing::info!(capability = name, "dropped capability");
         } else {
-            tracing::debug!(capability = name, "failed to drop capability (may not be in bounding set)");
+            tracing::debug!(
+                capability = name,
+                "failed to drop capability (may not be in bounding set)"
+            );
         }
     }
 }

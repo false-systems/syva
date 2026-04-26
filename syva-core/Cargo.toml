@@ -13,7 +13,9 @@ syva-cp-client = { path = "../syva-cp-client" }
 syva-ebpf-common = { path = "../syva-ebpf-common", features = ["userspace"] }
 aya = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -23,3 +25,8 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+hyper-util = { version = "0.1", features = ["tokio"] }
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }

@@ -34,6 +34,9 @@ pub(crate) async fn register_zone_local(
         let was_new = registry.zone_id(zone_name).is_none();
         registry.register_zone(zone_name)?;
         let zone_id = registry.revive_draining(zone_name)?;
+        if let Some(policy) = policy.as_ref() {
+            registry.set_zone_type(zone_name, policy.zone_type)?;
+        }
         let zones_loaded = registry.zone_count();
         (zone_id, zones_loaded, was_new)
     };
@@ -71,8 +74,6 @@ pub(crate) async fn register_zone_local(
                 }
             }
         }
-
-        let _ = policy.zone_type;
     }
 
     health.write().await.zones_loaded = zones_loaded;

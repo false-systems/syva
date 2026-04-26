@@ -19,6 +19,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::types::ZoneType;
+
 /// Zone lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoneState {
@@ -47,6 +49,7 @@ pub enum ZoneTransition {
 #[derive(Debug)]
 pub struct ZoneEntry {
     pub zone_id: u32,
+    pub zone_type: ZoneType,
     pub state: ZoneState,
     pub refcount: usize,
 }
@@ -110,6 +113,7 @@ impl ZoneRegistry {
         self.next_id = self.next_id.wrapping_add(1);
         self.zones.insert(zone_name.to_string(), ZoneEntry {
             zone_id,
+            zone_type: ZoneType::NonGlobal,
             state: ZoneState::Pending,
             refcount: 0,
         });
@@ -253,8 +257,22 @@ impl ZoneRegistry {
         self.zones.get(zone_name).map(|e| e.zone_id)
     }
 
-    /// All registered zone names and their IDs.
+    /// Update the zone type for an already-registered zone.
+    pub fn set_zone_type(&mut self, zone_name: &str, zone_type: ZoneType) -> anyhow::Result<()> {
+        let entry = self.zones.get_mut(zone_name)
+            .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
+        entry.zone_type = zone_type;
+        Ok(())
+    }
+
+    /// Look up zone type by name.
     #[cfg_attr(not(test), allow(dead_code))]
+    pub fn zone_type(&self, zone_name: &str) -> Option<ZoneType> {
+        self.zones.get(zone_name).map(|e| e.zone_type)
+    }
+
+    /// All registered zone names and their IDs.
+    #[allow(dead_code)]
     pub fn all_zones(&self) -> impl Iterator<Item = (&str, u32)> {
         self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
@@ -517,6 +535,21 @@ mod tests {
 
         reg.revive_draining("frontend").unwrap();
         assert_eq!(reg.zones["frontend"].state, ZoneState::Pending);
+    }
+
+    #[test]
+    fn new_zones_default_to_non_global() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        assert_eq!(reg.zone_type("frontend"), Some(ZoneType::NonGlobal));
+    }
+
+    #[test]
+    fn set_zone_type_persists_for_lookups() {
+        let mut reg = ZoneRegistry::new();
+        reg.register_zone("frontend").unwrap();
+        reg.set_zone_type("frontend", ZoneType::Privileged).unwrap();
+        assert_eq!(reg.zone_type("frontend"), Some(ZoneType::Privileged));
     }
 
     #[test]
