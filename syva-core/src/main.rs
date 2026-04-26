@@ -360,7 +360,16 @@ async fn spawn_local_core_server(
     }
 
     let listener = UnixListener::bind(&socket_path)?;
-    configure_socket_permissions(&socket_path)?;
+    if let Err(error) = configure_socket_permissions(&socket_path) {
+        drop(listener);
+        cleanup_socket_file(&socket_path).map_err(|cleanup_error| {
+            anyhow::anyhow!(
+                "failed to configure syva-core socket permissions at {}: {error}; additionally failed to remove the socket file: {cleanup_error}",
+                socket_path.display()
+            )
+        })?;
+        return Err(error);
+    }
 
     let service = rpc::SyvaCoreService {
         registry,
@@ -374,14 +383,24 @@ async fn spawn_local_core_server(
 
     let task = tokio::spawn(async move {
         tracing::info!(socket = display_path, "local syva.core.v1 server listening");
-        tonic::transport::Server::builder()
+        let result = tonic::transport::Server::builder()
             .add_service(SyvaCoreServer::new(service))
             .serve_with_incoming_shutdown(incoming, shutdown)
             .await
-            .map_err(|error| anyhow::anyhow!("local gRPC server failed: {error}"))
+            .map_err(|error| anyhow::anyhow!("local gRPC server failed: {error}"));
+        cleanup_socket_file(&socket_path)?;
+        result
     });
 
     Ok(task)
+}
+
+fn cleanup_socket_file(socket_path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn configure_socket_permissions(socket_path: &std::path::Path) -> anyhow::Result<()> {

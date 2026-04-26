@@ -43,15 +43,10 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("zone_name is required"));
         }
 
-        let policy = req.policy.map(|proto_policy| CoreZonePolicyInput {
-            host_paths: proto_policy.host_paths,
-            allowed_zones: proto_policy.allowed_zones,
-            allow_ptrace: proto_policy.allow_ptrace,
-            zone_type: match proto_policy.zone_type {
-                1 => ZoneType::Privileged,
-                _ => ZoneType::NonGlobal,
-            },
-        });
+        let policy = req
+            .policy
+            .map(proto_policy_to_core_input)
+            .transpose()?;
 
         let zone_id = ingest::register_zone_local(
             &self.registry,
@@ -134,8 +129,7 @@ impl SyvaCore for SyvaCoreService {
         }
 
         let mut registry = self.registry.write().await;
-        let zone_id = match registry.add_container(&req.container_id, &req.zone_name, req.cgroup_id)
-        {
+        let zone_id = match registry.add_container(&req.container_id, &req.zone_name, req.cgroup_id) {
             Ok(id) => id,
             Err(error) => {
                 return Ok(Response::new(AttachContainerResponse {
@@ -144,9 +138,10 @@ impl SyvaCore for SyvaCoreService {
                 }));
             }
         };
+        let zone_type = registry.zone_type(&req.zone_name).unwrap_or(ZoneType::NonGlobal);
 
         let mut ebpf = self.ebpf.lock().await;
-        if let Err(error) = ebpf.add_zone_member(req.cgroup_id, zone_id, ZoneType::NonGlobal) {
+        if let Err(error) = ebpf.add_zone_member(req.cgroup_id, zone_id, zone_type) {
             registry.remove_container(&req.container_id, None);
             return Err(Status::internal(format!(
                 "BPF add_zone_member failed: {error}"
@@ -445,5 +440,28 @@ impl SyvaCore for SyvaCoreService {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn proto_policy_to_core_input(
+    proto_policy: syva_proto::syva_core::ZonePolicy,
+) -> Result<CoreZonePolicyInput, Status> {
+    Ok(CoreZonePolicyInput {
+        host_paths: proto_policy.host_paths,
+        allowed_zones: proto_policy.allowed_zones,
+        allow_ptrace: proto_policy.allow_ptrace,
+        zone_type: parse_proto_zone_type(proto_policy.zone_type)?,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_proto_zone_type(value: i32) -> Result<ZoneType, Status> {
+    match value {
+        0 => Ok(ZoneType::NonGlobal),
+        1 => Ok(ZoneType::Privileged),
+        other => Err(Status::invalid_argument(format!(
+            "unsupported zone_type: {other}"
+        ))),
     }
 }
