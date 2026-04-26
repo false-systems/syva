@@ -254,7 +254,7 @@ impl ZoneRegistry {
     }
 
     /// All registered zone names and their IDs.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn all_zones(&self) -> impl Iterator<Item = (&str, u32)> {
         self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
