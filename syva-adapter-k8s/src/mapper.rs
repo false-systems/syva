@@ -1,5 +1,6 @@
 use crate::crd::{SyvaZonePolicy, ZoneTypeSpec};
 use anyhow::Result;
+use syva_core_client::syva_core::{RegisterZoneRequest, ZonePolicy};
 use syva_cp_client::{CreateZoneArgs, UpdateZoneArgs, ZoneSnapshot};
 use uuid::Uuid;
 
@@ -44,6 +45,40 @@ pub fn spec_to_update_args(
         selector_json: desired_selector_json,
         metadata_json: None,
     }))
+}
+
+/// Translate a SyvaZonePolicy CRD into the node-local core API.
+///
+/// Local core applies policy to one node and has no team ownership, selector,
+/// display-name, or metadata concepts. The CRD selector is intentionally
+/// dropped here; Kubernetes scheduling decides which adapter instance sees the
+/// CRD, not the local core.
+pub fn spec_to_core_register(name: &str, crd: &SyvaZonePolicy) -> RegisterZoneRequest {
+    let spec = &crd.spec;
+    RegisterZoneRequest {
+        zone_name: name.to_string(),
+        policy: Some(ZonePolicy {
+            host_paths: spec
+                .filesystem
+                .as_ref()
+                .map(|filesystem| filesystem.host_paths.clone())
+                .unwrap_or_default(),
+            allowed_zones: spec
+                .network
+                .as_ref()
+                .map(|network| network.allowed_zones.clone())
+                .unwrap_or_default(),
+            allow_ptrace: spec
+                .process
+                .as_ref()
+                .map(|process| process.allow_ptrace)
+                .unwrap_or(false),
+            zone_type: match spec.zone_type.as_ref().unwrap_or(&ZoneTypeSpec::Standard) {
+                ZoneTypeSpec::Privileged => 1,
+                ZoneTypeSpec::Standard | ZoneTypeSpec::Isolated => 0,
+            },
+        }),
+    }
 }
 
 fn spec_to_policy_json(crd: &SyvaZonePolicy) -> Result<serde_json::Value> {
@@ -125,5 +160,50 @@ mod tests {
         let value = spec_to_selector_json(&resource).unwrap().unwrap();
         assert_eq!(value["nodeNames"], serde_json::json!(["n1"]));
         assert_eq!(value["matchLabels"]["tier"], serde_json::json!("prod"));
+    }
+
+    #[test]
+    fn maps_crd_to_core_register_and_drops_selector() {
+        let mut labels = BTreeMap::new();
+        labels.insert("tier".to_string(), "prod".to_string());
+        let resource = crd(SyvaZonePolicySpec {
+            filesystem: Some(FilesystemSpec {
+                host_paths: vec!["/data".into()],
+            }),
+            network: Some(NetworkSpec {
+                allowed_zones: vec!["db".into()],
+            }),
+            process: Some(ProcessSpec { allow_ptrace: true }),
+            selector: Some(SelectorSpec {
+                all_nodes: false,
+                node_names: vec!["node-a".into()],
+                match_labels: labels,
+            }),
+            zone_type: Some(ZoneTypeSpec::Privileged),
+        });
+
+        let request = spec_to_core_register("web", &resource);
+        let policy = request.policy.expect("policy");
+
+        assert_eq!(request.zone_name, "web");
+        assert_eq!(policy.host_paths, vec!["/data"]);
+        assert_eq!(policy.allowed_zones, vec!["db"]);
+        assert!(policy.allow_ptrace);
+        assert_eq!(policy.zone_type, 1);
+    }
+
+    #[test]
+    fn maps_isolated_crd_to_standard_core_zone_until_core_accepts_isolated() {
+        let resource = crd(SyvaZonePolicySpec {
+            filesystem: None,
+            network: None,
+            process: None,
+            selector: None,
+            zone_type: Some(ZoneTypeSpec::Isolated),
+        });
+
+        let request = spec_to_core_register("worker", &resource);
+
+        assert_eq!(request.policy.expect("policy").zone_type, 0);
     }
 }

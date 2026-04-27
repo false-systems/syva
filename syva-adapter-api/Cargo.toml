@@ -8,6 +8,7 @@ name = "syva-api"
 path = "src/main.rs"
 
 [dependencies]
+syva-core-client = { path = "../syva-core-client" }
 syva-cp-client = { path = "../syva-cp-client" }
 tokio = { workspace = true }
 tracing = { workspace = true }

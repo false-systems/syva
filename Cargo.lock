@@ -3027,6 +3027,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "syva-core-client",
  "syva-cp-client",
  "tokio",
  "tonic",
@@ -3043,6 +3044,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "syva-core-client",
  "syva-cp-client",
  "syva-ebpf-common",
  "tokio",
@@ -3065,6 +3067,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "syva-core-client",
  "syva-cp-client",
  "tokio",
  "tonic",
@@ -3097,6 +3100,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "syva-core-client"
+version = "0.2.0"
+dependencies = [
+ "hyper-util",
+ "syva-proto",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
+ "tower 0.4.13",
+ "tracing",
 ]
 
 [[package]]
