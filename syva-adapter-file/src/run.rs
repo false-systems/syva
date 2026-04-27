@@ -3,11 +3,12 @@ use crate::translate::{
     policy_to_core_register, policy_to_core_update, policy_to_create_args, policy_to_update_args,
 };
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 use syva_core_client::syva_core::{
-    AllowCommRequest, ListZonesRequest, RegisterHostPathRequest, RemoveZoneRequest,
+    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RegisterHostPathRequest,
+    RemoveZoneRequest,
 };
 use syva_cp_client::{CpClient, CpClientConfig, DeleteZoneArgs, ZoneSnapshot};
 use tracing::{debug, info, warn};
@@ -83,6 +84,7 @@ async fn run_cp_mode(endpoint: &str, config: &Config) -> Result<()> {
 
 async fn run_core_mode(socket_path: PathBuf, config: &Config) -> Result<()> {
     let mut core = syva_core_client::connect_unix_socket_with_retry(socket_path.clone()).await;
+    let mut last_applied = HashMap::new();
 
     info!(
         policy_dir = %config.policy_dir.display(),
@@ -99,7 +101,7 @@ async fn run_core_mode(socket_path: PathBuf, config: &Config) -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match reconcile_once_core(&mut core, config).await {
+                match reconcile_once_core(&mut core, config, &mut last_applied).await {
                     Ok(stats) if stats.changed > 0 => {
                         info!(
                             created = stats.created,
@@ -256,6 +258,7 @@ async fn reconcile_once_cp(
 async fn reconcile_once_core(
     core: &mut syva_core_client::SyvaCoreClient,
     config: &Config,
+    last_applied: &mut HashMap<String, serde_json::Value>,
 ) -> Result<ReconcileStats> {
     let on_disk = load_policies_from_dir(&config.policy_dir)
         .with_context(|| format!("load policies from {}", config.policy_dir.display()))?;
@@ -264,7 +267,7 @@ async fn reconcile_once_core(
         .await?
         .into_inner()
         .zones;
-    let diff = crate::diff::diff_against_core(&on_disk, &in_core);
+    let diff = crate::diff::diff_against_core(&on_disk, &in_core, last_applied);
 
     let mut stats = ReconcileStats::default();
 
@@ -273,6 +276,7 @@ async fn reconcile_once_core(
             continue;
         };
         apply_core_register(core, &name, policy, true).await?;
+        last_applied.insert(name.clone(), serde_json::to_value(policy)?);
         stats.created += 1;
         stats.changed += 1;
         info!(zone = %name, "zone registered in local core");
@@ -283,6 +287,7 @@ async fn reconcile_once_core(
             continue;
         };
         apply_core_register(core, &name, policy, false).await?;
+        last_applied.insert(name.clone(), serde_json::to_value(policy)?);
         stats.updated += 1;
         stats.changed += 1;
         debug!(zone = %name, "zone refreshed in local core");
@@ -294,10 +299,13 @@ async fn reconcile_once_core(
             drain: true,
         })
         .await?;
+        last_applied.remove(&name);
         stats.deleted += 1;
         stats.changed += 1;
         info!(zone = %name, "zone removal requested in local core");
     }
+
+    reconcile_core_comms(core, &on_disk).await?;
 
     Ok(stats)
 }
@@ -313,19 +321,22 @@ async fn apply_core_register(
     } else {
         policy_to_core_update(name, policy)
     };
-    core.register_zone(request).await?;
-
-    for allowed_zone in &policy.policy.network.allowed_zones {
-        if let Err(error) = core
-            .allow_comm(AllowCommRequest {
-                zone_a: name.to_string(),
-                zone_b: allowed_zone.clone(),
+    if !create {
+        let removed = core
+            .remove_zone(RemoveZoneRequest {
+                zone_name: name.to_string(),
+                drain: false,
             })
-            .await
-        {
-            warn!(zone = %name, peer = %allowed_zone, error = %error, "allow_comm failed");
+            .await?
+            .into_inner();
+        if !removed.ok {
+            anyhow::bail!(
+                "cannot update local-core zone '{name}' authoritatively: {}",
+                removed.message
+            );
         }
     }
+    core.register_zone(request).await?;
 
     for path in &policy.policy.filesystem.host_paths {
         core.register_host_path(RegisterHostPathRequest {
@@ -337,6 +348,72 @@ async fn apply_core_register(
     }
 
     Ok(())
+}
+
+async fn reconcile_core_comms(
+    core: &mut syva_core_client::SyvaCoreClient,
+    policies: &HashMap<String, FilePolicy>,
+) -> Result<()> {
+    let desired = desired_mutual_comm_pairs(policies);
+    let current = core
+        .list_comms(ListCommsRequest {
+            zone_name: String::new(),
+        })
+        .await?
+        .into_inner()
+        .pairs
+        .into_iter()
+        .map(|pair| canonical_pair(&pair.zone_a, &pair.zone_b))
+        .collect::<BTreeSet<_>>();
+
+    for (zone_a, zone_b) in desired.difference(&current) {
+        core.allow_comm(AllowCommRequest {
+            zone_a: zone_a.clone(),
+            zone_b: zone_b.clone(),
+        })
+        .await?;
+    }
+
+    for (zone_a, zone_b) in current.difference(&desired) {
+        if policies.contains_key(zone_a) && policies.contains_key(zone_b) {
+            core.deny_comm(DenyCommRequest {
+                zone_a: zone_a.clone(),
+                zone_b: zone_b.clone(),
+            })
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn desired_mutual_comm_pairs(policies: &HashMap<String, FilePolicy>) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for (zone, policy) in policies {
+        for peer in &policy.policy.network.allowed_zones {
+            let Some(peer_policy) = policies.get(peer) else {
+                continue;
+            };
+            if peer_policy
+                .policy
+                .network
+                .allowed_zones
+                .iter()
+                .any(|candidate| candidate == zone)
+            {
+                pairs.insert(canonical_pair(zone, peer));
+            }
+        }
+    }
+    pairs
+}
+
+fn canonical_pair(zone_a: &str, zone_b: &str) -> (String, String) {
+    if zone_a <= zone_b {
+        (zone_a.to_string(), zone_b.to_string())
+    } else {
+        (zone_b.to_string(), zone_a.to_string())
+    }
 }
 
 async fn update_zone_with_refresh(
@@ -373,5 +450,37 @@ fn is_retryable_conflict(error: &syva_cp_client::CpClientError) -> bool {
             tonic::Code::AlreadyExists | tonic::Code::Aborted | tonic::Code::FailedPrecondition
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(allowed_zones: &[&str]) -> FilePolicy {
+        let mut policy = crate::types::ZonePolicy::default();
+        policy.network.allowed_zones = allowed_zones
+            .iter()
+            .map(|zone| (*zone).to_string())
+            .collect();
+        FilePolicy {
+            display_name: None,
+            selector: None,
+            policy,
+        }
+    }
+
+    #[test]
+    fn derives_only_mutual_comm_pairs() {
+        let policies = HashMap::from([
+            ("web".to_string(), policy(&["api", "db"])),
+            ("api".to_string(), policy(&["web"])),
+            ("db".to_string(), policy(&[])),
+        ]);
+
+        assert_eq!(
+            desired_mutual_comm_pairs(&policies),
+            BTreeSet::from([("api".to_string(), "web".to_string())])
+        );
     }
 }

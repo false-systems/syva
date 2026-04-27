@@ -4,10 +4,12 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig, Event};
 use kube::{Api, Client as KubeClient};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
-use syva_core_client::syva_core::{ListZonesRequest, RemoveZoneRequest};
+use syva_core_client::syva_core::{
+    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RemoveZoneRequest,
+};
 use syva_cp_client::{CpClient, CpClientConfig, DeleteZoneArgs, ZoneSnapshot};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -91,17 +93,21 @@ async fn run_core_mode(
 
     initial_reconcile_core(&mut core, &crds).await?;
 
-    let mut stream = watcher(crds, WatcherConfig::default()).boxed();
+    let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
     while let Some(event) = stream.next().await {
         match event {
             Ok(Event::Apply(crd)) => {
                 if let Err(error) = handle_apply_core(&mut core, &crd).await {
                     warn!(name = ?crd.metadata.name, error = %error, "apply failed");
+                } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
+                    warn!(error = %error, "communication reconcile failed");
                 }
             }
             Ok(Event::Delete(crd)) => {
                 if let Err(error) = handle_delete_core(&mut core, &crd).await {
                     warn!(name = ?crd.metadata.name, error = %error, "delete failed");
+                } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
+                    warn!(error = %error, "communication reconcile failed");
                 }
             }
             Ok(Event::Init) | Ok(Event::InitDone) | Ok(Event::InitApply(_)) => {}
@@ -246,6 +252,8 @@ async fn initial_reconcile_core(
         info!(zone = %name, "zone removed from local core (no matching CRD)");
     }
 
+    reconcile_core_comms(core, crds).await?;
+
     Ok(())
 }
 
@@ -345,6 +353,87 @@ pub(crate) async fn handle_delete_core(
     Ok(())
 }
 
+async fn reconcile_core_comms(
+    core: &mut syva_core_client::SyvaCoreClient,
+    crds: &Api<SyvaZonePolicy>,
+) -> Result<()> {
+    let crd_list = crds.list(&Default::default()).await?;
+    let policies = crd_list
+        .iter()
+        .filter_map(|crd| crd.metadata.name.as_ref().map(|name| (name.clone(), crd)))
+        .collect::<HashMap<_, _>>();
+    let desired = desired_mutual_comm_pairs(&policies);
+    let current = core
+        .list_comms(ListCommsRequest {
+            zone_name: String::new(),
+        })
+        .await?
+        .into_inner()
+        .pairs
+        .into_iter()
+        .map(|pair| canonical_pair(&pair.zone_a, &pair.zone_b))
+        .collect::<BTreeSet<_>>();
+
+    for (zone_a, zone_b) in desired.difference(&current) {
+        core.allow_comm(AllowCommRequest {
+            zone_a: zone_a.clone(),
+            zone_b: zone_b.clone(),
+        })
+        .await?;
+    }
+
+    for (zone_a, zone_b) in current.difference(&desired) {
+        if policies.contains_key(zone_a) && policies.contains_key(zone_b) {
+            core.deny_comm(DenyCommRequest {
+                zone_a: zone_a.clone(),
+                zone_b: zone_b.clone(),
+            })
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn desired_mutual_comm_pairs(
+    policies: &HashMap<String, &SyvaZonePolicy>,
+) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for (zone, policy) in policies {
+        let Some(network) = policy.spec.network.as_ref() else {
+            continue;
+        };
+        for peer in &network.allowed_zones {
+            let Some(peer_policy) = policies.get(peer) else {
+                continue;
+            };
+            let mutual = peer_policy
+                .spec
+                .network
+                .as_ref()
+                .map(|network| {
+                    network
+                        .allowed_zones
+                        .iter()
+                        .any(|candidate| candidate == zone)
+                })
+                .unwrap_or(false);
+            if mutual {
+                pairs.insert(canonical_pair(zone, peer));
+            }
+        }
+    }
+    pairs
+}
+
+fn canonical_pair(zone_a: &str, zone_b: &str) -> (String, String) {
+    if zone_a <= zone_b {
+        (zone_a.to_string(), zone_b.to_string())
+    } else {
+        (zone_b.to_string(), zone_a.to_string())
+    }
+}
+
 async fn update_zone_with_refresh(
     cp: &CpClient,
     team_id: Uuid,
@@ -379,5 +468,46 @@ fn is_retryable_conflict(error: &syva_cp_client::CpClientError) -> bool {
             tonic::Code::AlreadyExists | tonic::Code::Aborted | tonic::Code::FailedPrecondition
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{NetworkSpec, SyvaZonePolicySpec};
+
+    fn crd(name: &str, allowed_zones: &[&str]) -> SyvaZonePolicy {
+        SyvaZonePolicy::new(
+            name,
+            SyvaZonePolicySpec {
+                filesystem: None,
+                network: Some(NetworkSpec {
+                    allowed_zones: allowed_zones
+                        .iter()
+                        .map(|zone| (*zone).to_string())
+                        .collect(),
+                }),
+                process: None,
+                selector: None,
+                zone_type: None,
+            },
+        )
+    }
+
+    #[test]
+    fn derives_only_mutual_comm_pairs() {
+        let web = crd("web", &["api", "db"]);
+        let api = crd("api", &["web"]);
+        let db = crd("db", &[]);
+        let policies = HashMap::from([
+            ("web".to_string(), &web),
+            ("api".to_string(), &api),
+            ("db".to_string(), &db),
+        ]);
+
+        assert_eq!(
+            desired_mutual_comm_pairs(&policies),
+            BTreeSet::from([("api".to_string(), "web".to_string())])
+        );
     }
 }

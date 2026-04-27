@@ -71,7 +71,6 @@ pub struct UpdateZoneBody {
 #[serde(default, deny_unknown_fields)]
 struct CorePolicyJson {
     host_paths: Vec<String>,
-    allowed_zones: Vec<String>,
     allow_ptrace: bool,
     zone_type: CoreZoneType,
 }
@@ -80,7 +79,6 @@ impl Default for CorePolicyJson {
     fn default() -> Self {
         Self {
             host_paths: Vec::new(),
-            allowed_zones: Vec::new(),
             allow_ptrace: false,
             zone_type: CoreZoneType::Standard,
         }
@@ -267,7 +265,9 @@ pub async fn list_zones(
             if let Some(status) = query.status {
                 zones.retain(|zone| zone.state == status);
             }
-            zones.truncate(query.limit.unwrap_or(100).max(0) as usize);
+            let limit = query.limit.unwrap_or(100).max(0);
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            zones.truncate(limit);
             Ok(Json(zones.into_iter().map(core_zone_to_out).collect()))
         }
     }
@@ -432,12 +432,12 @@ fn core_register_request(
     name: &str,
     policy_json: JsonValue,
 ) -> Result<RegisterZoneRequest, ApiError> {
-    // Local-core mode intentionally accepts only the fields represented by
-    // syva.core.v1.ZonePolicy; CP-only request fields are ignored by handlers.
+    // Local-core API calls have no global policy view, so cross-zone comms must
+    // come from reconciling adapters that can derive mutual allow pairs.
     let policy: CorePolicyJson = serde_json::from_value(policy_json).map_err(|error| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: format!(
-            "local-core mode expects policy_json with host_paths, allowed_zones, allow_ptrace, and zone_type only: {error}"
+            "local-core mode expects policy_json with host_paths, allow_ptrace, and zone_type only: {error}"
         ),
     })?;
 
@@ -445,7 +445,7 @@ fn core_register_request(
         zone_name: name.to_string(),
         policy: Some(ZonePolicy {
             host_paths: policy.host_paths,
-            allowed_zones: policy.allowed_zones,
+            allowed_zones: Vec::new(),
             allow_ptrace: policy.allow_ptrace,
             zone_type: match policy.zone_type {
                 CoreZoneType::Privileged => 1,
@@ -548,7 +548,6 @@ mod tests {
             "web",
             serde_json::json!({
                 "host_paths": ["/data"],
-                "allowed_zones": ["db"],
                 "allow_ptrace": true,
                 "zone_type": "privileged"
             }),
@@ -558,7 +557,7 @@ mod tests {
         let policy = request.policy.expect("policy");
         assert_eq!(request.zone_name, "web");
         assert_eq!(policy.host_paths, vec!["/data"]);
-        assert_eq!(policy.allowed_zones, vec!["db"]);
+        assert!(policy.allowed_zones.is_empty());
         assert!(policy.allow_ptrace);
         assert_eq!(policy.zone_type, 1);
     }
@@ -573,6 +572,20 @@ mod tests {
             }),
         )
         .expect_err("unknown fields should be rejected in local mode");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn core_register_request_rejects_allowed_zones_without_global_reconcile() {
+        let error = core_register_request(
+            "web",
+            serde_json::json!({
+                "host_paths": [],
+                "allowed_zones": ["db"]
+            }),
+        )
+        .expect_err("API local mode should not accept comm policy");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
