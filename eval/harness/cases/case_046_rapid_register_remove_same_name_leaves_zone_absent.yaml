@@ -1,0 +1,17 @@
+id: case_046_rapid_register_remove_same_name_leaves_zone_absent
+description: Rapid register/remove cycles leave no final zone residue.
+timeout_secs: 30
+spec: |
+  Repeating RegisterZone and RemoveZone for the same name ten times must finish
+  without errors, and the final ListZones snapshot must not include that name.
+source: CLAUDE.md:Enforcement Semantics and syva-proto/proto/syva_core.proto
+requirement: |
+  Rapid register/remove cycles leave no final zone residue.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -1,0 +1,17 @@
+id: case_034_api_delete_zone_removes_from_core
+description: API adapter DELETE /v1/zones/{name} removes local core zone.
+timeout_secs: 30
+spec: |
+  In local-core mode, DELETE /v1/zones/{name} returns No Content and the zone
+  disappears from syva-core ListZones.
+source: CLAUDE.md:Architecture / syva-adapter-api and gRPC API
+requirement: |
+  API adapter DELETE /v1/zones/{name} removes local core zone.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

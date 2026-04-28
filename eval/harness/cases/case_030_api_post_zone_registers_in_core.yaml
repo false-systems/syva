@@ -1,0 +1,17 @@
+id: case_030_api_post_zone_registers_in_core
+description: API adapter POST /v1/zones registers a zone in local core.
+timeout_secs: 30
+spec: |
+  In local-core mode, a valid POST /v1/zones request returns Created and causes
+  the named zone to appear in syva-core ListZones.
+source: CLAUDE.md:Architecture / syva-adapter-api and gRPC API
+requirement: |
+  API adapter POST /v1/zones registers a zone in local core.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

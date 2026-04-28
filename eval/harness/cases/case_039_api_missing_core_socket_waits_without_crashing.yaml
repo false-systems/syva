@@ -1,0 +1,17 @@
+id: case_039_api_missing_core_socket_waits_without_crashing
+description: API adapter tolerates a missing core socket at startup.
+timeout_secs: 10
+spec: |
+  syva-api started with --core-socket pointing at a non-existent path must not
+  crash immediately; it may wait for the core socket before binding HTTP.
+source: CLAUDE.md:Architecture / syva-adapter-api and gRPC API
+requirement: |
+  API adapter tolerates a missing core socket at startup.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

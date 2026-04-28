@@ -1,15 +1,12 @@
-id: case_006_deny_comm_retracts_pair
-description: DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+id: case_043_allow_comm_unknown_zone_is_not_found
+description: AllowComm rejects references to unknown zones.
 timeout_secs: 30
 spec: |
-  DenyComm is the targeted retraction RPC — unlike the unscoped comm cleanup
-  path, it must only remove the (a,b) pair and leave any other pair
-  involving a or b intact. This case guards the "surgical retraction"
-  contract that the file and k8s adapters rely on when a policy edit shrinks
-  allowed_zones for a zone.
+  AllowComm with one registered zone and one phantom zone must return NotFound
+  so adapter policy typos are not hidden.
 source: syva-proto/proto/syva_core.proto:Communication policy RPCs and comments
 requirement: |
-  DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+  AllowComm rejects references to unknown zones.
 observable: |
   The oracle observes only public behavior: syva.core.v1 RPCs, documented
   adapter process exit behavior, adapter-visible filesystem input, or HTTP

@@ -1,14 +1,12 @@
-id: case_001_register_zone_assigns_nonzero_id
-description: RegisterZone returns a zone_id > 0 for every successful call.
+id: case_047_register_zone_empty_name_is_invalid_argument
+description: RegisterZone rejects an empty zone_name.
 timeout_secs: 30
 spec: |
-  zone_id 0 is reserved for ZONE_ID_HOST and must never be handed out to a
-  registered zone. Every successful RegisterZone RPC must return a non-zero
-  zone_id. Re-registration is covered by case_002; this case only asserts the
-  first-registration invariant.
+  RegisterZone with an empty zone_name is malformed input and must return
+  InvalidArgument.
 source: syva-proto/proto/syva_core.proto:Zone lifecycle RPCs and RegisterZoneRequest
 requirement: |
-  RegisterZone returns a zone_id > 0 for every successful call.
+  RegisterZone rejects an empty zone_name.
 observable: |
   The oracle observes only public behavior: syva.core.v1 RPCs, documented
   adapter process exit behavior, adapter-visible filesystem input, or HTTP

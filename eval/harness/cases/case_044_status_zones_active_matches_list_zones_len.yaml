@@ -1,0 +1,17 @@
+id: case_044_status_zones_active_matches_list_zones_len
+description: Status.zones_active matches ListZones length.
+timeout_secs: 30
+spec: |
+  After registering several zones, Status.zones_active must exactly match the
+  number of entries returned by ListZones.
+source: syva-proto/proto/syva_core.proto:StatusResponse and max_zones comment
+requirement: |
+  Status.zones_active matches ListZones length.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

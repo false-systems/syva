@@ -20,6 +20,7 @@ tower = { version = "0.4", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 anyhow = "1"
 futures = "0.3"
+tempfile = "3"
 
 [[bin]]
 name = "syva-oracle"

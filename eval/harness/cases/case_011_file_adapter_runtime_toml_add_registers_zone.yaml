@@ -1,0 +1,18 @@
+id: case_011_file_adapter_runtime_toml_add_registers_zone
+description: File adapter core mode registers a TOML file added while running.
+timeout_secs: 30
+spec: |
+  Given syva-file is already running in core mode, adding a valid TOML policy
+  to the watched directory causes the zone to appear in syva-core within the
+  reconcile timeout.
+source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+requirement: |
+  File adapter core mode registers a TOML file added while running.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

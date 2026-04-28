@@ -1,0 +1,19 @@
+id: case_041_register_past_max_zones_fails_cleanly
+description: Registering beyond max_zones fails cleanly.
+timeout_secs: 600
+spec: |
+  Register zones up to Status.max_zones, then attempt one more RegisterZone.
+  The overflow request returns a clean gRPC error instead of panicking or
+  silently truncating. The executable case is ignored by default because it
+  fills the zone map.
+source: syva-proto/proto/syva_core.proto:StatusResponse and max_zones comment
+requirement: |
+  Registering beyond max_zones fails cleanly.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -6,3 +6,14 @@ spec: |
   must therefore be idempotent: a second call with the same zone_name returns
   the previously-assigned zone_id rather than minting a new one. Core-side,
   ZoneRegistry::register_zone short-circuits on an existing entry.
+source: syva-proto/proto/syva_core.proto:Zone lifecycle RPCs and RegisterZoneRequest
+requirement: |
+  Registering the same zone name twice returns the same zone_id.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

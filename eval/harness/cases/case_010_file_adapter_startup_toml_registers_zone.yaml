@@ -1,0 +1,18 @@
+id: case_010_file_adapter_startup_toml_registers_zone
+description: File adapter core mode registers TOML policies present at startup.
+timeout_secs: 30
+spec: |
+  Given syva-file starts with --core-socket and a policy directory containing
+  TOML files, every valid desired zone appears in syva-core ListZones. Mutual
+  allowed_zones declarations converge to a ListComms pair.
+source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+requirement: |
+  File adapter core mode registers TOML policies present at startup.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -1,0 +1,18 @@
+id: case_018_file_adapter_malformed_toml_does_not_poison_valid_policy
+description: Malformed file policy does not poison valid file policies.
+timeout_secs: 30
+spec: |
+  A policy directory may contain one malformed TOML file and one valid TOML
+  file. syva-file should report the malformed file but still register the valid
+  desired zone; one bad file must not poison the whole reconcile pass.
+source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+requirement: |
+  Malformed file policy does not poison valid file policies.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

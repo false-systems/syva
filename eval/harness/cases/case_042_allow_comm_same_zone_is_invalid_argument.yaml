@@ -1,15 +1,12 @@
-id: case_006_deny_comm_retracts_pair
-description: DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+id: case_042_allow_comm_same_zone_is_invalid_argument
+description: AllowComm rejects a same-zone pair.
 timeout_secs: 30
 spec: |
-  DenyComm is the targeted retraction RPC — unlike the unscoped comm cleanup
-  path, it must only remove the (a,b) pair and leave any other pair
-  involving a or b intact. This case guards the "surgical retraction"
-  contract that the file and k8s adapters rely on when a policy edit shrinks
-  allowed_zones for a zone.
+  AllowComm where zone_a equals zone_b is malformed policy and must return
+  InvalidArgument.
 source: syva-proto/proto/syva_core.proto:Communication policy RPCs and comments
 requirement: |
-  DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+  AllowComm rejects a same-zone pair.
 observable: |
   The oracle observes only public behavior: syva.core.v1 RPCs, documented
   adapter process exit behavior, adapter-visible filesystem input, or HTTP

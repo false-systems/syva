@@ -922,6 +922,7 @@ dependencies = [
  "futures",
  "hyper-util",
  "syva-proto",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -933,6 +934,7 @@ name = "syva-proto"
 version = "0.2.0"
 dependencies = [
  "prost",
+ "prost-types",
  "tonic",
  "tonic-build",
 ]

@@ -8,3 +8,14 @@ spec: |
   appear in ListComms for any remaining zone. This is the drift case: if the
   mirror lags the BPF map, adapters see stale pairs and may re-allow
   retracted comms on a reload.
+source: syva-proto/proto/syva_core.proto:Communication policy RPCs and comments
+requirement: |
+  RemoveZone purges every comm pair that involved the removed zone.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

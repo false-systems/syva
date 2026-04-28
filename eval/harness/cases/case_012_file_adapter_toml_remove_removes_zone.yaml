@@ -1,0 +1,17 @@
+id: case_012_file_adapter_toml_remove_removes_zone
+description: File adapter core mode removes zones whose TOML file is deleted.
+timeout_secs: 30
+spec: |
+  Given a zone was registered from a TOML policy, deleting that TOML file from
+  the policy directory causes syva-file to remove the zone from syva-core.
+source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+requirement: |
+  File adapter core mode removes zones whose TOML file is deleted.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.
