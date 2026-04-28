@@ -5,3 +5,14 @@ spec: |
   Registering 100 zones in succession via syva.core.v1 succeeds without RPC
   errors. Every name appears in ListZones and Status.zones_active is at least
   100 before cleanup removes them.
+source: syva-proto/proto/syva_core.proto:StatusResponse and max_zones comment
+requirement: |
+  Direct gRPC can register 100 zones and status counts them.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

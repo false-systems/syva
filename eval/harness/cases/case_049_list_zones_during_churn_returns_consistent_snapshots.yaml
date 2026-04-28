@@ -5,3 +5,14 @@ spec: |
   While another task rapidly registers and removes zones, ListZones returns
   consistent snapshots: every returned entry has a non-empty name and non-zero
   zone_id, with no half-formed records.
+source: CLAUDE.md:Enforcement Semantics and syva-proto/proto/syva_core.proto
+requirement: |
+  ListZones stays structurally consistent during churn.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

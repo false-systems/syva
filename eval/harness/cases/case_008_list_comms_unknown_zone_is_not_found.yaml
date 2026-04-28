@@ -7,3 +7,14 @@ spec: |
   names. ListComms must therefore verify the filter zone exists and
   return gRPC NotFound otherwise. Empty filter (no zone_name) remains a
   valid "return all pairs" request.
+source: syva-proto/proto/syva_core.proto:Communication policy RPCs and comments
+requirement: |
+  ListComms with an unknown zone filter returns NotFound, not an empty list.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -5,3 +5,14 @@ spec: |
   Given TOML policies are modified while syva-file is running, the adapter
   converges syva-core to the new desired policy. The executable assertion uses
   mutual allowed_zones because ListComms is the public policy surface.
+source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+requirement: |
+  File adapter core mode applies TOML policy changes.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -7,3 +7,14 @@ spec: |
   name equals the registered name, whose zone_id equals the value returned by
   RegisterZone, and whose state is one of {pending, active, draining}. Unknown
   state strings indicate a core/proto drift and must fail the case.
+source: syva-proto/proto/syva_core.proto:Zone lifecycle RPCs and RegisterZoneRequest
+requirement: |
+  ListZones surfaces every registered zone with matching id and a valid state string.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

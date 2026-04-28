@@ -4,3 +4,14 @@ timeout_secs: 30
 spec: |
   In local-core mode, GET /v1/zones/{name} for a registered zone returns 200
   and a body naming the same zone as syva-core ListZones.
+source: CLAUDE.md:Architecture / syva-adapter-api and gRPC API
+requirement: |
+  API adapter GET /v1/zones/{name} reflects core state.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

@@ -50,6 +50,14 @@ struct Spec {
     id: String,
     /// Human-readable one-line statement of what must work.
     description: String,
+    /// Non-implementation source for the contract under test.
+    source: String,
+    /// Requirement prose; this is the contract statement the oracle executes.
+    requirement: String,
+    /// Public APIs/effects that make the requirement externally observable.
+    observable: String,
+    /// Architectural signal to report if the executable case fails.
+    failure_means: String,
     /// The behavioural spec, in prose. Never interpreted by the harness —
     /// this is what a contributor or a coding agent reads to implement the case.
     #[serde(default)]

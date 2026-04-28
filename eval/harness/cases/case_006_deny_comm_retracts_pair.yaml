@@ -7,3 +7,14 @@ spec: |
   involving a or b intact. This case guards the "surgical retraction"
   contract that the file and k8s adapters rely on when a policy edit shrinks
   allowed_zones for a zone.
+source: syva-proto/proto/syva_core.proto:Communication policy RPCs and comments
+requirement: |
+  DenyComm(a,b) removes exactly one pair and preserves unrelated pairs.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.

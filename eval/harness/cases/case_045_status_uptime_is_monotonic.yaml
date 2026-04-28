@@ -4,3 +4,14 @@ timeout_secs: 30
 spec: |
   Two Status calls separated by a short sleep must show uptime_secs moving
   monotonically forward or staying equal; it must never go backwards.
+source: syva-proto/proto/syva_core.proto:StatusResponse and max_zones comment
+requirement: |
+  Status.uptime_secs is monotonic.
+observable: |
+  The oracle observes only public behavior: syva.core.v1 RPCs, documented
+  adapter process exit behavior, adapter-visible filesystem input, or HTTP
+  responses from the adapter under test.
+failure_means: |
+  A failure indicates the externally observed Syva contract differs from
+  the cited requirement, or that the cited requirement is underspecified and
+  needs an explicit product decision.
