@@ -1,0 +1,6 @@
+id: case_032_api_get_zone_matches_core_view
+description: API adapter GET /v1/zones/{name} reflects core state.
+timeout_secs: 30
+spec: |
+  In local-core mode, GET /v1/zones/{name} for a registered zone returns 200
+  and a body naming the same zone as syva-core ListZones.

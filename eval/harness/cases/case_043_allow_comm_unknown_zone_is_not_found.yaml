@@ -1,0 +1,6 @@
+id: case_043_allow_comm_unknown_zone_is_not_found
+description: AllowComm rejects references to unknown zones.
+timeout_secs: 30
+spec: |
+  AllowComm with one registered zone and one phantom zone must return NotFound
+  so adapter policy typos are not hidden.

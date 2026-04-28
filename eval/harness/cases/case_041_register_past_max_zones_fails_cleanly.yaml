@@ -1,0 +1,8 @@
+id: case_041_register_past_max_zones_fails_cleanly
+description: Registering beyond max_zones fails cleanly.
+timeout_secs: 600
+spec: |
+  Register zones up to Status.max_zones, then attempt one more RegisterZone.
+  The overflow request returns a clean gRPC error instead of panicking or
+  silently truncating. The executable case is ignored by default because it
+  fills the zone map.

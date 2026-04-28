@@ -1,0 +1,7 @@
+id: case_019_file_adapter_retries_until_core_socket_appears
+description: File adapter retries until a missing core socket appears.
+timeout_secs: 30
+spec: |
+  syva-file started with --core-socket pointing at a not-yet-listening socket
+  must retry instead of crashing, then reconcile once syva-core appears. The
+  executable case skips unless the oracle can control a Linux BPF core process.

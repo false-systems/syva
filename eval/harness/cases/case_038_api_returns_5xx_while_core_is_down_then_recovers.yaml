@@ -1,0 +1,8 @@
+id: case_038_api_returns_5xx_while_core_is_down_then_recovers
+description: API adapter surfaces core outage and recovers after restart.
+timeout_secs: 30
+spec: |
+  If syva-core disappears while syva-api is serving local-core requests, the
+  next request should fail as an infrastructure error and later succeed after
+  syva-core returns. The executable case skips unless the oracle controls core
+  lifecycle on a Linux BPF host.

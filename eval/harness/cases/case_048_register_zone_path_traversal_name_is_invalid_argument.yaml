@@ -1,0 +1,6 @@
+id: case_048_register_zone_path_traversal_name_is_invalid_argument
+description: RegisterZone rejects path-like zone names.
+timeout_secs: 30
+spec: |
+  RegisterZone with names such as ../etc/passwd or foo/bar must return
+  InvalidArgument. Zone names are identifiers, not paths.

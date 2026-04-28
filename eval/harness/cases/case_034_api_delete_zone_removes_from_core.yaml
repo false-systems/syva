@@ -1,0 +1,6 @@
+id: case_034_api_delete_zone_removes_from_core
+description: API adapter DELETE /v1/zones/{name} removes local core zone.
+timeout_secs: 30
+spec: |
+  In local-core mode, DELETE /v1/zones/{name} returns No Content and the zone
+  disappears from syva-core ListZones.

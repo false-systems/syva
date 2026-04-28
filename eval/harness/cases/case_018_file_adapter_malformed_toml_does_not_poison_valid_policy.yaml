@@ -1,0 +1,7 @@
+id: case_018_file_adapter_malformed_toml_does_not_poison_valid_policy
+description: Malformed file policy does not poison valid file policies.
+timeout_secs: 30
+spec: |
+  A policy directory may contain one malformed TOML file and one valid TOML
+  file. syva-file should report the malformed file but still register the valid
+  desired zone; one bad file must not poison the whole reconcile pass.

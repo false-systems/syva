@@ -1,0 +1,7 @@
+id: case_013_file_adapter_toml_modify_updates_policy
+description: File adapter core mode applies TOML policy changes.
+timeout_secs: 30
+spec: |
+  Given TOML policies are modified while syva-file is running, the adapter
+  converges syva-core to the new desired policy. The executable assertion uses
+  mutual allowed_zones because ListComms is the public policy surface.

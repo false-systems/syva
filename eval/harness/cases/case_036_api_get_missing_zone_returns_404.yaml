@@ -1,0 +1,6 @@
+id: case_036_api_get_missing_zone_returns_404
+description: API adapter returns 404 for a missing local-core zone.
+timeout_secs: 30
+spec: |
+  In local-core mode, GET /v1/zones/{name} for a zone absent from syva-core
+  returns 404.

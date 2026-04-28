@@ -1,0 +1,7 @@
+id: case_040_register_100_zones_succeeds_and_status_counts_them
+description: Direct gRPC can register 100 zones and status counts them.
+timeout_secs: 60
+spec: |
+  Registering 100 zones in succession via syva.core.v1 succeeds without RPC
+  errors. Every name appears in ListZones and Status.zones_active is at least
+  100 before cleanup removes them.

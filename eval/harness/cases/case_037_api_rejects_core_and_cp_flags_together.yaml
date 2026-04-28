@@ -1,0 +1,6 @@
+id: case_037_api_rejects_core_and_cp_flags_together
+description: API adapter rejects --core-socket and --cp-endpoint together.
+timeout_secs: 10
+spec: |
+  syva-api must not start with both local-core and control-plane targets set.
+  It exits non-zero quickly and stderr names both conflicting flags.

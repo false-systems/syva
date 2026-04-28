@@ -1,0 +1,6 @@
+id: case_047_register_zone_empty_name_is_invalid_argument
+description: RegisterZone rejects an empty zone_name.
+timeout_secs: 30
+spec: |
+  RegisterZone with an empty zone_name is malformed input and must return
+  InvalidArgument.

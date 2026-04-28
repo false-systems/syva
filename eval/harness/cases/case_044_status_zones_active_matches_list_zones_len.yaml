@@ -1,0 +1,6 @@
+id: case_044_status_zones_active_matches_list_zones_len
+description: Status.zones_active matches ListZones length.
+timeout_secs: 30
+spec: |
+  After registering several zones, Status.zones_active must exactly match the
+  number of entries returned by ListZones.

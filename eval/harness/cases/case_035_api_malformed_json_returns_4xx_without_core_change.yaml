@@ -1,0 +1,6 @@
+id: case_035_api_malformed_json_returns_4xx_without_core_change
+description: API adapter rejects malformed JSON without changing core state.
+timeout_secs: 30
+spec: |
+  In local-core mode, malformed JSON on POST /v1/zones returns a 4xx response
+  and does not change the syva-core zone count.

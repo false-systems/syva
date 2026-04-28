@@ -1,0 +1,6 @@
+id: case_030_api_post_zone_registers_in_core
+description: API adapter POST /v1/zones registers a zone in local core.
+timeout_secs: 30
+spec: |
+  In local-core mode, a valid POST /v1/zones request returns Created and causes
+  the named zone to appear in syva-core ListZones.

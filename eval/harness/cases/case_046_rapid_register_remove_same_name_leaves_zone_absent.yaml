@@ -1,0 +1,6 @@
+id: case_046_rapid_register_remove_same_name_leaves_zone_absent
+description: Rapid register/remove cycles leave no final zone residue.
+timeout_secs: 30
+spec: |
+  Repeating RegisterZone and RemoveZone for the same name ten times must finish
+  without errors, and the final ListZones snapshot must not include that name.

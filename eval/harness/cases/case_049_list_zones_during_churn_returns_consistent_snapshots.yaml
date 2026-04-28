@@ -1,0 +1,7 @@
+id: case_049_list_zones_during_churn_returns_consistent_snapshots
+description: ListZones stays structurally consistent during churn.
+timeout_secs: 30
+spec: |
+  While another task rapidly registers and removes zones, ListZones returns
+  consistent snapshots: every returned entry has a non-empty name and non-zero
+  zone_id, with no half-formed records.

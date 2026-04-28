@@ -1,0 +1,6 @@
+id: case_042_allow_comm_same_zone_is_invalid_argument
+description: AllowComm rejects a same-zone pair.
+timeout_secs: 30
+spec: |
+  AllowComm where zone_a equals zone_b is malformed policy and must return
+  InvalidArgument.

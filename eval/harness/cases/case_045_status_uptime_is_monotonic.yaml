@@ -1,0 +1,6 @@
+id: case_045_status_uptime_is_monotonic
+description: Status.uptime_secs is monotonic.
+timeout_secs: 30
+spec: |
+  Two Status calls separated by a short sleep must show uptime_secs moving
+  monotonically forward or staying equal; it must never go backwards.

@@ -1,0 +1,6 @@
+id: case_031_api_list_zones_matches_core_names
+description: API adapter GET /v1/zones reflects core ListZones.
+timeout_secs: 30
+spec: |
+  In local-core mode, GET /v1/zones returns zones that are present in syva-core
+  ListZones. Ordering is not part of the contract.

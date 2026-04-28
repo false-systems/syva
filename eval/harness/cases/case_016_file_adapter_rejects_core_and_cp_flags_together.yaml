@@ -1,0 +1,6 @@
+id: case_016_file_adapter_rejects_core_and_cp_flags_together
+description: File adapter rejects --core-socket and --cp-endpoint together.
+timeout_secs: 10
+spec: |
+  syva-file must not start with both local-core and control-plane targets set.
+  It exits non-zero quickly and stderr names both conflicting flags.

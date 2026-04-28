@@ -1,0 +1,8 @@
+id: case_015_file_adapter_ptrace_capability_registers
+description: File adapter accepts CAP_SYS_PTRACE in local-core mode.
+timeout_secs: 30
+spec: |
+  A TOML policy with capabilities.allowed = ["CAP_SYS_PTRACE"] must be accepted
+  by syva-file core mode and registered in syva-core. The current core read API
+  does not expose allow_ptrace, so registration success is the public contract
+  available to the oracle.
