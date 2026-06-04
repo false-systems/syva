@@ -25,15 +25,6 @@ pub fn unix_stream_connect(ctx: &LsmContext) -> i32 {
 /// ZONE_MEMBERSHIP, and applies cross-zone enforcement.
 #[inline(always)]
 fn try_unix_connect(ctx: &LsmContext) -> Result<i32, i64> {
-    let caller = match lookup_caller_zone(ctx) {
-        Some(info) => info,
-        None => return Ok(0),
-    };
-
-    if caller.flags & ZONE_FLAG_GLOBAL != 0 {
-        return Ok(0);
-    }
-
     // arg(1) = struct sock *other (the server/listener socket)
     let other_ptr: u64 = unsafe { ctx.arg(1) };
     if other_ptr == 0 {
@@ -46,6 +37,15 @@ fn try_unix_connect(ctx: &LsmContext) -> Result<i32, i64> {
     // One-shot self-test: write the first resolved peer cgroup_id so
     // userspace can verify the offset chain produces sane values.
     unsafe { maybe_write_self_test(peer_cgroup_id) };
+
+    let caller = match lookup_caller_zone(ctx) {
+        Some(info) => info,
+        None => return Ok(0),
+    };
+
+    if caller.flags & ZONE_FLAG_GLOBAL != 0 {
+        return Ok(0);
+    }
 
     let peer = match unsafe { ZONE_MEMBERSHIP.get(&peer_cgroup_id) } {
         Some(info) => info,

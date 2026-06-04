@@ -51,8 +51,9 @@ been removed from the active workspace. Historical CP design notes live under
 
 ## Enforcement
 
-Syva currently builds hooks for file open, exec, executable mmap, ptrace,
-signals, cgroup attach, and Unix stream connect. The hot path is map-based:
+Syva v0.2 currently builds six BPF-LSM hooks: file open, exec,
+executable mmap, ptrace, signals, and Unix stream connect. The hot path is
+map-based:
 
 - `ZONE_MEMBERSHIP`: cgroup to zone.
 - `ZONE_POLICY`: zone policy flags.
@@ -93,6 +94,10 @@ communication policy; container membership must currently be supplied through
 - Lima verifies Linux build/test/eBPF object compilation from macOS, but runtime
   load/attach enforcement still needs a privileged Linux host or CI runner.
 - `/proc` and `/sys` coverage is incomplete.
+- Cgroup movement / zone escape protection is not enforced through BPF-LSM in
+  v0.2. `cgroup_attach_task` is not a BPF-LSM hook on supported mainline
+  kernels; this needs a follow-up using a valid cgroup BPF mechanism or another
+  kernel-supported hook.
 - `INODE_ZONE_MAP` is still keyed by inode number only, not `(dev, ino)`, so
   cross-filesystem inode collisions remain a known correctness risk.
 - `SyvaZonePolicy` status/finalizers/leader election are not implemented.
@@ -112,9 +117,15 @@ Linux-only checks:
 
 ```sh
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo build --manifest-path eval/oracle/Cargo.toml
+cargo build --manifest-path eval/harness/Cargo.toml
 cargo run -p xtask -- build-ebpf
 ```
+
+`build-ebpf` builds the release eBPF object by default. Use
+`cargo run -p xtask -- build-ebpf --debug` only for development experiments.
 
 ## Testing on macOS with Lima
 
@@ -136,7 +147,21 @@ make lima-shell
 ```
 
 `make lima-check` runs the active Linux validation path through `xtask ci`:
-format check, workspace check, workspace tests, and eBPF object build.
+format check, clippy, workspace check, workspace tests, eval crate builds, and
+eBPF object build.
+
+## Runtime Verification
+
+Before tagging v0.2, capture runtime evidence on a privileged Linux host with
+BPF LSM support:
+
+```sh
+sudo -E make verify-runtime
+```
+
+This runs the ignored local-mode runtime tests explicitly. It checks Linux,
+root, and the required `syva` group before attempting BPF load/attach and local
+core RPC verification. See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 
 ## Run
 

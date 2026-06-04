@@ -46,6 +46,7 @@ Native Linux:
 cargo run -p xtask -- ci
 ```
 
+`cargo run -p xtask -- build-ebpf` builds the release eBPF object by default.
 Runtime attach/enforcement tests still need a privileged Linux kernel with BPF
 LSM support.
 
@@ -78,6 +79,8 @@ RUST_LOG=aya=debug cargo run --bin syva-core 2>&1 | grep -A 20 verifier
   `DetachContainer`.
 - Change file identity from inode-only to `(dev, ino)`.
 - Add privileged Linux runtime load/attach blackbox verification.
+- Implement cgroup movement / zone escape protection through a valid kernel
+  mechanism; `cgroup_attach_task` is not a BPF-LSM hook on supported kernels.
 - Continue CO-RE migration one offset chain at a time while keeping self-tests.
 
 ## Git Hygiene

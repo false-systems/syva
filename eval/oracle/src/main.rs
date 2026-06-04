@@ -23,6 +23,8 @@
 //! `require_core_or_skip!()`. Oracle failures must reflect a genuine
 //! contract violation, not a missing service.
 
+#![allow(dead_code, unused_macros)]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -1206,26 +1208,24 @@ async fn case_041_register_past_max_zones_fails_cleanly() {
 }
 
 #[tokio::test]
-#[ignore = "pending core contract: same-zone AllowComm currently succeeds"]
-async fn case_042_allow_comm_same_zone_is_invalid_argument() {
+async fn case_042_allow_comm_same_zone_is_idempotent_noop() {
     let mut c = require_core_or_skip!();
     let name = zone_name("c042", "a");
     register_zone(&mut c, &name, empty_policy())
         .await
         .expect("register");
-    let err = c
+    let response = c
         .allow_comm(AllowCommRequest {
             zone_a: name.clone(),
             zone_b: name.clone(),
         })
         .await
-        .expect_err("same-zone comm must fail");
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        .expect("same-zone comm is a no-op");
+    assert!(response.into_inner().ok);
     remove_zone(&mut c, &name, false).await.ok();
 }
 
 #[tokio::test]
-#[ignore = "pending core contract: unknown-zone AllowComm currently maps to Internal"]
 async fn case_043_allow_comm_unknown_zone_is_not_found() {
     let mut c = require_core_or_skip!();
     let name = zone_name("c043", "a");
@@ -1240,6 +1240,25 @@ async fn case_043_allow_comm_unknown_zone_is_not_found() {
         })
         .await
         .expect_err("phantom comm must fail");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    remove_zone(&mut c, &name, false).await.ok();
+}
+
+#[tokio::test]
+async fn case_050_deny_comm_unknown_zone_is_not_found() {
+    let mut c = require_core_or_skip!();
+    let name = zone_name("c050", "a");
+    let phantom = zone_name("c050", "missing");
+    register_zone(&mut c, &name, empty_policy())
+        .await
+        .expect("register");
+    let err = c
+        .deny_comm(DenyCommRequest {
+            zone_a: name.clone(),
+            zone_b: phantom,
+        })
+        .await
+        .expect_err("phantom deny must fail");
     assert_eq!(err.code(), tonic::Code::NotFound);
     remove_zone(&mut c, &name, false).await.ok();
 }
@@ -1315,7 +1334,6 @@ async fn case_047_register_zone_empty_name_is_invalid_argument() {
 }
 
 #[tokio::test]
-#[ignore = "pending core contract: path-like zone names are currently accepted"]
 async fn case_048_register_zone_path_traversal_name_is_invalid_argument() {
     let mut c = require_core_or_skip!();
     for bad in ["../etc/passwd", "foo/bar"] {
@@ -1401,7 +1419,7 @@ async fn case_049_list_zones_during_churn_returns_consistent_snapshots() {
 // case_039_api_missing_core_socket_waits_without_crashing
 // case_040_register_100_zones_succeeds_and_status_counts_them
 // case_041_register_past_max_zones_fails_cleanly
-// case_042_allow_comm_same_zone_is_invalid_argument
+// case_042_allow_comm_same_zone_is_idempotent_noop
 // case_043_allow_comm_unknown_zone_is_not_found
 // case_044_status_zones_active_matches_list_zones_len
 // case_045_status_uptime_is_monotonic
@@ -1409,6 +1427,7 @@ async fn case_049_list_zones_during_churn_returns_consistent_snapshots() {
 // case_047_register_zone_empty_name_is_invalid_argument
 // case_048_register_zone_path_traversal_name_is_invalid_argument
 // case_049_list_zones_during_churn_returns_consistent_snapshots
+// case_050_deny_comm_unknown_zone_is_not_found
 
 fn main() {
     // The oracle is test-only; `cargo run` is a no-op but prevents bin-target

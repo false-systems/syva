@@ -30,6 +30,8 @@ use crate::membership::{
 use crate::types::ZoneType;
 use crate::zone::{ZoneRegistry, ZoneState, ZoneTransition};
 
+const CONTAINER_UPDATE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) struct SyvaCoreService {
     pub(crate) registry: Arc<RwLock<ZoneRegistry>>,
     pub(crate) memberships: Arc<RwLock<MembershipService>>,
@@ -39,6 +41,22 @@ pub(crate) struct SyvaCoreService {
     pub(crate) start_time: Instant,
 }
 
+impl SyvaCoreService {
+    /// Return NotFound for the first zone that is not registered. Used by the
+    /// comm RPCs so an unknown zone is a client error, leaving any later ingest
+    /// failure as a genuine Internal (BPF/core) error.
+    #[allow(clippy::result_large_err)]
+    async fn ensure_zones_registered(&self, zone_a: &str, zone_b: &str) -> Result<(), Status> {
+        let registry = self.registry.read().await;
+        for zone in [zone_a, zone_b] {
+            if registry.zone_id(zone).is_none() {
+                return Err(Status::not_found(format!("zone '{zone}' not registered")));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[tonic::async_trait]
 impl SyvaCore for SyvaCoreService {
     async fn register_zone(
@@ -46,9 +64,7 @@ impl SyvaCore for SyvaCoreService {
         request: Request<RegisterZoneRequest>,
     ) -> Result<Response<RegisterZoneResponse>, Status> {
         let req = request.into_inner();
-        if req.zone_name.is_empty() {
-            return Err(Status::invalid_argument("zone_name is required"));
-        }
+        validate_zone_name(&req.zone_name)?;
 
         let policy = req.policy.map(proto_policy_to_core_input).transpose()?;
 
@@ -71,9 +87,7 @@ impl SyvaCore for SyvaCoreService {
         request: Request<RemoveZoneRequest>,
     ) -> Result<Response<RemoveZoneResponse>, Status> {
         let req = request.into_inner();
-        if req.zone_name.is_empty() {
-            return Err(Status::invalid_argument("zone_name is required"));
-        }
+        validate_zone_name(&req.zone_name)?;
 
         let result = ingest::remove_zone_local(
             &self.registry,
@@ -125,9 +139,7 @@ impl SyvaCore for SyvaCoreService {
                 message: "invalid container_id: must be non-empty, max 128 chars, hex/dash/underscore only".to_string(),
             }));
         }
-        if req.zone_name.is_empty() {
-            return Err(Status::invalid_argument("zone_name is required"));
-        }
+        validate_zone_name(&req.zone_name)?;
         if req.cgroup_id == 0 {
             return Err(Status::invalid_argument("cgroup_id must be non-zero"));
         }
@@ -330,6 +342,10 @@ impl SyvaCore for SyvaCoreService {
             let mut ebpf = self.ebpf.lock().await;
             if let Err(error) = ebpf.remove_zone_member(cgroup_id) {
                 tracing::warn!(cgroup_id, %error, "failed to remove zone member from BPF map");
+                self.health.write().await.mark_membership_degraded(format!(
+                    "BPF membership remove failed for container '{}': {error}",
+                    req.container_id
+                ));
             }
 
             match transition {
@@ -371,6 +387,18 @@ impl SyvaCore for SyvaCoreService {
                 "both zone_a and zone_b are required",
             ));
         }
+        if req.zone_a == req.zone_b {
+            tracing::debug!(
+                zone = req.zone_a,
+                "same-zone AllowComm is an idempotent no-op"
+            );
+            return Ok(Response::new(AllowCommResponse { ok: true }));
+        }
+        // Resolve unknown zones to NotFound here so the ingest error below can
+        // only be a BPF/core failure, which is Internal (and degraded security)
+        // rather than a client mistake.
+        self.ensure_zones_registered(&req.zone_a, &req.zone_b)
+            .await?;
 
         ingest::allow_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
             .await
@@ -394,6 +422,10 @@ impl SyvaCore for SyvaCoreService {
                 "both zone_a and zone_b are required",
             ));
         }
+        // Same split as allow_comm: unknown zones are NotFound, a failing ingest
+        // is an Internal BPF/core error.
+        self.ensure_zones_registered(&req.zone_a, &req.zone_b)
+            .await?;
 
         ingest::deny_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
             .await
@@ -644,6 +676,20 @@ async fn acquire_container_update(
     active_updates: &Arc<StdMutex<HashSet<String>>>,
     container_id: &str,
 ) -> Result<ContainerUpdateGuard, Status> {
+    acquire_container_update_with_timeout(
+        active_updates,
+        container_id,
+        CONTAINER_UPDATE_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+async fn acquire_container_update_with_timeout(
+    active_updates: &Arc<StdMutex<HashSet<String>>>,
+    container_id: &str,
+    timeout: Duration,
+) -> Result<ContainerUpdateGuard, Status> {
+    let deadline = Instant::now() + timeout;
     loop {
         {
             let mut active = active_updates
@@ -657,6 +703,11 @@ async fn acquire_container_update(
             }
         }
 
+        if Instant::now() >= deadline {
+            return Err(Status::deadline_exceeded(format!(
+                "timed out waiting for active update on container '{container_id}'"
+            )));
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -671,5 +722,53 @@ impl Drop for ContainerUpdateGuard {
         if let Ok(mut active) = self.active_updates.lock() {
             active.remove(&self.container_id);
         }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_zone_name(zone_name: &str) -> Result<(), Status> {
+    if zone_name.is_empty() {
+        return Err(Status::invalid_argument("zone_name is required"));
+    }
+    if is_path_like_zone_name(zone_name) {
+        return Err(Status::invalid_argument(
+            "zone_name must be a logical identifier, not a filesystem path",
+        ));
+    }
+    Ok(())
+}
+
+fn is_path_like_zone_name(zone_name: &str) -> bool {
+    zone_name.contains('/') || zone_name.contains('\\') || zone_name.split('.').any(str::is_empty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn container_update_timeout_returns_deadline_exceeded() {
+        let active = Arc::new(StdMutex::new(HashSet::from(["container-a".to_string()])));
+
+        let error = match acquire_container_update_with_timeout(
+            &active,
+            "container-a",
+            Duration::from_millis(1),
+        )
+        .await
+        {
+            Ok(_) => panic!("active container update should time out"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert!(active.lock().unwrap().contains("container-a"));
+    }
+
+    #[test]
+    fn path_like_zone_names_are_rejected() {
+        assert!(validate_zone_name("../etc/passwd").is_err());
+        assert!(validate_zone_name("foo/bar").is_err());
+        assert!(validate_zone_name("frontend").is_ok());
     }
 }

@@ -115,9 +115,8 @@ pub const PROG_FILE_OPEN: u32 = 0;
 pub const PROG_BPRM_CHECK: u32 = 1;
 pub const PROG_PTRACE_CHECK: u32 = 2;
 pub const PROG_TASK_KILL: u32 = 3;
-pub const PROG_CGROUP_ATTACH: u32 = 4;
-pub const PROG_MMAP_FILE: u32 = 5;
-pub const PROG_UNIX_CONNECT: u32 = 6;
+pub const PROG_MMAP_FILE: u32 = 4;
+pub const PROG_UNIX_CONNECT: u32 = 5;
 /// Sized to 16 for headroom — avoids pin-breaking changes when adding hooks.
 pub const ENFORCEMENT_COUNTER_ENTRIES: u32 = 16;
 
@@ -126,9 +125,8 @@ pub const HOOK_FILE_OPEN: u8 = 0;
 pub const HOOK_BPRM_CHECK: u8 = 1;
 pub const HOOK_PTRACE_CHECK: u8 = 2;
 pub const HOOK_TASK_KILL: u8 = 3;
-pub const HOOK_CGROUP_ATTACH: u8 = 4;
-pub const HOOK_MMAP_FILE: u8 = 5;
-pub const HOOK_UNIX_CONNECT: u8 = 6;
+pub const HOOK_MMAP_FILE: u8 = 4;
+pub const HOOK_UNIX_CONNECT: u8 = 5;
 
 // Decision constants for EnforcementEvent.
 /// Used in userspace display only — eBPF hooks never emit allow events.
@@ -140,7 +138,7 @@ pub const DECISION_DENY: u8 = 1;
 /// Fixed 48-byte struct. All hooks populate the common fields;
 /// hook-specific context goes in the `context` field:
 ///   - file_open / bprm_check: the denied inode number
-///   - cgroup_attach: the destination cgroup_id
+///   - unix_stream_connect: the peer cgroup_id
 ///   - ptrace / task_kill: 0 (target PID to be added later)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

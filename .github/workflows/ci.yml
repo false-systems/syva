@@ -113,3 +113,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  eval-build:
+    name: build eval crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build oracle
+        run: cargo build --manifest-path eval/oracle/Cargo.toml
+      - name: Build harness
+        run: cargo build --manifest-path eval/harness/Cargo.toml

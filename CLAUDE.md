@@ -32,6 +32,9 @@ cargo run -p xtask -- build-ebpf
 cargo run -p xtask -- ci
 ```
 
+`build-ebpf` builds the release eBPF object by default because that is the
+runtime artifact. Use `--debug` only for development.
+
 macOS uses Lima for Linux verification:
 
 ```bash
@@ -40,8 +43,14 @@ make lima-check
 make lima-shell
 ```
 
-`make lima-check` runs format check, workspace check, workspace tests, and eBPF
-object compilation in the `syva-dev` Lima VM.
+`make lima-check` runs format check, clippy, workspace check, workspace tests,
+eval crate builds, and eBPF object compilation in the `syva-dev` Lima VM.
+
+Privileged runtime evidence is separate:
+
+```bash
+sudo -E make verify-runtime
+```
 
 ## Active Crates
 
@@ -85,6 +94,9 @@ Container membership is tracked in `syva-core/src/membership.rs`. It records
 container ID, optional pod identity, cgroup ID, source adapter, generation, zone,
 and observed timestamp. It is idempotent, rejects stale generations, reports
 conflicts, and produces BPF map update intents.
+For `AttachContainer`, generation `0` means an ungenerated local update; it is
+not stale only because generated state already exists, and metadata-only
+reattach preserves the stored non-zero generation.
 For `DetachContainer`, generation `0` means "no generation guard" and detaches
 regardless of the stored generation; non-zero stale generations are refused with
 a response message.
@@ -109,6 +121,10 @@ Fail-open hook errors are degraded security, not harmless warnings.
 - Full BPF load/attach/runtime verification requires a privileged Linux host.
 - Lima covers Linux build/test/eBPF object compilation from macOS, not guaranteed
   runtime attachment.
+- Syva v0.2 supports six BPF-LSM hooks. Cgroup movement / zone escape
+  protection is not enforced through BPF-LSM because `cgroup_attach_task` is not
+  a BPF-LSM hook on supported kernels; implement that follow-up with a valid
+  cgroup BPF mechanism or another kernel-supported hook.
 - `/proc` and `/sys` coverage remains incomplete.
 - `INODE_ZONE_MAP` is keyed by inode only; `(dev, ino)` is still needed.
 - Kubernetes adapter status/finalizers/leader election are not implemented.

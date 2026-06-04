@@ -47,8 +47,9 @@ make lima-check
 cargo run -p xtask -- ci
 ```
 
-`xtask ci` runs format check, full workspace check, full workspace tests, and
-eBPF object compilation. No Postgres service is required.
+`xtask ci` runs format check, clippy, full workspace check, full workspace
+tests, eval crate builds, and eBPF object compilation. No Postgres service is
+required.
 
 ## Direct macOS checks
 
@@ -69,8 +70,13 @@ userspace workspace inside Ubuntu.
 **Workspace tests:** `cargo test --workspace` runs Linux userspace tests. Tests
 that require real BPF load/attach still need privileges and kernel support.
 
+**Eval compile verification:** `cargo run -p xtask -- eval-build` builds
+`eval/oracle` and `eval/harness` so release contract tests do not bitrot.
+
 **eBPF object build verification:** `cargo run -p xtask -- build-ebpf` builds
-the `syva-ebpf` object with nightly Rust, `rust-src`, and `bpf-linker`.
+the release `syva-ebpf` object with nightly Rust, `rust-src`, and
+`bpf-linker`. The release object is the runtime artifact; debug eBPF builds are
+development-only.
 The VM installs Ubuntu `linux-tools-*`; on some architectures `bpftool` is
 provided through those packages rather than a package literally named
 `bpftool`.
