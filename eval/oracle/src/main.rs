@@ -1245,6 +1245,25 @@ async fn case_043_allow_comm_unknown_zone_is_not_found() {
 }
 
 #[tokio::test]
+async fn case_050_deny_comm_unknown_zone_is_not_found() {
+    let mut c = require_core_or_skip!();
+    let name = zone_name("c050", "a");
+    let phantom = zone_name("c050", "missing");
+    register_zone(&mut c, &name, empty_policy())
+        .await
+        .expect("register");
+    let err = c
+        .deny_comm(DenyCommRequest {
+            zone_a: name.clone(),
+            zone_b: phantom,
+        })
+        .await
+        .expect_err("phantom deny must fail");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    remove_zone(&mut c, &name, false).await.ok();
+}
+
+#[tokio::test]
 async fn case_044_status_zones_active_matches_list_zones_len() {
     let mut c = require_core_or_skip!();
     let names = (0..3)
@@ -1408,6 +1427,7 @@ async fn case_049_list_zones_during_churn_returns_consistent_snapshots() {
 // case_047_register_zone_empty_name_is_invalid_argument
 // case_048_register_zone_path_traversal_name_is_invalid_argument
 // case_049_list_zones_during_churn_returns_consistent_snapshots
+// case_050_deny_comm_unknown_zone_is_not_found
 
 fn main() {
     // The oracle is test-only; `cargo run` is a no-op but prevents bin-target

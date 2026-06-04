@@ -121,6 +121,10 @@ message AllowCommRequest {
     string zone_b = 2;
     // Both directions are enforced atomically.
     // Adapter must ensure symmetry before calling.
+    //
+    // Public v0.2 contract: empty zone names return gRPC InvalidArgument;
+    // zone_a == zone_b is an idempotent no-op (ok=true); an unknown zone
+    // returns gRPC NotFound; a BPF/core failure returns gRPC Internal.
 }
 
 message AllowCommResponse {
@@ -130,6 +134,9 @@ message AllowCommResponse {
 message DenyCommRequest {
     string zone_a = 1;
     string zone_b = 2;
+    // Public v0.2 contract: empty zone names return gRPC InvalidArgument;
+    // an unknown zone returns gRPC NotFound; a BPF/core failure returns gRPC
+    // Internal.
 }
 
 message DenyCommResponse {

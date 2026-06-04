@@ -41,6 +41,22 @@ pub(crate) struct SyvaCoreService {
     pub(crate) start_time: Instant,
 }
 
+impl SyvaCoreService {
+    /// Return NotFound for the first zone that is not registered. Used by the
+    /// comm RPCs so an unknown zone is a client error, leaving any later ingest
+    /// failure as a genuine Internal (BPF/core) error.
+    #[allow(clippy::result_large_err)]
+    async fn ensure_zones_registered(&self, zone_a: &str, zone_b: &str) -> Result<(), Status> {
+        let registry = self.registry.read().await;
+        for zone in [zone_a, zone_b] {
+            if registry.zone_id(zone).is_none() {
+                return Err(Status::not_found(format!("zone '{zone}' not registered")));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[tonic::async_trait]
 impl SyvaCore for SyvaCoreService {
     async fn register_zone(
@@ -378,10 +394,15 @@ impl SyvaCore for SyvaCoreService {
             );
             return Ok(Response::new(AllowCommResponse { ok: true }));
         }
+        // Resolve unknown zones to NotFound here so the ingest error below can
+        // only be a BPF/core failure, which is Internal (and degraded security)
+        // rather than a client mistake.
+        self.ensure_zones_registered(&req.zone_a, &req.zone_b)
+            .await?;
 
         ingest::allow_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
             .await
-            .map_err(|error| Status::not_found(format!("failed to set allowed comms: {error}")))?;
+            .map_err(|error| Status::internal(format!("failed to set allowed comms: {error}")))?;
 
         tracing::info!(
             zone_a = req.zone_a,
@@ -401,6 +422,10 @@ impl SyvaCore for SyvaCoreService {
                 "both zone_a and zone_b are required",
             ));
         }
+        // Same split as allow_comm: unknown zones are NotFound, a failing ingest
+        // is an Internal BPF/core error.
+        self.ensure_zones_registered(&req.zone_a, &req.zone_b)
+            .await?;
 
         ingest::deny_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b)
             .await
