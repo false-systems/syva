@@ -41,6 +41,9 @@ static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
 static SELF_TEST_INODE: Array<SelfTestInodeResult> = Array::with_max_entries(1, 0);
 
 #[map]
+static SELF_TEST_INODE_TARGET: Array<u64> = Array::with_max_entries(1, 0);
+
+#[map]
 static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::with_max_entries(1, 0);
 
 #[map]
@@ -250,33 +253,36 @@ fn check_cross_zone_task_access(ctx: &LsmContext, hook: u8) -> Result<i32, i64> 
 
 #[inline(always)]
 unsafe fn maybe_run_self_test(ctx: &LsmContext) {
-    if let Some(existing) = SELF_TEST.get(0) {
-        if existing.helper_cgroup_id != 0 {
-            return;
-        }
-    }
-
-    // Cgroup offset self-test: compare BPF helper vs offset chain.
-    let helper_id = aya_ebpf::helpers::bpf_get_current_cgroup_id();
-    let task_ptr = aya_ebpf::helpers::bpf_get_current_task() as u64;
-    let offset_id = read_task_cgroup_id(task_ptr).unwrap_or(0);
-
-    let result = SelfTestResult {
-        helper_cgroup_id: helper_id,
-        offset_cgroup_id: offset_id,
+    let run_cgroup_self_test = match SELF_TEST.get(0) {
+        Some(existing) => existing.helper_cgroup_id == 0,
+        None => true,
     };
+    if run_cgroup_self_test {
+        // Cgroup offset self-test: compare BPF helper vs offset chain.
+        let helper_id = aya_ebpf::helpers::bpf_get_current_cgroup_id();
+        let task_ptr = aya_ebpf::helpers::bpf_get_current_task() as u64;
+        let offset_id = read_task_cgroup_id(task_ptr).unwrap_or(0);
 
-    if let Some(slot) = SELF_TEST.get_ptr_mut(0) {
-        *slot = result;
+        let result = SelfTestResult {
+            helper_cgroup_id: helper_id,
+            offset_cgroup_id: offset_id,
+        };
+
+        if let Some(slot) = SELF_TEST.get_ptr_mut(0) {
+            *slot = result;
+        }
     }
 
     // Inode offset self-test: derive inode via file->f_inode->i_ino chain.
     // Userspace will compare this against stat() of the same file.
     let file_ptr: u64 = ctx.arg(0);
     if let Ok(ino) = read_file_ino(file_ptr) {
-        let inode_result = SelfTestInodeResult { offset_ino: ino };
-        if let Some(slot) = SELF_TEST_INODE.get_ptr_mut(0) {
-            *slot = inode_result;
+        let target_ino = SELF_TEST_INODE_TARGET.get(0).copied().unwrap_or(0);
+        if target_ino == 0 || ino == target_ino {
+            let inode_result = SelfTestInodeResult { offset_ino: ino };
+            if let Some(slot) = SELF_TEST_INODE.get_ptr_mut(0) {
+                *slot = inode_result;
+            }
         }
     }
 }

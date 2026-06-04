@@ -23,7 +23,7 @@ eval-build:
 	cargo run -p xtask -- eval-build
 
 verify-runtime:
-	cargo run -p xtask -- verify-runtime
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-runtime
 
 macos-check:
 	cargo fmt --all -- --check

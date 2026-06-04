@@ -62,6 +62,7 @@ const MAP_NAMES: &[&str] = &[
     "ZONE_ALLOWED_COMMS",
     "SELF_TEST",
     "SELF_TEST_INODE",
+    "SELF_TEST_INODE_TARGET",
     "SELF_TEST_UNIX",
     "ENFORCEMENT_COUNTERS",
     "ENFORCEMENT_EVENTS",
@@ -332,16 +333,50 @@ impl EnforceEbpf {
     ///
     /// The file_open self-test writes the inode number derived via the offset
     /// chain. We compare it against the inode from stat() on the same file.
-    pub async fn verify_inode_self_test(&self) -> anyhow::Result<()> {
+    pub async fn verify_inode_self_test(&mut self) -> anyhow::Result<()> {
         use std::time::Duration;
 
-        // The self-test file was /proc/self/status (opened in verify_self_test).
-        // Get its expected inode via stat.
-        let expected_ino = std::fs::metadata("/proc/self/status")
+        let self_test_path = std::env::temp_dir().join(format!(
+            "syva-inode-self-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&self_test_path, b"syva inode self-test\n").map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create inode self-test file {}: {e}",
+                self_test_path.display()
+            )
+        })?;
+        let expected_ino = std::fs::metadata(&self_test_path)
             .map(|m| m.ino())
             .map_err(|e| {
-                anyhow::anyhow!("failed to stat /proc/self/status for inode self-test: {e}")
+                anyhow::anyhow!(
+                    "failed to stat inode self-test file {}: {e}",
+                    self_test_path.display()
+                )
             })?;
+
+        tokio::task::block_in_place(|| {
+            use aya::maps::Array;
+            let mut target = Array::<_, u64>::try_from(
+                self.bpf
+                    .map_mut("SELF_TEST_INODE_TARGET")
+                    .ok_or_else(|| anyhow::anyhow!("SELF_TEST_INODE_TARGET map not found"))?,
+            )?;
+            target.set(0, expected_ino, 0)?;
+            anyhow::Ok(())
+        })?;
+
+        let _file = std::fs::File::open(&self_test_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to open inode self-test file {}: {e}",
+                self_test_path.display()
+            )
+        })?;
+        let _ = std::fs::remove_file(&self_test_path);
 
         for attempt in 0..20 {
             let result = tokio::task::block_in_place(|| {
