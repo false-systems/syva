@@ -51,6 +51,7 @@ pub struct HealthState {
     /// Latest per-hook enforcement counter snapshot.
     /// Index matches `events::HOOK_NAMES`. Empty until first snapshot.
     pub hook_counters: Vec<HookCounters>,
+    pub hook_degraded_reasons: Vec<String>,
     pub membership_degraded: bool,
     pub membership_message: Option<String>,
 }
@@ -63,6 +64,7 @@ impl HealthState {
             containers_active: 0,
             start_time: Instant::now(),
             hook_counters: Vec::new(),
+            hook_degraded_reasons: Vec::new(),
             membership_degraded: false,
             membership_message: None,
         }
@@ -73,17 +75,32 @@ impl HealthState {
         self.membership_message = Some(message.into());
     }
 
+    pub fn update_hook_counters(&mut self, next: Vec<HookCounters>) {
+        let mut reasons = Vec::new();
+        for (idx, next_counter) in next.iter().enumerate() {
+            let previous = self.hook_counters.get(idx).cloned().unwrap_or_default();
+            let error_delta = next_counter.error.saturating_sub(previous.error);
+            let lost_delta = next_counter.lost.saturating_sub(previous.lost);
+            if error_delta > 0 || lost_delta > 0 {
+                let hook = crate::events::HOOK_NAMES
+                    .get(idx)
+                    .copied()
+                    .unwrap_or("unknown");
+                reasons.push(format!(
+                    "hook '{hook}' has recent error_delta={error_delta} lost_delta={lost_delta}"
+                ));
+            }
+        }
+        self.hook_counters = next;
+        self.hook_degraded_reasons = reasons;
+    }
+
     pub fn security_status(&self) -> SecurityStatus {
         if !self.attached {
             return SecurityStatus::Unsafe;
         }
 
-        if self.membership_degraded
-            || self
-                .hook_counters
-                .iter()
-                .any(|counter| counter.error > 0 || counter.lost > 0)
-        {
+        if self.membership_degraded || !self.hook_degraded_reasons.is_empty() {
             return SecurityStatus::Degraded;
         }
 
@@ -102,18 +119,7 @@ impl HealthState {
             reasons.push("membership reconciliation is degraded".to_string());
         }
 
-        for (idx, counters) in self.hook_counters.iter().enumerate() {
-            if counters.error > 0 || counters.lost > 0 {
-                let hook = crate::events::HOOK_NAMES
-                    .get(idx)
-                    .copied()
-                    .unwrap_or("unknown");
-                reasons.push(format!(
-                    "hook '{hook}' has error={} lost={} counters",
-                    counters.error, counters.lost
-                ));
-            }
-        }
+        reasons.extend(self.hook_degraded_reasons.iter().cloned());
 
         reasons
     }
@@ -270,6 +276,7 @@ mod tests {
             containers_active: containers,
             start_time: Instant::now(),
             hook_counters: Vec::new(),
+            hook_degraded_reasons: Vec::new(),
             membership_degraded: false,
             membership_message: None,
         }
@@ -296,12 +303,12 @@ mod tests {
     #[tokio::test]
     async fn healthz_returns_200_when_degraded() {
         let mut state = make_state(true, 3, 7);
-        state.hook_counters = vec![HookCounters {
+        state.update_hook_counters(vec![HookCounters {
             allow: 0,
             deny: 0,
             error: 1,
             lost: 0,
-        }];
+        }]);
         let response = healthz(State(shared(state))).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -335,18 +342,35 @@ mod tests {
     #[test]
     fn bpf_error_counter_moves_security_status_to_degraded() {
         let mut state = make_state(true, 4, 9);
-        state.hook_counters = vec![HookCounters {
+        state.update_hook_counters(vec![HookCounters {
+            allow: 0,
+            deny: 0,
+            error: 1,
+            lost: 0,
+        }]);
+
+        assert_eq!(state.security_status(), SecurityStatus::Degraded);
+        assert!(state
+            .degraded_reasons()
+            .iter()
+            .any(|reason| reason.contains("error_delta=1")));
+    }
+
+    #[test]
+    fn unchanged_error_counter_recovers_to_healthy() {
+        let mut state = make_state(true, 4, 9);
+        let snapshot = vec![HookCounters {
             allow: 0,
             deny: 0,
             error: 1,
             lost: 0,
         }];
 
+        state.update_hook_counters(snapshot.clone());
         assert_eq!(state.security_status(), SecurityStatus::Degraded);
-        assert!(state
-            .degraded_reasons()
-            .iter()
-            .any(|reason| reason.contains("error=1")));
+
+        state.update_hook_counters(snapshot);
+        assert_eq!(state.security_status(), SecurityStatus::Healthy);
     }
 
     #[test]

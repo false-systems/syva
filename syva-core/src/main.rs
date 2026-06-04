@@ -19,11 +19,12 @@ mod rpc;
 pub mod types;
 mod zone;
 
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -71,6 +72,15 @@ enum Commands {
 enum OutputFormat {
     Text,
     Json,
+}
+
+struct LocalCoreServerState {
+    registry: Arc<RwLock<zone::ZoneRegistry>>,
+    memberships: Arc<RwLock<membership::MembershipService>>,
+    container_updates: Arc<StdMutex<HashSet<String>>>,
+    ebpf: Arc<Mutex<ebpf::EnforceEbpf>>,
+    health: health::SharedHealth,
+    start_time: Instant,
 }
 
 #[tokio::main]
@@ -124,15 +134,20 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     // Create zone registry.
     let registry = Arc::new(RwLock::new(zone::ZoneRegistry::new()));
     let memberships = Arc::new(RwLock::new(membership::MembershipService::new()));
+    let container_updates = Arc::new(StdMutex::new(HashSet::new()));
     let ebpf = Arc::new(Mutex::new(mgr));
 
+    let local_server_state = LocalCoreServerState {
+        registry: registry.clone(),
+        memberships: memberships.clone(),
+        container_updates: container_updates.clone(),
+        ebpf: ebpf.clone(),
+        health: health_state.clone(),
+        start_time,
+    };
     let mut local_server_task = spawn_local_core_server(
         config.socket_path.clone(),
-        registry.clone(),
-        memberships.clone(),
-        ebpf.clone(),
-        health_state.clone(),
-        start_time,
+        local_server_state,
         cancel.clone(),
     )
     .await?;
@@ -182,7 +197,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
                                     lost: totals.lost,
                                 });
                             }
-                            monitor_health.write().await.hook_counters = hook_snapshot;
+                            monitor_health.write().await.update_hook_counters(hook_snapshot);
                         }
                         Err(e) => {
                             tracing::debug!(%e, "failed to read enforcement counters");
@@ -234,11 +249,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
 
 async fn spawn_local_core_server(
     socket_path: PathBuf,
-    registry: Arc<RwLock<zone::ZoneRegistry>>,
-    memberships: Arc<RwLock<membership::MembershipService>>,
-    ebpf: Arc<Mutex<ebpf::EnforceEbpf>>,
-    health: health::SharedHealth,
-    start_time: Instant,
+    state: LocalCoreServerState,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
     if socket_path.exists() {
@@ -265,11 +276,12 @@ async fn spawn_local_core_server(
     }
 
     let service = rpc::SyvaCoreService {
-        registry,
-        memberships,
-        ebpf,
-        health,
-        start_time,
+        registry: state.registry,
+        memberships: state.memberships,
+        container_updates: state.container_updates,
+        ebpf: state.ebpf,
+        health: state.health,
+        start_time: state.start_time,
     };
     let incoming = UnixListenerStream::new(listener);
     let shutdown = cancel.cancelled_owned();

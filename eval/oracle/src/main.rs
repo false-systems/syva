@@ -712,6 +712,11 @@ async fn case_009_attach_container_rejects_empty_container_id() {
             container_id: String::new(),
             zone_name: name.clone(),
             cgroup_id: 1,
+            pod_namespace: String::new(),
+            pod_name: String::new(),
+            pod_uid: String::new(),
+            source: String::new(),
+            generation: 0,
         })
         .await;
     // Empty ID is validated and returned as ok=false (not a gRPC error).

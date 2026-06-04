@@ -140,11 +140,7 @@ impl MembershipService {
                 };
             }
 
-            if existing.observation.pod == observation.pod
-                && existing.observation.source == observation.source
-                && existing.zone_id == zone_id
-                && existing.zone_type == zone_type
-            {
+            if existing.zone_id == zone_id && existing.zone_type == zone_type {
                 let applied = existing.applied;
                 self.by_container.insert(
                     observation.container_id.clone(),
@@ -197,10 +193,9 @@ impl MembershipService {
             };
         }
 
-        let existing = self
-            .by_container
-            .remove(container_id)
-            .expect("record exists after get");
+        let Some(existing) = self.by_container.remove(container_id) else {
+            return MembershipOutcome::NotFound;
+        };
         MembershipOutcome::Removed {
             intent: BpfMembershipIntent::Remove {
                 cgroup_id: existing.observation.cgroup_id,
@@ -329,6 +324,29 @@ mod tests {
     }
 
     #[test]
+    fn metadata_only_update_is_idempotent() {
+        let mut service = MembershipService::new();
+        let mut first = observation("container-a", "web", 1);
+        first.pod = None;
+        first.source = MembershipSource::LocalGrpc;
+        service.observe_upsert(first, 7, ZoneType::NonGlobal);
+        service.mark_applied("container-a");
+
+        let outcome =
+            service.observe_upsert(observation("container-a", "web", 2), 7, ZoneType::NonGlobal);
+
+        assert!(matches!(outcome, MembershipOutcome::Unchanged { .. }));
+        let record = service.resolve_container("container-a").unwrap();
+        assert_eq!(record.observation.pod.as_ref().unwrap().uid, "pod-uid");
+        assert_eq!(
+            record.observation.source,
+            MembershipSource::KubernetesAdapter
+        );
+        assert!(record.applied);
+        assert_eq!(service.list().count(), 1);
+    }
+
+    #[test]
     fn stale_update_is_ignored() {
         let mut service = MembershipService::new();
         service.observe_upsert(
@@ -385,6 +403,41 @@ mod tests {
             }
         );
         assert!(service.resolve_container("container-a").is_none());
+    }
+
+    #[test]
+    fn delete_without_generation_ignores_existing_generation() {
+        let mut service = MembershipService::new();
+        service.observe_upsert(
+            observation("container-a", "web", 10),
+            7,
+            ZoneType::NonGlobal,
+        );
+
+        let outcome = service.remove("container-a", None);
+
+        assert!(matches!(outcome, MembershipOutcome::Removed { .. }));
+        assert!(service.resolve_container("container-a").is_none());
+    }
+
+    #[test]
+    fn stale_delete_is_rejected_when_generation_is_provided() {
+        let mut service = MembershipService::new();
+        service.observe_upsert(
+            observation("container-a", "web", 10),
+            7,
+            ZoneType::NonGlobal,
+        );
+
+        let outcome = service.remove("container-a", Some(9));
+
+        assert_eq!(
+            outcome,
+            MembershipOutcome::Stale {
+                existing_generation: 10,
+            }
+        );
+        assert!(service.resolve_container("container-a").is_some());
     }
 
     #[test]

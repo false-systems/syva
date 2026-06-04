@@ -79,6 +79,8 @@ Missing BPF attachment is `unsafe` and returns an unhealthy readiness status.
 Membership updates are idempotent and generation-aware. Stale updates are
 ignored, conflicting zone assignments are reported, and successful observations
 produce explicit BPF map update intents.
+For detach, generation `0` means the caller does not have a source generation
+and the container is detached regardless of the stored generation.
 
 The automatic file and Kubernetes pod/container watcher integration is not
 finished in this round. Those adapters reconcile zones, host paths, and

@@ -85,6 +85,9 @@ Container membership is tracked in `syva-core/src/membership.rs`. It records
 container ID, optional pod identity, cgroup ID, source adapter, generation, zone,
 and observed timestamp. It is idempotent, rejects stale generations, reports
 conflicts, and produces BPF map update intents.
+For `DetachContainer`, generation `0` means "no generation guard" and detaches
+regardless of the stored generation; non-zero stale generations are refused with
+a response message.
 
 The adapters currently reconcile zones, host paths, and communication policy.
 Automatic pod/container watcher integration still needs to call
