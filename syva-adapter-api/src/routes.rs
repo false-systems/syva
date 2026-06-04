@@ -10,35 +10,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 use syva_core_client::syva_core::{
     ListZonesRequest, RegisterZoneRequest, RemoveZoneRequest, ZonePolicy, ZoneSummary,
 };
-use syva_cp_client::{CpClient, CpClientConfig, CreateZoneArgs, DeleteZoneArgs, UpdateZoneArgs};
-use tracing::warn;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
-    mode: ClientMode,
-}
-
-#[derive(Clone)]
-enum ClientMode {
-    Cp {
-        client: CpClient,
-        team_id: Uuid,
-    },
-    Core {
-        client: syva_core_client::SyvaCoreClient,
-    },
+    client: syva_core_client::SyvaCoreClient,
 }
 
 pub struct Config {
     pub listen: SocketAddr,
-    pub cp_endpoint: Option<String>,
-    pub core_socket: Option<PathBuf>,
-    pub team_id: Option<Uuid>,
+    pub core_socket: PathBuf,
 }
 
 #[derive(Debug)]
@@ -55,16 +38,12 @@ struct ErrorBody {
 #[derive(Deserialize)]
 pub struct CreateZoneBody {
     pub name: String,
-    pub display_name: Option<String>,
     pub policy_json: JsonValue,
-    pub selector_json: Option<JsonValue>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateZoneBody {
-    pub if_version: i64,
     pub policy_json: Option<JsonValue>,
-    pub selector_json: Option<JsonValue>,
 }
 
 #[derive(Deserialize)]
@@ -126,27 +105,8 @@ pub struct HealthOut {
 }
 
 pub async fn serve(config: Config) -> Result<()> {
-    let state = match (&config.cp_endpoint, &config.core_socket) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("--cp-endpoint and --core-socket are mutually exclusive")
-        }
-        (None, None) => anyhow::bail!("exactly one of --cp-endpoint or --core-socket is required"),
-        (Some(endpoint), None) => {
-            let team_id = config
-                .team_id
-                .context("--team-id is required when using --cp-endpoint")?;
-            AppState {
-                mode: ClientMode::Cp {
-                    client: connect_with_retry(endpoint).await,
-                    team_id,
-                },
-            }
-        }
-        (None, Some(socket_path)) => AppState {
-            mode: ClientMode::Core {
-                client: syva_core_client::connect_unix_socket_with_retry(socket_path.clone()).await,
-            },
-        },
+    let state = AppState {
+        client: syva_core_client::connect_unix_socket_with_retry(config.core_socket.clone()).await,
     };
     let app = router(state);
 
@@ -170,136 +130,63 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn connect_with_retry(endpoint: &str) -> CpClient {
-    let mut backoff = Duration::from_millis(250);
-    let max_backoff = Duration::from_secs(30);
-
-    loop {
-        match CpClient::connect(CpClientConfig {
-            endpoint: endpoint.to_string(),
-            ..Default::default()
-        })
-        .await
-        {
-            Ok(client) => return client,
-            Err(error) => {
-                warn!(
-                    endpoint,
-                    error = %error,
-                    backoff_ms = backoff.as_millis(),
-                    "could not connect to syva-cp; retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-            }
-        }
-    }
-}
-
 pub async fn create_zone(
     State(state): State<AppState>,
     Json(body): Json<CreateZoneBody>,
 ) -> Result<(StatusCode, Json<CreateZoneOut>), ApiError> {
-    match state.mode {
-        ClientMode::Cp { client, team_id } => {
-            let output = client
-                .create_zone(CreateZoneArgs {
-                    team_id,
-                    name: body.name,
-                    display_name: body.display_name,
-                    policy_json: body.policy_json,
-                    summary_json: None,
-                    selector_json: body.selector_json,
-                    metadata_json: None,
-                })
-                .await
-                .map_err(ApiError::from_cp)?;
+    let mut client = state.client;
+    let response = client
+        .register_zone(core_register_request(&body.name, body.policy_json)?)
+        .await
+        .map_err(ApiError::from_core)?
+        .into_inner();
 
-            Ok((
-                StatusCode::CREATED,
-                Json(CreateZoneOut {
-                    zone_id: output.zone_id.to_string(),
-                    policy_id: output.policy_id.to_string(),
-                    version: output.version,
-                }),
-            ))
-        }
-        ClientMode::Core { mut client } => {
-            let response = client
-                .register_zone(core_register_request(&body.name, body.policy_json)?)
-                .await
-                .map_err(ApiError::from_core)?
-                .into_inner();
-
-            Ok((
-                StatusCode::CREATED,
-                Json(CreateZoneOut {
-                    zone_id: response.zone_id.to_string(),
-                    policy_id: String::new(),
-                    version: 0,
-                }),
-            ))
-        }
-    }
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateZoneOut {
+            zone_id: response.zone_id.to_string(),
+            policy_id: String::new(),
+            version: 0,
+        }),
+    ))
 }
 
 pub async fn list_zones(
     State(state): State<AppState>,
     Query(query): Query<ListZonesQuery>,
 ) -> Result<Json<Vec<ZoneOut>>, ApiError> {
-    match state.mode {
-        ClientMode::Cp { client, team_id } => {
-            let zones = client
-                .list_zones(team_id, query.status.as_deref(), query.limit.unwrap_or(100))
-                .await
-                .map_err(ApiError::from_cp)?;
-            Ok(Json(zones.into_iter().map(zone_to_out).collect()))
-        }
-        ClientMode::Core { mut client } => {
-            let mut zones = client
-                .list_zones(ListZonesRequest {})
-                .await
-                .map_err(ApiError::from_core)?
-                .into_inner()
-                .zones;
-            if let Some(status) = query.status {
-                zones.retain(|zone| zone.state == status);
-            }
-            let limit = query.limit.unwrap_or(100).max(0);
-            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-            zones.truncate(limit);
-            Ok(Json(zones.into_iter().map(core_zone_to_out).collect()))
-        }
+    let mut client = state.client;
+    let mut zones = client
+        .list_zones(ListZonesRequest {})
+        .await
+        .map_err(ApiError::from_core)?
+        .into_inner()
+        .zones;
+    if let Some(status) = query.status {
+        zones.retain(|zone| zone.state == status);
     }
+    let limit = query.limit.unwrap_or(100).max(0);
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    zones.truncate(limit);
+    Ok(Json(zones.into_iter().map(core_zone_to_out).collect()))
 }
 
 pub async fn get_zone(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ZoneOut>, ApiError> {
-    match state.mode {
-        ClientMode::Cp { client, team_id } => {
-            let zone = client
-                .get_zone_by_name(team_id, &name)
-                .await
-                .map_err(ApiError::from_cp)?
-                .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
-            Ok(Json(zone_to_out(zone)))
-        }
-        ClientMode::Core { mut client } => {
-            let zones = client
-                .list_zones(ListZonesRequest {})
-                .await
-                .map_err(ApiError::from_core)?
-                .into_inner()
-                .zones;
-            let zone = zones
-                .into_iter()
-                .find(|zone| zone.name == name)
-                .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
-            Ok(Json(core_zone_to_out(zone)))
-        }
-    }
+    let mut client = state.client;
+    let zones = client
+        .list_zones(ListZonesRequest {})
+        .await
+        .map_err(ApiError::from_core)?
+        .into_inner()
+        .zones;
+    let zone = zones
+        .into_iter()
+        .find(|zone| zone.name == name)
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
+    Ok(Json(core_zone_to_out(zone)))
 }
 
 pub async fn update_zone(
@@ -307,110 +194,43 @@ pub async fn update_zone(
     Path(name): Path<String>,
     Json(body): Json<UpdateZoneBody>,
 ) -> Result<Json<ZoneOut>, ApiError> {
-    match state.mode {
-        ClientMode::Cp { client, team_id } => {
-            let snapshot = client
-                .get_zone_by_name(team_id, &name)
-                .await
-                .map_err(ApiError::from_cp)?
-                .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
-
-            client
-                .update_zone(UpdateZoneArgs {
-                    zone_id: snapshot.zone_id,
-                    if_version: body.if_version,
-                    policy_json: body.policy_json,
-                    selector_json: body.selector_json,
-                    metadata_json: None,
-                })
-                .await
-                .map_err(ApiError::from_cp)?;
-
-            let refreshed = client
-                .get_zone_by_name(team_id, &name)
-                .await
-                .map_err(ApiError::from_cp)?
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("zone '{name}' not found after update"))
-                })?;
-            Ok(Json(zone_to_out(refreshed)))
-        }
-        ClientMode::Core { mut client } => {
-            if let Some(policy_json) = body.policy_json {
-                client
-                    .register_zone(core_register_request(&name, policy_json)?)
-                    .await
-                    .map_err(ApiError::from_core)?;
-            }
-            let zones = client
-                .list_zones(ListZonesRequest {})
-                .await
-                .map_err(ApiError::from_core)?
-                .into_inner()
-                .zones;
-            let zone = zones
-                .into_iter()
-                .find(|zone| zone.name == name)
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("zone '{name}' not found after update"))
-                })?;
-            Ok(Json(core_zone_to_out(zone)))
-        }
+    let mut client = state.client;
+    if let Some(policy_json) = body.policy_json {
+        client
+            .register_zone(core_register_request(&name, policy_json)?)
+            .await
+            .map_err(ApiError::from_core)?;
     }
+    let zones = client
+        .list_zones(ListZonesRequest {})
+        .await
+        .map_err(ApiError::from_core)?
+        .into_inner()
+        .zones;
+    let zone = zones
+        .into_iter()
+        .find(|zone| zone.name == name)
+        .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found after update")))?;
+    Ok(Json(core_zone_to_out(zone)))
 }
 
 pub async fn delete_zone(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    match state.mode {
-        ClientMode::Cp { client, team_id } => {
-            let snapshot = client
-                .get_zone_by_name(team_id, &name)
-                .await
-                .map_err(ApiError::from_cp)?
-                .ok_or_else(|| ApiError::not_found(format!("zone '{name}' not found")))?;
-
-            client
-                .delete_zone(DeleteZoneArgs {
-                    zone_id: snapshot.zone_id,
-                    if_version: snapshot.version,
-                    drain: true,
-                })
-                .await
-                .map_err(ApiError::from_cp)?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        ClientMode::Core { mut client } => {
-            client
-                .remove_zone(RemoveZoneRequest {
-                    zone_name: name,
-                    drain: true,
-                })
-                .await
-                .map_err(ApiError::from_core)?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-    }
+    let mut client = state.client;
+    client
+        .remove_zone(RemoveZoneRequest {
+            zone_name: name,
+            drain: true,
+        })
+        .await
+        .map_err(ApiError::from_core)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn healthz() -> Json<HealthOut> {
     Json(HealthOut { ok: true })
-}
-
-fn zone_to_out(zone: syva_cp_client::ZoneSnapshot) -> ZoneOut {
-    ZoneOut {
-        zone_id: zone.zone_id.to_string(),
-        team_id: zone.team_id.to_string(),
-        name: zone.name,
-        display_name: zone.display_name,
-        status: zone.status,
-        version: zone.version,
-        current_policy_id: zone.current_policy_id.map(|id| id.to_string()),
-        current_policy_json: zone.current_policy_json,
-        selector_json: zone.selector_json,
-        metadata_json: zone.metadata_json,
-    }
 }
 
 fn core_zone_to_out(zone: ZoneSummary) -> ZoneOut {
@@ -463,32 +283,6 @@ impl ApiError {
         }
     }
 
-    fn from_cp(error: syva_cp_client::CpClientError) -> Self {
-        let status = match &error {
-            syva_cp_client::CpClientError::Grpc(grpc) => match grpc.code() {
-                tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
-                tonic::Code::NotFound => StatusCode::NOT_FOUND,
-                tonic::Code::AlreadyExists
-                | tonic::Code::FailedPrecondition
-                | tonic::Code::Aborted => StatusCode::CONFLICT,
-                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-                _ => StatusCode::BAD_GATEWAY,
-            },
-            syva_cp_client::CpClientError::InvalidEndpoint(_)
-            | syva_cp_client::CpClientError::Serde(_)
-            | syva_cp_client::CpClientError::Internal(_) => StatusCode::BAD_GATEWAY,
-            syva_cp_client::CpClientError::Connection(_) => StatusCode::SERVICE_UNAVAILABLE,
-            syva_cp_client::CpClientError::NotRegistered => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-
-        Self {
-            status,
-            message: error.to_string(),
-        }
-    }
-
     fn from_core(error: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
@@ -517,25 +311,17 @@ mod tests {
     fn create_zone_body_deserializes() {
         let json = r#"{
             "name":"web",
-            "display_name":"Web",
-            "policy_json":{"host_paths":["/data"]},
-            "selector_json":{"all_nodes":true}
+            "policy_json":{"host_paths":["/data"]}
         }"#;
         let body: CreateZoneBody = serde_json::from_str(json).unwrap();
         assert_eq!(body.name, "web");
-        assert_eq!(body.display_name.as_deref(), Some("Web"));
         assert_eq!(body.policy_json["host_paths"], serde_json::json!(["/data"]));
-        assert_eq!(
-            body.selector_json.unwrap()["all_nodes"],
-            serde_json::json!(true)
-        );
     }
 
     #[test]
     fn update_zone_body_deserializes() {
-        let json = r#"{"if_version":7,"policy_json":{"allow_ptrace":true}}"#;
+        let json = r#"{"policy_json":{"allow_ptrace":true}}"#;
         let body: UpdateZoneBody = serde_json::from_str(json).unwrap();
-        assert_eq!(body.if_version, 7);
         assert_eq!(
             body.policy_json.unwrap()["allow_ptrace"],
             serde_json::json!(true)

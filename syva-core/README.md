@@ -1,24 +1,25 @@
 # syva-core
 
-Kernel enforcement engine for Syva. After session 4b, `syva-core` has one
-ingestion path only: it connects to `syva-cp`, registers as a node, subscribes
-to `NodeAssignmentUpdate`, and reconciles its BPF maps to the desired state.
+`syva-core` is the node-local Linux/eBPF enforcement engine. It loads and
+attaches Syva's eBPF LSM programs, owns the BPF maps, runs startup self-tests,
+serves health/metrics, and exposes the local `syva.core.v1` Unix-socket API.
 
-## CP Mode
-
-Start:
+Start on Linux with BPF privileges:
 
 ```bash
-syva-core \
-    --cp-endpoint http://syva-cp.cluster.local:50051 \
-    --node-name "$(hostname)" \
-    --node-labels "tier=prod,region=eu" \
-    --fingerprint-path /etc/machine-id \
-    --node-id-path /var/lib/syva/node-id
+syva-core --socket-path /run/syva/syva-core.sock
 ```
 
-The node ID is persisted to `--node-id-path` so restarts appear as
-re-registration of the same node rather than fresh registration.
+Adapters connect to that socket and call `RegisterZone`, `RegisterHostPath`,
+`AllowComm`, `AttachContainer`, and related RPCs. The core does not know about
+teams, clusters, or an external control plane.
 
-There is no local adapter-facing gRPC surface anymore. Adapters now push zones
-to `syva-cp` directly.
+Health states:
+
+- `healthy`: BPF is attached and no active degradation is known.
+- `degraded`: enforcement is active but confidence is reduced, for example
+  fail-open hook counters or membership conflicts.
+- `unsafe`: BPF is not attached or startup self-tests failed.
+
+Membership reconciliation lives in `src/membership.rs` and is idempotent,
+generation-aware, conflict-aware, and explicit about BPF map update intent.

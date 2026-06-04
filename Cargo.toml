@@ -3,14 +3,11 @@ resolver = "2"
 members = [
     "syva-proto",
     "syva-core-client",
-    "syva-cp-client",
     "syva-core",
-    "syva-cp",
     "syva-adapter-file",
     "syva-adapter-k8s",
     "syva-adapter-api",
     "syva-ebpf-common",
-    "syva",
     "xtask",
 ]
 

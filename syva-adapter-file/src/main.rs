@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(name = "syva-file", version)]
@@ -15,17 +14,13 @@ struct Cli {
     )]
     policy_dir: PathBuf,
 
-    /// syva-cp gRPC endpoint.
-    #[arg(long, env = "SYVA_CP_ENDPOINT", conflicts_with = "core_socket")]
-    cp_endpoint: Option<String>,
-
     /// Local syva-core Unix socket.
-    #[arg(long, env = "SYVA_CORE_SOCKET", conflicts_with = "cp_endpoint")]
-    core_socket: Option<PathBuf>,
-
-    /// Team UUID this adapter manages zones for.
-    #[arg(long, env = "SYVA_TEAM_ID")]
-    team_id: Option<Uuid>,
+    #[arg(
+        long,
+        env = "SYVA_CORE_SOCKET",
+        default_value = "/run/syva/syva-core.sock"
+    )]
+    core_socket: PathBuf,
 
     /// Reconcile interval in seconds.
     #[arg(long, env = "SYVA_RECONCILE_SECS", default_value = "5")]
@@ -37,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Validate the TOML files in --policy-dir without connecting to syva-cp.
+    /// Validate the TOML files in --policy-dir without connecting to syva-core.
     Verify,
 }
 
@@ -58,9 +53,7 @@ async fn main() -> Result<()> {
 
     syva_file::run::run(syva_file::run::Config {
         policy_dir: cli.policy_dir,
-        cp_endpoint: cli.cp_endpoint,
         core_socket: cli.core_socket,
-        team_id: cli.team_id,
         reconcile_interval: std::time::Duration::from_secs(cli.reconcile_secs),
     })
     .await

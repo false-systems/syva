@@ -1,12 +1,12 @@
-id: case_017_file_adapter_rejects_missing_target_flag
-description: File adapter defaults to the local syva-core socket.
+id: case_037_api_rejects_cp_endpoint_flag
+description: API adapter rejects the removed --cp-endpoint flag.
 timeout_secs: 10
 spec: |
-  syva-file defaults to /run/syva/syva-core.sock when --core-socket is omitted.
-  Missing target flags are no longer an error.
-source: CLAUDE.md:Architecture / syva-adapter-file and canonical policy shape
+  syva-api no longer supports control-plane mode. Passing --cp-endpoint exits
+  non-zero quickly and stderr names the unsupported flag.
+source: CLAUDE.md:Architecture / syva-adapter-api and gRPC API
 requirement: |
-  File adapter has a default local-core target.
+  API adapter rejects --cp-endpoint.
 observable: |
   The oracle observes only public behavior: syva.core.v1 RPCs, documented
   adapter process exit behavior, adapter-visible filesystem input, or HTTP

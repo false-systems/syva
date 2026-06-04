@@ -1,6 +1,4 @@
-# syva v0.2 — Legacy local-socket deployment
-# Historical reference only. Session 4b removed syva-core's local gRPC surface.
-# For current deployments, use deploy/v0.3/daemonset-cp-mode.yaml instead.
+# syva v0.2 — local core + file adapter deployment
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -53,7 +51,7 @@ spec:
         - name: syva-core
           image: ghcr.io/false-systems/syva-core:0.2.0
           args:
-            - --socket-path
+            - --core-socket
             - /run/syva/syva-core.sock
           ports:
             - name: health

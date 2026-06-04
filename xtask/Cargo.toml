@@ -7,6 +7,3 @@ license = "Apache-2.0"
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
-# Write-discipline lint dependencies (cheap, xtask is never shipped).
-regex = "1"
-walkdir = "2"

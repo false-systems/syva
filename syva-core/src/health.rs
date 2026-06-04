@@ -1,7 +1,7 @@
 //! Health and metrics HTTP server.
 //!
 //! Two routes:
-//! - GET /healthz — readiness check (200 OK when BPF attached, 503 otherwise)
+//! - GET /healthz — readiness check and enforcement security status
 //! - GET /metrics — Prometheus text format (agent-level gauges)
 
 use std::net::SocketAddr;
@@ -25,6 +25,23 @@ pub struct HookCounters {
     pub lost: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityStatus {
+    Healthy,
+    Degraded,
+    Unsafe,
+}
+
+impl SecurityStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unsafe => "unsafe",
+        }
+    }
+}
+
 /// Shared health state, written by the main loop, read by HTTP handlers.
 pub struct HealthState {
     pub attached: bool,
@@ -34,6 +51,9 @@ pub struct HealthState {
     /// Latest per-hook enforcement counter snapshot.
     /// Index matches `events::HOOK_NAMES`. Empty until first snapshot.
     pub hook_counters: Vec<HookCounters>,
+    pub hook_degraded_reasons: Vec<String>,
+    pub membership_degraded: bool,
+    pub membership_message: Option<String>,
 }
 
 impl HealthState {
@@ -44,7 +64,64 @@ impl HealthState {
             containers_active: 0,
             start_time: Instant::now(),
             hook_counters: Vec::new(),
+            hook_degraded_reasons: Vec::new(),
+            membership_degraded: false,
+            membership_message: None,
         }
+    }
+
+    pub fn mark_membership_degraded(&mut self, message: impl Into<String>) {
+        self.membership_degraded = true;
+        self.membership_message = Some(message.into());
+    }
+
+    pub fn update_hook_counters(&mut self, next: Vec<HookCounters>) {
+        let mut reasons = Vec::new();
+        for (idx, next_counter) in next.iter().enumerate() {
+            let previous = self.hook_counters.get(idx).cloned().unwrap_or_default();
+            let error_delta = next_counter.error.saturating_sub(previous.error);
+            let lost_delta = next_counter.lost.saturating_sub(previous.lost);
+            if error_delta > 0 || lost_delta > 0 {
+                let hook = crate::events::HOOK_NAMES
+                    .get(idx)
+                    .copied()
+                    .unwrap_or("unknown");
+                reasons.push(format!(
+                    "hook '{hook}' has recent error_delta={error_delta} lost_delta={lost_delta}"
+                ));
+            }
+        }
+        self.hook_counters = next;
+        self.hook_degraded_reasons = reasons;
+    }
+
+    pub fn security_status(&self) -> SecurityStatus {
+        if !self.attached {
+            return SecurityStatus::Unsafe;
+        }
+
+        if self.membership_degraded || !self.hook_degraded_reasons.is_empty() {
+            return SecurityStatus::Degraded;
+        }
+
+        SecurityStatus::Healthy
+    }
+
+    pub fn degraded_reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+
+        if !self.attached {
+            reasons.push("BPF programs are not attached".to_string());
+        }
+        if let Some(message) = self.membership_message.as_ref() {
+            reasons.push(message.clone());
+        } else if self.membership_degraded {
+            reasons.push("membership reconciliation is degraded".to_string());
+        }
+
+        reasons.extend(self.hook_degraded_reasons.iter().cloned());
+
+        reasons
     }
 }
 
@@ -59,7 +136,8 @@ pub async fn spawn_health_server(port: u16, state: SharedHealth) -> anyhow::Resu
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to bind health server on {addr}: {e}"))?;
     tracing::info!(%addr, "health server listening");
 
@@ -75,21 +153,23 @@ pub async fn spawn_health_server(port: u16, state: SharedHealth) -> anyhow::Resu
 async fn healthz(State(state): State<SharedHealth>) -> Response {
     let health = state.read().await;
 
-    // Healthy = BPF programs attached and self-tests passed.
-    // Zero zones loaded is valid (empty policy dir) — not a liveness failure.
-    let healthy = health.attached;
-    let status = if healthy { "ok" } else { "unavailable" };
+    let security_status = health.security_status();
     let uptime_secs = health.start_time.elapsed().as_secs();
 
     let body = serde_json::json!({
-        "status": status,
+        "status": security_status.as_str(),
         "attached": health.attached,
         "zones_loaded": health.zones_loaded,
         "containers_active": health.containers_active,
         "uptime_secs": uptime_secs,
+        "degraded_reasons": health.degraded_reasons(),
     });
 
-    let code = if healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if security_status == SecurityStatus::Unsafe {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
     (code, axum::Json(body)).into_response()
 }
 
@@ -106,7 +186,27 @@ pub fn render_metrics(health: &HealthState) -> String {
 
     out.push_str("# HELP syva_up Whether syva is attached and enforcing.\n");
     out.push_str("# TYPE syva_up gauge\n");
-    out.push_str(&format!("syva_up {}\n", if health.attached { 1 } else { 0 }));
+    out.push_str(&format!(
+        "syva_up {}\n",
+        if health.attached { 1 } else { 0 }
+    ));
+
+    out.push_str(
+        "# HELP syva_security_status Current enforcement security status as labeled gauges.\n",
+    );
+    out.push_str("# TYPE syva_security_status gauge\n");
+    let current = health.security_status();
+    for status in [
+        SecurityStatus::Healthy,
+        SecurityStatus::Degraded,
+        SecurityStatus::Unsafe,
+    ] {
+        out.push_str(&format!(
+            "syva_security_status{{status=\"{}\"}} {}\n",
+            status.as_str(),
+            if status == current { 1 } else { 0 }
+        ));
+    }
 
     out.push_str("# HELP syva_zones_loaded Number of policy zones loaded.\n");
     out.push_str("# TYPE syva_zones_loaded gauge\n");
@@ -114,23 +214,48 @@ pub fn render_metrics(health: &HealthState) -> String {
 
     out.push_str("# HELP syva_containers_active Number of containers under enforcement.\n");
     out.push_str("# TYPE syva_containers_active gauge\n");
-    out.push_str(&format!("syva_containers_active {}\n", health.containers_active));
+    out.push_str(&format!(
+        "syva_containers_active {}\n",
+        health.containers_active
+    ));
 
     out.push_str("# HELP syva_uptime_seconds Seconds since agent started.\n");
     out.push_str("# TYPE syva_uptime_seconds gauge\n");
-    out.push_str(&format!("syva_uptime_seconds {}\n", health.start_time.elapsed().as_secs()));
+    out.push_str(&format!(
+        "syva_uptime_seconds {}\n",
+        health.start_time.elapsed().as_secs()
+    ));
 
     // Per-hook enforcement counters — always emitted (default 0 before first
     // snapshot) so Prometheus series exist from the start.
     let hook_names = &crate::events::HOOK_NAMES;
     let metrics: [HookMetric; 4] = [
-        ("syva_hook_allow_total", "Events allowed per hook", |c: &HookCounters| c.allow),
-        ("syva_hook_deny_total", "Events denied per hook", |c: &HookCounters| c.deny),
-        ("syva_hook_error_total", "Hook errors (fail-open) per hook", |c: &HookCounters| c.error),
-        ("syva_hook_lost_total", "Ring buffer lost events per hook", |c: &HookCounters| c.lost),
+        (
+            "syva_hook_allow_total",
+            "Events allowed per hook",
+            |c: &HookCounters| c.allow,
+        ),
+        (
+            "syva_hook_deny_total",
+            "Events denied per hook",
+            |c: &HookCounters| c.deny,
+        ),
+        (
+            "syva_hook_error_total",
+            "Hook errors that fail open and degrade security per hook",
+            |c: &HookCounters| c.error,
+        ),
+        (
+            "syva_hook_lost_total",
+            "Ring buffer lost events per hook",
+            |c: &HookCounters| c.lost,
+        ),
     ];
     for (metric, help, extractor) in metrics {
-        out.push_str(&format!("# HELP {} {}\n# TYPE {} counter\n", metric, help, metric));
+        out.push_str(&format!(
+            "# HELP {} {}\n# TYPE {} counter\n",
+            metric, help, metric
+        ));
         for (i, name) in hook_names.iter().enumerate() {
             let val = health.hook_counters.get(i).map(extractor).unwrap_or(0);
             out.push_str(&format!("{}{{hook=\"{}\"}} {}\n", metric, name, val));
@@ -151,6 +276,9 @@ mod tests {
             containers_active: containers,
             start_time: Instant::now(),
             hook_counters: Vec::new(),
+            hook_degraded_reasons: Vec::new(),
+            membership_degraded: false,
+            membership_message: None,
         }
     }
 
@@ -169,6 +297,19 @@ mod tests {
     async fn healthz_returns_200_when_attached() {
         let state = shared(make_state(true, 3, 7));
         let response = healthz(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_200_when_degraded() {
+        let mut state = make_state(true, 3, 7);
+        state.update_hook_counters(vec![HookCounters {
+            allow: 0,
+            deny: 0,
+            error: 1,
+            lost: 0,
+        }]);
+        let response = healthz(State(shared(state))).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -195,14 +336,78 @@ mod tests {
         assert!(output.contains("syva_up 1\n"));
         assert!(output.contains("syva_zones_loaded 4\n"));
         assert!(output.contains("syva_containers_active 9\n"));
+        assert!(output.contains("syva_security_status{status=\"healthy\"} 1"));
+    }
+
+    #[test]
+    fn bpf_error_counter_moves_security_status_to_degraded() {
+        let mut state = make_state(true, 4, 9);
+        state.update_hook_counters(vec![HookCounters {
+            allow: 0,
+            deny: 0,
+            error: 1,
+            lost: 0,
+        }]);
+
+        assert_eq!(state.security_status(), SecurityStatus::Degraded);
+        assert!(state
+            .degraded_reasons()
+            .iter()
+            .any(|reason| reason.contains("error_delta=1")));
+    }
+
+    #[test]
+    fn unchanged_error_counter_recovers_to_healthy() {
+        let mut state = make_state(true, 4, 9);
+        let snapshot = vec![HookCounters {
+            allow: 0,
+            deny: 0,
+            error: 1,
+            lost: 0,
+        }];
+
+        state.update_hook_counters(snapshot.clone());
+        assert_eq!(state.security_status(), SecurityStatus::Degraded);
+
+        state.update_hook_counters(snapshot);
+        assert_eq!(state.security_status(), SecurityStatus::Healthy);
+    }
+
+    #[test]
+    fn membership_degradation_moves_security_status_to_degraded() {
+        let mut state = make_state(true, 4, 9);
+        state.mark_membership_degraded("membership backend stale");
+
+        assert_eq!(state.security_status(), SecurityStatus::Degraded);
+        assert_eq!(
+            state.degraded_reasons(),
+            vec!["membership backend stale".to_string()]
+        );
+    }
+
+    #[test]
+    fn unattached_is_unsafe() {
+        let state = make_state(false, 0, 0);
+
+        assert_eq!(state.security_status(), SecurityStatus::Unsafe);
     }
 
     #[test]
     fn render_metrics_includes_hook_counters() {
         let mut state = make_state(true, 2, 5);
         state.hook_counters = vec![
-            HookCounters { allow: 100, deny: 2, error: 0, lost: 0 },
-            HookCounters { allow: 50, deny: 0, error: 1, lost: 0 },
+            HookCounters {
+                allow: 100,
+                deny: 2,
+                error: 0,
+                lost: 0,
+            },
+            HookCounters {
+                allow: 50,
+                deny: 0,
+                error: 1,
+                lost: 0,
+            },
             HookCounters::default(),
             HookCounters::default(),
             HookCounters::default(),

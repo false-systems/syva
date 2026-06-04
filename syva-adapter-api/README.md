@@ -1,14 +1,13 @@
 # syva-adapter-api
 
-`syva-api` is a thin REST proxy in front of `syva-cp` `ZoneService`.
+`syva-api` is a thin REST proxy in front of the local `syva-core` Unix-socket API.
 
 Start:
 
 ```bash
 syva-api \
     --listen 0.0.0.0:8080 \
-    --cp-endpoint http://syva-cp.syva-system.svc:50051 \
-    --team-id 00000000-0000-0000-0000-000000000000
+    --core-socket /run/syva/syva-core.sock
 ```
 
 Endpoints:

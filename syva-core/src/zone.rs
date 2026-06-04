@@ -105,18 +105,22 @@ impl ZoneRegistry {
         if self.next_id >= syva_ebpf_common::MAX_ZONES {
             anyhow::bail!(
                 "zone ID {} exceeds BPF map limit (MAX_ZONES={})",
-                self.next_id, syva_ebpf_common::MAX_ZONES
+                self.next_id,
+                syva_ebpf_common::MAX_ZONES
             );
         }
         let zone_id = self.next_id;
         // Advance. If this was u32::MAX, next call will see next_id=0 and fail.
         self.next_id = self.next_id.wrapping_add(1);
-        self.zones.insert(zone_name.to_string(), ZoneEntry {
-            zone_id,
-            zone_type: ZoneType::NonGlobal,
-            state: ZoneState::Pending,
-            refcount: 0,
-        });
+        self.zones.insert(
+            zone_name.to_string(),
+            ZoneEntry {
+                zone_id,
+                zone_type: ZoneType::NonGlobal,
+                state: ZoneState::Pending,
+                refcount: 0,
+            },
+        );
         Ok(zone_id)
     }
 
@@ -138,7 +142,9 @@ impl ZoneRegistry {
             );
         }
 
-        let entry = self.zones.get_mut(zone_name)
+        let entry = self
+            .zones
+            .get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
 
         if entry.state == ZoneState::Draining {
@@ -149,11 +155,10 @@ impl ZoneRegistry {
         entry.state = ZoneState::Active;
         let zone_id = entry.zone_id;
 
-        self.cgroup_to_info.insert(cgroup_id, (container_id.to_string(), zone_name.to_string()));
-        self.container_to_info.insert(
-            container_id.to_string(),
-            (zone_name.to_string(), cgroup_id),
-        );
+        self.cgroup_to_info
+            .insert(cgroup_id, (container_id.to_string(), zone_name.to_string()));
+        self.container_to_info
+            .insert(container_id.to_string(), (zone_name.to_string(), cgroup_id));
 
         Ok(zone_id)
     }
@@ -168,7 +173,8 @@ impl ZoneRegistry {
         cgroup_id_hint: Option<u64>,
     ) -> Option<(u32, u64, ZoneTransition)> {
         // Look up container info. If not found, try the cgroup_id hint.
-        let (zone_name, cgroup_id) = if let Some(info) = self.container_to_info.remove(container_id) {
+        let (zone_name, cgroup_id) = if let Some(info) = self.container_to_info.remove(container_id)
+        {
             info
         } else if let Some(cid) = cgroup_id_hint {
             if let Some((cont_id, zone_name)) = self.cgroup_to_info.remove(&cid) {
@@ -204,7 +210,9 @@ impl ZoneRegistry {
     /// Mark a zone as draining. Policy was removed but containers remain.
     /// Returns Err if the zone is not registered.
     pub fn mark_draining(&mut self, zone_name: &str) -> anyhow::Result<()> {
-        let entry = self.zones.get_mut(zone_name)
+        let entry = self
+            .zones
+            .get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
         entry.state = ZoneState::Draining;
         Ok(())
@@ -214,10 +222,16 @@ impl ZoneRegistry {
     /// Used when a removed policy reappears during hot-reload.
     /// No-op if the zone is already Pending or Active.
     pub fn revive_draining(&mut self, zone_name: &str) -> anyhow::Result<u32> {
-        let entry = self.zones.get_mut(zone_name)
+        let entry = self
+            .zones
+            .get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
         if entry.state == ZoneState::Draining {
-            entry.state = if entry.refcount > 0 { ZoneState::Active } else { ZoneState::Pending };
+            entry.state = if entry.refcount > 0 {
+                ZoneState::Active
+            } else {
+                ZoneState::Pending
+            };
         }
         Ok(entry.zone_id)
     }
@@ -228,14 +242,20 @@ impl ZoneRegistry {
     /// time via `remove_zone_comms`).
     /// Returns the zone_id that was removed (it will never be reused).
     pub fn unregister_zone(&mut self, zone_name: &str) -> anyhow::Result<u32> {
-        let entry = self.zones.get(zone_name)
+        let entry = self
+            .zones
+            .get(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
         if entry.refcount > 0 {
-            anyhow::bail!("zone '{zone_name}' still has {} active containers", entry.refcount);
+            anyhow::bail!(
+                "zone '{zone_name}' still has {} active containers",
+                entry.refcount
+            );
         }
         let zone_id = entry.zone_id;
         self.zones.remove(zone_name);
-        self.allowed_comms.retain(|(a, b)| a != zone_name && b != zone_name);
+        self.allowed_comms
+            .retain(|(a, b)| a != zone_name && b != zone_name);
         Ok(zone_id)
     }
 
@@ -243,11 +263,16 @@ impl ZoneRegistry {
     /// Only valid for zones with refcount 0.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn unregister_zone_by_id(&mut self, zone_id: u32) -> anyhow::Result<()> {
-        let zone_name = self.zones.iter()
+        let zone_name = self
+            .zones
+            .iter()
             .find(|(_, e)| e.zone_id == zone_id)
             .map(|(name, _)| name.clone());
         match zone_name {
-            Some(name) => { self.unregister_zone(&name)?; Ok(()) }
+            Some(name) => {
+                self.unregister_zone(&name)?;
+                Ok(())
+            }
             None => anyhow::bail!("no zone with id {zone_id}"),
         }
     }
@@ -259,7 +284,9 @@ impl ZoneRegistry {
 
     /// Update the zone type for an already-registered zone.
     pub fn set_zone_type(&mut self, zone_name: &str, zone_type: ZoneType) -> anyhow::Result<()> {
-        let entry = self.zones.get_mut(zone_name)
+        let entry = self
+            .zones
+            .get_mut(zone_name)
             .ok_or_else(|| anyhow::anyhow!("zone '{zone_name}' is not registered"))?;
         entry.zone_type = zone_type;
         Ok(())
@@ -274,13 +301,17 @@ impl ZoneRegistry {
     /// All registered zone names and their IDs.
     #[allow(dead_code)]
     pub fn all_zones(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.zones.iter().map(|(name, entry)| (name.as_str(), entry.zone_id))
+        self.zones
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry.zone_id))
     }
 
     /// Full snapshot for ListZones — (name, zone_id, state, refcount).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn zones_summary(&self) -> impl Iterator<Item = (&str, u32, ZoneState, usize)> {
-        self.zones.iter().map(|(name, e)| (name.as_str(), e.zone_id, e.state, e.refcount))
+        self.zones
+            .iter()
+            .map(|(name, e)| (name.as_str(), e.zone_id, e.state, e.refcount))
     }
 
     /// Record an allowed cross-zone comm pair. Idempotent.
@@ -301,12 +332,12 @@ impl ZoneRegistry {
         &'a self,
         filter_zone: Option<&'a str>,
     ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
-        self.allowed_comms.iter().filter_map(move |(a, b)| {
-            match filter_zone {
+        self.allowed_comms
+            .iter()
+            .filter_map(move |(a, b)| match filter_zone {
                 Some(z) if a != z && b != z => None,
                 _ => Some((a.as_str(), b.as_str())),
-            }
-        })
+            })
     }
 
     /// Active container count for a zone.
@@ -565,6 +596,9 @@ mod tests {
 
         // next_id is now == MAX_ZONES → next registration must fail.
         let result = reg.register_zone("one-too-many");
-        assert!(result.is_err(), "expected registration past MAX_ZONES to fail");
+        assert!(
+            result.is_err(),
+            "expected registration past MAX_ZONES to fail"
+        );
     }
 }

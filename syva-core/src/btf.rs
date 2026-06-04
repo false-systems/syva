@@ -61,9 +61,11 @@ impl BtfData {
 
         let base = hdr_len;
         let section_range = |off: usize, len: usize| -> anyhow::Result<(usize, usize)> {
-            let start = base.checked_add(off)
+            let start = base
+                .checked_add(off)
                 .ok_or_else(|| anyhow::anyhow!("BTF section offset overflow"))?;
-            let end = start.checked_add(len)
+            let end = start
+                .checked_add(len)
                 .ok_or_else(|| anyhow::anyhow!("BTF section length overflow"))?;
             if end > data.len() {
                 anyhow::bail!("BTF section offsets exceed data length");
@@ -97,7 +99,8 @@ impl BtfData {
     /// Returns None if the struct or field is not found.
     pub fn struct_field_offset(&self, struct_name: &str, field_name: &str) -> Option<u32> {
         let members = self.find_struct_members(struct_name)?;
-        members.iter()
+        members
+            .iter()
             .find(|m| m.name == field_name)
             .map(|m| m.offset_bytes)
     }
@@ -108,9 +111,12 @@ impl BtfData {
         let mut pos = 0;
 
         while pos + 12 <= data.len() {
-            let name_off = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-            let info = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
-            let _size_or_type = u32::from_le_bytes([data[pos + 8], data[pos + 9], data[pos + 10], data[pos + 11]]);
+            let name_off =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let info =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
+            let _size_or_type =
+                u32::from_le_bytes([data[pos + 8], data[pos + 9], data[pos + 10], data[pos + 11]]);
 
             let kind = (info >> 24) & 0x1f;
             let vlen = (info & 0xffff) as usize;
@@ -128,9 +134,19 @@ impl BtfData {
                         if mpos + 12 > data.len() {
                             return None;
                         }
-                        let m_name_off = u32::from_le_bytes([data[mpos], data[mpos + 1], data[mpos + 2], data[mpos + 3]]);
+                        let m_name_off = u32::from_le_bytes([
+                            data[mpos],
+                            data[mpos + 1],
+                            data[mpos + 2],
+                            data[mpos + 3],
+                        ]);
                         // skip btf_type (4 bytes)
-                        let m_offset = u32::from_le_bytes([data[mpos + 8], data[mpos + 9], data[mpos + 10], data[mpos + 11]]);
+                        let m_offset = u32::from_le_bytes([
+                            data[mpos + 8],
+                            data[mpos + 9],
+                            data[mpos + 10],
+                            data[mpos + 11],
+                        ]);
 
                         // In BTF, btf_member.offset is always stored in bits.
                         // When kind_flag is set, the high 8 bits encode bitfield
@@ -138,7 +154,11 @@ impl BtfData {
                         let offset_bytes = if kind_flag != 0 {
                             (m_offset & 0x00ffffff) / 8
                         } else {
-                            debug_assert_eq!(m_offset % 8, 0, "non-bitfield member offset must be byte-aligned");
+                            debug_assert_eq!(
+                                m_offset % 8,
+                                0,
+                                "non-bitfield member offset must be byte-aligned"
+                            );
                             m_offset / 8
                         };
 
@@ -168,18 +188,18 @@ impl BtfData {
 ///   14=VAR 15=DATASEC 16=FLOAT 17=DECL_TAG 18=TYPE_TAG 19=ENUM64
 fn vlen_size(kind: u32, vlen: usize) -> usize {
     match kind {
-        1 => 4,                     // INT: 4-byte encoding
-        3 => 12,                    // ARRAY: fixed 12-byte btf_array descriptor
-        5 => vlen * 12,             // UNION: btf_member entries (same as STRUCT)
-        6 => vlen * 8,              // ENUM: 8 bytes per entry (name_off + val)
-        13 => vlen * 8,             // FUNC_PROTO: 8 bytes per btf_param (name_off + type)
-        14 => 4,                    // VAR: 4-byte linkage
-        15 => vlen * 12,            // DATASEC: 12 bytes per btf_var_secinfo
-        17 => 4,                    // DECL_TAG: 4-byte component_idx
-        19 => vlen * 12,            // ENUM64: 12 bytes per entry
-        _ => 0,                     // PTR(2), STRUCT(4) handled separately, FWD(7),
-                                    // TYPEDEF(8), VOLATILE(9), CONST(10), RESTRICT(11),
-                                    // FUNC(12), FLOAT(16), TYPE_TAG(18): no extra data
+        1 => 4,          // INT: 4-byte encoding
+        3 => 12,         // ARRAY: fixed 12-byte btf_array descriptor
+        5 => vlen * 12,  // UNION: btf_member entries (same as STRUCT)
+        6 => vlen * 8,   // ENUM: 8 bytes per entry (name_off + val)
+        13 => vlen * 8,  // FUNC_PROTO: 8 bytes per btf_param (name_off + type)
+        14 => 4,         // VAR: 4-byte linkage
+        15 => vlen * 12, // DATASEC: 12 bytes per btf_var_secinfo
+        17 => 4,         // DECL_TAG: 4-byte component_idx
+        19 => vlen * 12, // ENUM64: 12 bytes per entry
+        _ => 0,          // PTR(2), STRUCT(4) handled separately, FWD(7),
+                          // TYPEDEF(8), VOLATILE(9), CONST(10), RESTRICT(11),
+                          // FUNC(12), FLOAT(16), TYPE_TAG(18): no extra data
     }
 }
 

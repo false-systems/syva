@@ -23,7 +23,9 @@ impl MemoryLimit {
 
     fn checked_parse(n: &str, multiplier: u64) -> Result<u64, String> {
         let value = n.parse::<u64>().map_err(|e| e.to_string())?;
-        value.checked_mul(multiplier).ok_or_else(|| "memory limit too large".to_string())
+        value
+            .checked_mul(multiplier)
+            .ok_or_else(|| "memory limit too large".to_string())
     }
 
     fn parse(s: &str) -> Result<u64, String> {
@@ -164,7 +166,6 @@ impl ZonePolicy {
             );
         }
 
-
         // M5: Bound policy arrays to prevent one zone from exhausting BPF maps.
         if self.filesystem.host_paths.len() > 1000 {
             anyhow::bail!("zone {zone_name}: host_paths exceeds limit of 1000 entries");
@@ -173,7 +174,9 @@ impl ZonePolicy {
             anyhow::bail!("zone {zone_name}: allowed_zones exceeds limit of 100 entries");
         }
         if self.capabilities.allowed.len() > 41 {
-            anyhow::bail!("zone {zone_name}: capabilities.allowed exceeds maximum of 41 Linux capabilities");
+            anyhow::bail!(
+                "zone {zone_name}: capabilities.allowed exceeds maximum of 41 Linux capabilities"
+            );
         }
 
         Ok(())
@@ -303,7 +306,10 @@ mod tests {
 
     #[test]
     fn memory_limit_parse_ti() {
-        assert_eq!(MemoryLimit::parse("1Ti").unwrap(), 1024u64 * 1024 * 1024 * 1024);
+        assert_eq!(
+            MemoryLimit::parse("1Ti").unwrap(),
+            1024u64 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -335,7 +341,9 @@ mod tests {
     fn memory_limit_deserialize_string() {
         let toml_str = r#"memory_limit = "4Gi""#;
         #[derive(Deserialize)]
-        struct T { memory_limit: MemoryLimit }
+        struct T {
+            memory_limit: MemoryLimit,
+        }
         let t: T = toml::from_str(toml_str).unwrap();
         assert_eq!(t.memory_limit.bytes(), 4 * 1024 * 1024 * 1024);
     }
@@ -349,7 +357,9 @@ mod tests {
     fn memory_limit_deserialize_integer() {
         let toml_str = "memory_limit = 536870912";
         #[derive(Deserialize)]
-        struct T { memory_limit: MemoryLimit }
+        struct T {
+            memory_limit: MemoryLimit,
+        }
         let t: T = toml::from_str(toml_str).unwrap();
         assert_eq!(t.memory_limit.bytes(), 536870912);
     }
@@ -362,16 +372,30 @@ mod tests {
         let policy: ZonePolicy = toml::from_str(content).unwrap();
         assert_eq!(policy.resources.cpu_shares, 1024);
         assert_eq!(policy.network.mode, NetworkMode::Bridged);
-        assert_eq!(policy.resources.memory_limit.bytes(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(
+            policy.resources.memory_limit.bytes(),
+            4 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
     fn network_mode_lowercase_deserialize() {
         #[derive(Deserialize)]
-        struct T { mode: NetworkMode }
-        assert_eq!(toml::from_str::<T>("mode = \"bridged\"").unwrap().mode, NetworkMode::Bridged);
-        assert_eq!(toml::from_str::<T>("mode = \"isolated\"").unwrap().mode, NetworkMode::Isolated);
-        assert_eq!(toml::from_str::<T>("mode = \"host\"").unwrap().mode, NetworkMode::Host);
+        struct T {
+            mode: NetworkMode,
+        }
+        assert_eq!(
+            toml::from_str::<T>("mode = \"bridged\"").unwrap().mode,
+            NetworkMode::Bridged
+        );
+        assert_eq!(
+            toml::from_str::<T>("mode = \"isolated\"").unwrap().mode,
+            NetworkMode::Isolated
+        );
+        assert_eq!(
+            toml::from_str::<T>("mode = \"host\"").unwrap().mode,
+            NetworkMode::Host
+        );
     }
 
     #[test]
@@ -404,13 +428,18 @@ allowed = []
 deny = []
 "#;
         let result = toml::from_str::<ZonePolicy>(toml_str);
-        assert!(result.is_err(), "unknown field 'typo_field' should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field 'typo_field' should be rejected"
+        );
     }
 
     #[test]
     fn network_mode_rejects_pascalcase() {
         #[derive(Deserialize)]
-        struct T { _mode: NetworkMode }
+        struct T {
+            _mode: NetworkMode,
+        }
         assert!(toml::from_str::<T>("mode = \"Bridged\"").is_err());
     }
 }

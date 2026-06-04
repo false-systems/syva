@@ -3,21 +3,21 @@
 
 use aya_ebpf::{
     macros::{lsm, map},
-    maps::{Array, HashMap, PerCpuArray, ring_buf::RingBuf},
+    maps::{ring_buf::RingBuf, Array, HashMap, PerCpuArray},
     programs::LsmContext,
 };
 use syva_ebpf_common::{
-    EnforcementCounters, EnforcementEvent, SelfTestResult, SelfTestInodeResult,
-    SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY,
-    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
+    EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult,
+    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, ENFORCEMENT_COUNTER_ENTRIES,
+    MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
 };
 
-mod file_guard;
+mod cgroup_lock;
 mod exec_guard;
+mod file_guard;
+mod mmap_guard;
 mod ptrace_guard;
 mod signal_guard;
-mod cgroup_lock;
-mod mmap_guard;
 mod unix_guard;
 
 #[map]
@@ -27,10 +27,13 @@ static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::with_max_entries
 static ZONE_POLICY: Array<ZonePolicyKernel> = Array::with_max_entries(MAX_ZONES, 0);
 
 #[map]
+// Known limitation: this key is i_ino only, not (dev, ino), so distinct
+// filesystems can collide. Userspace docs track the required map-key upgrade.
 static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 1); // BPF_F_NO_PREALLOC
 
 #[map]
-static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
+static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
+    HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
 
 #[map]
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
@@ -49,7 +52,7 @@ static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
 static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0); // 4MB
 
 #[inline(always)]
-fn lookup_caller_zone(ctx: &LsmContext) -> Option<ZoneInfoKernel> {
+fn lookup_caller_zone(_ctx: &LsmContext) -> Option<ZoneInfoKernel> {
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
     unsafe { ZONE_MEMBERSHIP.get(&cgroup_id).copied() }
 }
@@ -114,13 +117,21 @@ mod offsets {
 
 #[inline(always)]
 unsafe fn read_task_cgroup_id(task_ptr: u64) -> Result<u64, i64> {
-    if task_ptr == 0 { return Err(-1); }
+    if task_ptr == 0 {
+        return Err(-1);
+    }
     let cgroups_ptr = read_kernel_u64(task_ptr, offsets::task_cgroups())?;
-    if cgroups_ptr == 0 { return Err(-1); }
+    if cgroups_ptr == 0 {
+        return Err(-1);
+    }
     let dfl_cgrp_ptr = read_kernel_u64(cgroups_ptr, offsets::css_set_dfl_cgrp())?;
-    if dfl_cgrp_ptr == 0 { return Err(-1); }
+    if dfl_cgrp_ptr == 0 {
+        return Err(-1);
+    }
     let kn_ptr = read_kernel_u64(dfl_cgrp_ptr, offsets::cgroup_kn())?;
-    if kn_ptr == 0 { return Err(-1); }
+    if kn_ptr == 0 {
+        return Err(-1);
+    }
     read_kernel_u64(kn_ptr, offsets::kernfs_node_id())
 }
 
@@ -134,32 +145,44 @@ unsafe fn lookup_task_zone(task_ptr: u64) -> Option<ZoneInfoKernel> {
 /// Chain: sock → sk_cgrp_data.cgroup → kn → id (reuses existing cgroup offsets).
 #[inline(always)]
 unsafe fn read_sock_cgroup_id(sock_ptr: u64) -> Result<u64, i64> {
-    if sock_ptr == 0 { return Err(-1); }
+    if sock_ptr == 0 {
+        return Err(-1);
+    }
     let cgrp_ptr = read_kernel_u64(sock_ptr, offsets::sock_cgrp_data_cgroup())?;
-    if cgrp_ptr == 0 { return Err(-1); }
+    if cgrp_ptr == 0 {
+        return Err(-1);
+    }
     let kn_ptr = read_kernel_u64(cgrp_ptr, offsets::cgroup_kn())?;
-    if kn_ptr == 0 { return Err(-1); }
+    if kn_ptr == 0 {
+        return Err(-1);
+    }
     read_kernel_u64(kn_ptr, offsets::kernfs_node_id())
 }
 
 #[inline(always)]
 unsafe fn read_file_ino(file_ptr: u64) -> Result<u64, i64> {
-    if file_ptr == 0 { return Err(-1); }
+    if file_ptr == 0 {
+        return Err(-1);
+    }
     let inode_ptr = read_kernel_u64(file_ptr, offsets::file_f_inode())?;
-    if inode_ptr == 0 { return Err(-1); }
+    if inode_ptr == 0 {
+        return Err(-1);
+    }
     read_kernel_u64(inode_ptr, offsets::inode_i_ino())
 }
 
 #[inline(always)]
 fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
-    if src_zone == dst_zone { return true; }
+    if src_zone == dst_zone {
+        return true;
+    }
     let key = ZoneCommKey { src_zone, dst_zone };
     unsafe { ZONE_ALLOWED_COMMS.get(&key).is_some() }
 }
 
 #[inline(always)]
 fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
-    let pid = (unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() } >> 32) as u32;
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
     let event = EnforcementEvent {
@@ -174,7 +197,7 @@ fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
         _reserved: [0; 2],
     };
 
-    if let Some(mut entry) = unsafe { ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) } {
+    if let Some(mut entry) = ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) {
         entry.write(event);
         entry.submit(0);
     } else {
@@ -186,7 +209,7 @@ fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
 /// Increment the lost event counter for a hook when ring buffer reserve fails.
 #[inline(always)]
 fn count_lost(hook: u8) {
-    if let Some(counters) = unsafe { ENFORCEMENT_COUNTERS.get_ptr_mut(hook as u32) } {
+    if let Some(counters) = ENFORCEMENT_COUNTERS.get_ptr_mut(hook as u32) {
         let c = unsafe { &mut *counters };
         c.lost += 1;
     }
@@ -204,7 +227,9 @@ fn check_cross_zone_task_access(ctx: &LsmContext, hook: u8) -> Result<i32, i64> 
     }
 
     let target_ptr: u64 = unsafe { ctx.arg(0) };
-    if target_ptr == 0 { return Ok(0); }
+    if target_ptr == 0 {
+        return Ok(0);
+    }
 
     let target = match unsafe { lookup_task_zone(target_ptr) } {
         Some(info) => info,
@@ -227,7 +252,9 @@ fn check_cross_zone_task_access(ctx: &LsmContext, hook: u8) -> Result<i32, i64> 
 #[inline(always)]
 unsafe fn maybe_run_self_test(ctx: &LsmContext) {
     if let Some(existing) = SELF_TEST.get(0) {
-        if existing.helper_cgroup_id != 0 { return; }
+        if existing.helper_cgroup_id != 0 {
+            return;
+        }
     }
 
     // Cgroup offset self-test: compare BPF helper vs offset chain.
@@ -257,7 +284,7 @@ unsafe fn maybe_run_self_test(ctx: &LsmContext) {
 
 #[inline(always)]
 fn count_decision(prog_idx: u32, allow: bool, is_error: bool) {
-    if let Some(counters) = unsafe { ENFORCEMENT_COUNTERS.get_ptr_mut(prog_idx) } {
+    if let Some(counters) = ENFORCEMENT_COUNTERS.get_ptr_mut(prog_idx) {
         let c = unsafe { &mut *counters };
         if is_error {
             c.error += 1;

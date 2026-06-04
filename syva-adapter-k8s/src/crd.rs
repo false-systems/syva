@@ -97,7 +97,8 @@ mod tests {
 
     #[test]
     fn spec_deserializes_minimal() {
-        let json = r#"{"filesystem":null,"network":null,"process":null,"selector":null,"zoneType":null}"#;
+        let json =
+            r#"{"filesystem":null,"network":null,"process":null,"selector":null,"zoneType":null}"#;
         let spec: SyvaZonePolicySpec = serde_json::from_str(json).unwrap();
         assert!(spec.filesystem.is_none());
     }
@@ -115,7 +116,11 @@ mod tests {
         assert_eq!(spec.filesystem.unwrap().host_paths, vec!["/data"]);
         assert!(spec.process.unwrap().allow_ptrace);
         assert_eq!(
-            spec.selector.unwrap().match_labels.get("tier").map(String::as_str),
+            spec.selector
+                .unwrap()
+                .match_labels
+                .get("tier")
+                .map(String::as_str),
             Some("prod")
         );
     }
