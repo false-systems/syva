@@ -40,8 +40,14 @@ make lima-check
 make lima-shell
 ```
 
-`make lima-check` runs format check, workspace check, workspace tests, and eBPF
-object compilation in the `syva-dev` Lima VM.
+`make lima-check` runs format check, clippy, workspace check, workspace tests,
+eval crate builds, and eBPF object compilation in the `syva-dev` Lima VM.
+
+Privileged runtime evidence is separate:
+
+```bash
+sudo -E make verify-runtime
+```
 
 ## Active Crates
 
@@ -85,6 +91,9 @@ Container membership is tracked in `syva-core/src/membership.rs`. It records
 container ID, optional pod identity, cgroup ID, source adapter, generation, zone,
 and observed timestamp. It is idempotent, rejects stale generations, reports
 conflicts, and produces BPF map update intents.
+For `AttachContainer`, generation `0` means an ungenerated local update; it is
+not stale only because generated state already exists, and metadata-only
+reattach preserves the stored non-zero generation.
 For `DetachContainer`, generation `0` means "no generation guard" and detaches
 regardless of the stored generation; non-zero stale generations are refused with
 a response message.

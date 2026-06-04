@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,6 +21,10 @@ enum Cli {
     Test,
     /// Run the Linux/eBPF compile check.
     LinuxBpfCheck,
+    /// Build eval/oracle and eval/harness so contract tests do not bitrot.
+    EvalBuild,
+    /// Run ignored privileged runtime verification tests.
+    VerifyRuntime,
     /// Run the standard active-project CI sequence.
     Ci,
 }
@@ -32,10 +37,24 @@ fn main() -> Result<()> {
         Cli::Check => run_root_command("cargo", &["check", "--workspace"]),
         Cli::Test => run_root_command("cargo", &["test", "--workspace"]),
         Cli::LinuxBpfCheck => build_ebpf(false),
+        Cli::EvalBuild => build_eval_crates(),
+        Cli::VerifyRuntime => verify_runtime(),
         Cli::Ci => {
             run_root_command("cargo", &["fmt", "--all", "--", "--check"])?;
+            run_root_command(
+                "cargo",
+                &[
+                    "clippy",
+                    "--workspace",
+                    "--all-targets",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            )?;
             run_root_command("cargo", &["check", "--workspace"])?;
             run_root_command("cargo", &["test", "--workspace"])?;
+            build_eval_crates()?;
             build_ebpf(false)
         }
     }
@@ -89,6 +108,76 @@ fn build_ebpf(release: bool) -> Result<()> {
 
     println!("eBPF object built: {}", artifact.display());
     Ok(())
+}
+
+fn build_eval_crates() -> Result<()> {
+    run_root_command(
+        "cargo",
+        &["build", "--manifest-path", "eval/oracle/Cargo.toml"],
+    )?;
+    run_root_command(
+        "cargo",
+        &["build", "--manifest-path", "eval/harness/Cargo.toml"],
+    )
+}
+
+fn verify_runtime() -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        bail!("runtime verification requires Linux with BPF LSM support; Lima build checks are not runtime enforcement evidence");
+    }
+
+    let uid_output = Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to check current uid with id -u")?;
+    let uid = String::from_utf8_lossy(&uid_output.stdout);
+    if uid.trim() != "0" {
+        bail!("runtime verification must be run as root so syva-core can load and attach BPF LSM programs");
+    }
+
+    let group_status = Command::new("getent")
+        .args(["group", "syva"])
+        .status()
+        .context("failed to check for required syva group")?;
+    if !group_status.success() {
+        bail!("runtime verification requires a 'syva' group for the syva-core Unix socket");
+    }
+
+    let lsm = fs::read_to_string("/sys/kernel/security/lsm")
+        .context("failed to read /sys/kernel/security/lsm; is securityfs mounted?")?;
+    if !lsm.split(',').any(|entry| entry.trim() == "bpf") {
+        bail!(
+            "runtime verification requires BPF LSM; /sys/kernel/security/lsm is {}",
+            lsm.trim()
+        );
+    }
+
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "local_mode_starts_server",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "local_mode_register_then_list",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
 }
 
 fn run_root_command(program: &str, args: &[&str]) -> Result<()> {

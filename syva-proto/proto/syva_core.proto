@@ -77,8 +77,17 @@ message AttachContainerRequest {
     string pod_uid = 6;
     // Adapter/source name, for example "file", "kubernetes", or "api".
     string source = 7;
-    // Monotonic source generation. Stale non-zero updates do not replace newer
-    // state. Zero means the caller has no source generation.
+    // Monotonic source generation. Zero means the caller has no source
+    // generation / this is an ungenerated local update and must not be treated
+    // as stale only because generated state already exists. Non-zero
+    // generations are monotonic; stale non-zero updates return
+    // AttachContainerResponse { ok: false, message: "..." }.
+    //
+    // Public v0.2 contract: validation errors may return gRPC
+    // InvalidArgument; BPF/core failures may return gRPC Internal; unknown
+    // zones, stale generations, and conflicts return ok=false; metadata-only
+    // reattach for the same container/zone/cgroup is idempotent and preserves
+    // the stored non-zero generation.
     uint64 generation = 8;
 }
 
@@ -91,7 +100,12 @@ message DetachContainerRequest {
     string container_id = 1;
     string source = 2;
     // Monotonic source generation. Zero detaches regardless of generation for
-    // compatibility with callers that do not track source revisions.
+    // compatibility with callers that do not track source revisions. Non-zero
+    // stale detaches return DetachContainerResponse { ok: false, message: "..." }.
+    //
+    // Public v0.2 contract: validation errors may return gRPC
+    // InvalidArgument; internal BPF/core failures may return gRPC Internal; BPF
+    // cleanup failure is degraded security and is reported through health.
     uint64 generation = 3;
 }
 

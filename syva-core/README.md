@@ -23,3 +23,9 @@ Health states:
 
 Membership reconciliation lives in `src/membership.rs` and is idempotent,
 generation-aware, conflict-aware, and explicit about BPF map update intent.
+`AttachContainer` returns application-level `ok=false` for unknown zones, stale
+generations, and conflicts; validation failures may use gRPC
+`InvalidArgument`, and core/BPF failures may use gRPC `Internal`. Generation
+`0` means an ungenerated local attach and does not rewind stored non-zero
+generations on metadata-only refresh. `DetachContainer` generation `0` is an
+unconditional detach.

@@ -109,7 +109,10 @@ impl MembershipService {
         zone_type: ZoneType,
     ) -> MembershipOutcome {
         if let Some(existing) = self.by_container.get(&observation.container_id) {
-            if observation.generation < existing.observation.generation {
+            if observation.generation != 0
+                && existing.observation.generation != 0
+                && observation.generation < existing.observation.generation
+            {
                 self.stale_updates += 1;
                 return MembershipOutcome::Stale {
                     existing_generation: existing.observation.generation,
@@ -140,8 +143,24 @@ impl MembershipService {
                 };
             }
 
+            if existing.zone_id != zone_id || existing.zone_type != zone_type {
+                self.conflicts += 1;
+                return MembershipOutcome::Conflict {
+                    existing_zone: existing.observation.zone_name.clone(),
+                    requested_zone: observation.zone_name,
+                    existing_generation: existing.observation.generation,
+                };
+            }
+
             if existing.zone_id == zone_id && existing.zone_type == zone_type {
                 let applied = existing.applied;
+                let generation = if observation.generation == 0 {
+                    existing.observation.generation
+                } else {
+                    observation.generation
+                };
+                let mut observation = observation;
+                observation.generation = generation;
                 self.by_container.insert(
                     observation.container_id.clone(),
                     MembershipRecord {
@@ -368,6 +387,28 @@ mod tests {
     }
 
     #[test]
+    fn zero_generation_update_refreshes_without_rewinding_generation() {
+        let mut service = MembershipService::new();
+        service.observe_upsert(
+            observation("container-a", "web", 10),
+            7,
+            ZoneType::NonGlobal,
+        );
+        service.mark_applied("container-a");
+
+        let mut refresh = observation("container-a", "web", 0);
+        refresh.source = MembershipSource::LocalGrpc;
+        let outcome = service.observe_upsert(refresh, 7, ZoneType::NonGlobal);
+
+        assert!(matches!(outcome, MembershipOutcome::Unchanged { .. }));
+        let record = service.resolve_container("container-a").unwrap();
+        assert_eq!(record.observation.generation, 10);
+        assert_eq!(record.observation.source, MembershipSource::LocalGrpc);
+        assert!(record.applied);
+        assert_eq!(service.stale_updates(), 0);
+    }
+
+    #[test]
     fn conflicting_assignment_is_reported() {
         let mut service = MembershipService::new();
         service.observe_upsert(observation("container-a", "web", 1), 7, ZoneType::NonGlobal);
@@ -383,6 +424,36 @@ mod tests {
                 existing_generation: 1,
             }
         );
+        assert_eq!(service.conflicts(), 1);
+    }
+
+    #[test]
+    fn zone_type_change_for_live_membership_is_conflict() {
+        let mut service = MembershipService::new();
+        service.observe_upsert(
+            observation("container-a", "web", 10),
+            7,
+            ZoneType::NonGlobal,
+        );
+        service.mark_applied("container-a");
+
+        let outcome = service.observe_upsert(
+            observation("container-a", "web", 11),
+            7,
+            ZoneType::Privileged,
+        );
+
+        assert_eq!(
+            outcome,
+            MembershipOutcome::Conflict {
+                existing_zone: "web".to_string(),
+                requested_zone: "web".to_string(),
+                existing_generation: 10,
+            }
+        );
+        let record = service.resolve_container("container-a").unwrap();
+        assert_eq!(record.zone_type, ZoneType::NonGlobal);
+        assert_eq!(record.observation.generation, 10);
         assert_eq!(service.conflicts(), 1);
     }
 

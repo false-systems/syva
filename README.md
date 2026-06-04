@@ -112,7 +112,10 @@ Linux-only checks:
 
 ```sh
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo build --manifest-path eval/oracle/Cargo.toml
+cargo build --manifest-path eval/harness/Cargo.toml
 cargo run -p xtask -- build-ebpf
 ```
 
@@ -136,7 +139,21 @@ make lima-shell
 ```
 
 `make lima-check` runs the active Linux validation path through `xtask ci`:
-format check, workspace check, workspace tests, and eBPF object build.
+format check, clippy, workspace check, workspace tests, eval crate builds, and
+eBPF object build.
+
+## Runtime Verification
+
+Before tagging v0.2, capture runtime evidence on a privileged Linux host with
+BPF LSM support:
+
+```sh
+sudo -E make verify-runtime
+```
+
+This runs the ignored local-mode runtime tests explicitly. It checks Linux,
+root, and the required `syva` group before attempting BPF load/attach and local
+core RPC verification. See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 
 ## Run
 
