@@ -51,8 +51,9 @@ been removed from the active workspace. Historical CP design notes live under
 
 ## Enforcement
 
-Syva currently builds hooks for file open, exec, executable mmap, ptrace,
-signals, cgroup attach, and Unix stream connect. The hot path is map-based:
+Syva v0.2 currently builds six BPF-LSM hooks: file open, exec,
+executable mmap, ptrace, signals, and Unix stream connect. The hot path is
+map-based:
 
 - `ZONE_MEMBERSHIP`: cgroup to zone.
 - `ZONE_POLICY`: zone policy flags.
@@ -93,6 +94,10 @@ communication policy; container membership must currently be supplied through
 - Lima verifies Linux build/test/eBPF object compilation from macOS, but runtime
   load/attach enforcement still needs a privileged Linux host or CI runner.
 - `/proc` and `/sys` coverage is incomplete.
+- Cgroup movement / zone escape protection is not enforced through BPF-LSM in
+  v0.2. `cgroup_attach_task` is not a BPF-LSM hook on supported mainline
+  kernels; this needs a follow-up using a valid cgroup BPF mechanism or another
+  kernel-supported hook.
 - `INODE_ZONE_MAP` is still keyed by inode number only, not `(dev, ino)`, so
   cross-filesystem inode collisions remain a known correctness risk.
 - `SyvaZonePolicy` status/finalizers/leader election are not implemented.
@@ -118,6 +123,9 @@ cargo build --manifest-path eval/oracle/Cargo.toml
 cargo build --manifest-path eval/harness/Cargo.toml
 cargo run -p xtask -- build-ebpf
 ```
+
+`build-ebpf` builds the release eBPF object by default. Use
+`cargo run -p xtask -- build-ebpf --debug` only for development experiments.
 
 ## Testing on macOS with Lima
 

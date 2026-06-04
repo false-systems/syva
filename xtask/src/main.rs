@@ -9,9 +9,12 @@ use clap::Parser;
 enum Cli {
     /// Build the eBPF programs for syva-ebpf.
     BuildEbpf {
-        /// Build in release mode.
+        /// Build in release mode. This is the default runtime artifact.
         #[clap(long)]
         release: bool,
+        /// Build the development debug object instead of the runtime artifact.
+        #[clap(long, conflicts_with = "release")]
+        debug: bool,
     },
     /// Check Rust formatting.
     Fmt,
@@ -32,11 +35,11 @@ enum Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli {
-        Cli::BuildEbpf { release } => build_ebpf(release),
+        Cli::BuildEbpf { release, debug } => build_ebpf(release || !debug),
         Cli::Fmt => run_root_command("cargo", &["fmt", "--all", "--", "--check"]),
         Cli::Check => run_root_command("cargo", &["check", "--workspace"]),
         Cli::Test => run_root_command("cargo", &["test", "--workspace"]),
-        Cli::LinuxBpfCheck => build_ebpf(false),
+        Cli::LinuxBpfCheck => build_ebpf(true),
         Cli::EvalBuild => build_eval_crates(),
         Cli::VerifyRuntime => verify_runtime(),
         Cli::Ci => {
@@ -55,7 +58,7 @@ fn main() -> Result<()> {
             run_root_command("cargo", &["check", "--workspace"])?;
             run_root_command("cargo", &["test", "--workspace"])?;
             build_eval_crates()?;
-            build_ebpf(false)
+            build_ebpf(true)
         }
     }
 }
@@ -151,6 +154,8 @@ fn verify_runtime() -> Result<()> {
             lsm.trim()
         );
     }
+
+    build_ebpf(true)?;
 
     run_root_command(
         "cargo",

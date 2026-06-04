@@ -74,7 +74,8 @@ message: |
     cargo check --workspace
     cargo run -p xtask -- build-ebpf
 
-  Compile checks and eBPF object builds are supported here. Loading/attaching
-  BPF LSM programs may require a privileged Linux host with suitable kernel
-  config and boot parameters; do not treat Lima runtime attach checks as
-  equivalent to native Linux CI unless they have been verified on this VM.
+  Compile checks and release eBPF object builds are supported here.
+  Loading/attaching BPF LSM programs may require a privileged Linux host with
+  suitable kernel config and boot parameters; do not treat Lima runtime attach
+  checks as equivalent to native Linux CI unless they have been verified on this
+  VM.

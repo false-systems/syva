@@ -1,8 +1,9 @@
 # syva-core
 
 `syva-core` is the node-local Linux/eBPF enforcement engine. It loads and
-attaches Syva's eBPF LSM programs, owns the BPF maps, runs startup self-tests,
-serves health/metrics, and exposes the local `syva.core.v1` Unix-socket API.
+attaches Syva's six supported eBPF LSM programs, owns the BPF maps, runs startup
+self-tests, serves health/metrics, and exposes the local `syva.core.v1`
+Unix-socket API.
 
 Start on Linux with BPF privileges:
 
@@ -20,6 +21,10 @@ Health states:
 - `degraded`: enforcement is active but confidence is reduced, for example
   fail-open hook counters or membership conflicts.
 - `unsafe`: BPF is not attached or startup self-tests failed.
+
+Known v0.2 gap: cgroup movement / zone escape protection is not enforced
+through BPF-LSM because `cgroup_attach_task` is not a BPF-LSM hook on supported
+mainline kernels.
 
 Membership reconciliation lives in `src/membership.rs` and is idempotent,
 generation-aware, conflict-aware, and explicit about BPF map update intent.

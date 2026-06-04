@@ -12,7 +12,6 @@ use syva_ebpf_common::{
     MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
 };
 
-mod cgroup_lock;
 mod exec_guard;
 mod file_guard;
 mod mmap_guard;
@@ -316,11 +315,6 @@ pub fn syva_ptrace_check(ctx: LsmContext) -> i32 {
 #[lsm(hook = "task_kill")]
 pub fn syva_task_kill(ctx: LsmContext) -> i32 {
     signal_guard::task_kill(&ctx)
-}
-
-#[lsm(hook = "cgroup_attach_task")]
-pub fn syva_cgroup_attach(ctx: LsmContext) -> i32 {
-    cgroup_lock::cgroup_attach_task(&ctx)
 }
 
 #[lsm(hook = "mmap_file")]

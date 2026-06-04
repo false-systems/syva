@@ -1,6 +1,6 @@
 //! eBPF program lifecycle for syva.
 //!
-//! Loads and attaches the 5 LSM programs. Provides typed
+//! Loads and attaches the supported LSM programs. Provides typed
 //! wrappers for BPF map operations (zone membership, policy, comms).
 
 use std::fs;
@@ -19,14 +19,40 @@ use syva_ebpf_common::{
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
 
-const LSM_PROGRAMS: &[&str] = &[
-    "syva_file_open",
-    "syva_bprm_check",
-    "syva_ptrace_check",
-    "syva_task_kill",
-    "syva_cgroup_attach",
-    "syva_mmap_file",
-    "syva_unix_connect",
+#[derive(Debug, Clone, Copy)]
+struct LsmProgram {
+    program_name: &'static str,
+    hook_name: &'static str,
+}
+
+/// Program symbol and kernel hook name are intentionally separate. The program
+/// symbol is looked up in the loaded object; the hook name is resolved by aya as
+/// kernel BTF type `bpf_lsm_<hook_name>`.
+const LSM_PROGRAMS: &[LsmProgram] = &[
+    LsmProgram {
+        program_name: "syva_file_open",
+        hook_name: "file_open",
+    },
+    LsmProgram {
+        program_name: "syva_bprm_check",
+        hook_name: "bprm_check_security",
+    },
+    LsmProgram {
+        program_name: "syva_ptrace_check",
+        hook_name: "ptrace_access_check",
+    },
+    LsmProgram {
+        program_name: "syva_task_kill",
+        hook_name: "task_kill",
+    },
+    LsmProgram {
+        program_name: "syva_mmap_file",
+        hook_name: "mmap_file",
+    },
+    LsmProgram {
+        program_name: "syva_unix_connect",
+        hook_name: "unix_stream_connect",
+    },
 ];
 
 const MAP_NAMES: &[&str] = &[
@@ -54,6 +80,7 @@ impl EnforceEbpf {
             Some(p) => p.to_path_buf(),
             None => find_ebpf_object()?,
         };
+        tracing::info!(path = %obj_path.display(), "loading eBPF object");
 
         let pin_path = PathBuf::from(BPF_PIN_PATH);
 
@@ -77,7 +104,7 @@ impl EnforceEbpf {
             anyhow::anyhow!("failed to load BTF: {e} — kernel needs CONFIG_DEBUG_INFO_BTF=y")
         })?;
 
-        // Resolve kernel struct offsets via pahole.
+        // Resolve kernel struct offsets from BTF and patch eBPF globals.
         let offsets = resolve_offsets();
 
         let obj_data = fs::read(&obj_path).map_err(|e| {
@@ -97,13 +124,23 @@ impl EnforceEbpf {
 
         // Phase 1: Load all LSM programs (validates with kernel verifier).
         // Programs are NOT attached yet — no enforcement until attach_programs().
-        for &name in LSM_PROGRAMS {
+        for program in LSM_PROGRAMS {
             let prog: &mut Lsm = bpf
-                .program_mut(name)
-                .ok_or_else(|| anyhow::anyhow!("LSM program '{name}' not found"))?
+                .program_mut(program.program_name)
+                .ok_or_else(|| anyhow::anyhow!("LSM program '{}' not found", program.program_name))?
                 .try_into()?;
-            prog.load(name, &btf)?;
-            tracing::debug!(program = name, "loaded LSM program");
+            prog.load(program.hook_name, &btf).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to load LSM program '{}' for hook '{}': {error}",
+                    program.program_name,
+                    program.hook_name
+                )
+            })?;
+            tracing::debug!(
+                program = program.program_name,
+                hook = program.hook_name,
+                "loaded LSM program"
+            );
         }
 
         tracing::info!(
@@ -118,14 +155,18 @@ impl EnforceEbpf {
     /// populated to eliminate the startup race window where hooks are active
     /// but ZONE_MEMBERSHIP is empty (all containers would appear unzoned).
     pub fn attach_programs(&mut self) -> anyhow::Result<()> {
-        for &name in LSM_PROGRAMS {
+        for program in LSM_PROGRAMS {
             let prog: &mut Lsm = self
                 .bpf
-                .program_mut(name)
-                .ok_or_else(|| anyhow::anyhow!("LSM program '{name}' not found"))?
+                .program_mut(program.program_name)
+                .ok_or_else(|| anyhow::anyhow!("LSM program '{}' not found", program.program_name))?
                 .try_into()?;
             prog.attach()?;
-            tracing::info!(program = name, "attached LSM program");
+            tracing::info!(
+                program = program.program_name,
+                hook = program.hook_name,
+                "attached LSM program"
+            );
         }
         tracing::info!(
             programs = LSM_PROGRAMS.len(),
@@ -214,7 +255,7 @@ impl EnforceEbpf {
         )?;
 
         let mut results = Vec::new();
-        for (idx, &name) in LSM_PROGRAMS.iter().enumerate() {
+        for (idx, program) in LSM_PROGRAMS.iter().enumerate() {
             let per_cpu = map.get(&(idx as u32), 0)?;
             let mut total = EnforcementCounters {
                 allow: 0,
@@ -228,7 +269,7 @@ impl EnforceEbpf {
                 total.error += cpu_val.error;
                 total.lost += cpu_val.lost;
             }
-            results.push((name.to_string(), total));
+            results.push((program.program_name.to_string(), total));
         }
 
         Ok(results)
@@ -347,13 +388,55 @@ impl EnforceEbpf {
     /// derived peer cgroup_id is non-zero, indicating the offset chain reads
     /// plausible data from the peer socket.
     pub async fn verify_unix_self_test(&self) -> anyhow::Result<()> {
-        use std::os::unix::net::UnixStream;
+        use std::io::ErrorKind;
+        use std::os::unix::net::{UnixListener, UnixStream};
         use std::time::Duration;
 
-        // Trigger unix_stream_connect by connecting to ourselves via a socketpair.
-        // socketpair() creates a connected pair — the connect path fires the LSM hook.
-        let _pair = UnixStream::pair()
-            .map_err(|e| anyhow::anyhow!("failed to create Unix socketpair for self-test: {e}"))?;
+        // Trigger security_unix_stream_connect with a real connect(2). A
+        // socketpair is already connected and does not exercise this LSM hook.
+        let socket_path = std::env::temp_dir().join(format!(
+            "syva-unix-self-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        match fs::remove_file(&socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to remove stale Unix self-test socket {}: {error}",
+                    socket_path.display()
+                ));
+            }
+        }
+        let listener = UnixListener::bind(&socket_path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to bind Unix self-test socket {}: {error}",
+                socket_path.display()
+            )
+        })?;
+        listener.set_nonblocking(true).map_err(|error| {
+            anyhow::anyhow!("failed to set Unix self-test listener nonblocking: {error}")
+        })?;
+        let _client = UnixStream::connect(&socket_path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to connect Unix self-test socket {}: {error}",
+                socket_path.display()
+            )
+        })?;
+        match listener.accept() {
+            Ok((_stream, _addr)) => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to accept Unix self-test socket connection: {error}"
+                ));
+            }
+        }
+        let _ = fs::remove_file(&socket_path);
 
         for attempt in 0..20 {
             let result = tokio::task::block_in_place(|| {
@@ -636,15 +719,15 @@ fn find_ebpf_object() -> anyhow::Result<PathBuf> {
     let candidates = [
         PathBuf::from("/usr/lib/syva/syva-ebpf"),
         PathBuf::from("/var/lib/syva/syva-ebpf"),
-        // Development build paths.
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("syva-ebpf/target/bpfel-unknown-none/debug/syva-ebpf"),
+        // Runtime builds use release by default; debug is development-only.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap_or(Path::new("."))
             .join("syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("syva-ebpf/target/bpfel-unknown-none/debug/syva-ebpf"),
     ];
 
     for path in &candidates {
@@ -653,7 +736,9 @@ fn find_ebpf_object() -> anyhow::Result<PathBuf> {
         }
     }
 
-    anyhow::bail!("eBPF object not found — run `cargo xtask build-ebpf` or pass --ebpf-obj")
+    anyhow::bail!(
+        "eBPF object not found — run `cargo run -p xtask -- build-ebpf` or pass --ebpf-obj"
+    )
 }
 
 /// Offset definitions: (struct, field, global_name, default)
@@ -700,15 +785,13 @@ fn resolve_offsets() -> Vec<(String, u64)> {
                     default
                 });
 
-            if offset != default {
-                tracing::info!(
-                    r#type = type_name,
-                    field = field_name,
-                    default,
-                    resolved = offset,
-                    "kernel offset differs — using resolved value"
-                );
-            }
+            tracing::info!(
+                r#type = type_name,
+                field = field_name,
+                default,
+                resolved = offset,
+                "kernel offset resolved"
+            );
 
             (global_name.to_string(), offset)
         })
@@ -716,3 +799,53 @@ fn resolve_offsets() -> Vec<(String, u64)> {
 }
 
 // pahole and is_field_match removed — BTF parsing in btf.rs replaces them.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsm_programs_use_real_hook_names() {
+        for program in LSM_PROGRAMS {
+            assert!(
+                !program.hook_name.starts_with("syva_"),
+                "hook name must be the kernel hook, not the program symbol"
+            );
+            assert_ne!(program.program_name, program.hook_name);
+        }
+    }
+
+    #[test]
+    fn supported_v02_lsm_hook_count_is_six() {
+        assert_eq!(LSM_PROGRAMS.len(), 6);
+        assert!(!LSM_PROGRAMS
+            .iter()
+            .any(|program| program.hook_name == "cgroup_attach_task"));
+    }
+
+    #[test]
+    fn development_object_prefers_release_before_debug() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let release = root.join("syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf");
+        let debug = root.join("syva-ebpf/target/bpfel-unknown-none/debug/syva-ebpf");
+        let candidates = [
+            PathBuf::from("/usr/lib/syva/syva-ebpf"),
+            PathBuf::from("/var/lib/syva/syva-ebpf"),
+            release.clone(),
+            debug.clone(),
+        ];
+
+        let release_idx = candidates
+            .iter()
+            .position(|candidate| candidate == &release)
+            .expect("release object candidate exists");
+        let debug_idx = candidates
+            .iter()
+            .position(|candidate| candidate == &debug)
+            .expect("debug object candidate exists");
+        assert!(release_idx < debug_idx);
+    }
+}

@@ -6,12 +6,11 @@ use aya::maps::{MapData, RingBuf};
 use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
 use tokio_util::sync::CancellationToken;
 
-pub const HOOK_NAMES: [&str; 7] = [
+pub const HOOK_NAMES: [&str; 6] = [
     "file_open",
     "bprm_check",
     "ptrace_access_check",
     "task_kill",
-    "cgroup_attach_task",
     "mmap_file",
     "unix_connect",
 ];
@@ -97,8 +96,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_names_count_is_seven() {
-        assert_eq!(HOOK_NAMES.len(), 7);
+    fn hook_names_count_is_six() {
+        assert_eq!(HOOK_NAMES.len(), 6);
+        assert!(!HOOK_NAMES.contains(&"cgroup_attach_task"));
     }
 
     #[test]

@@ -74,7 +74,9 @@ that require real BPF load/attach still need privileges and kernel support.
 `eval/oracle` and `eval/harness` so release contract tests do not bitrot.
 
 **eBPF object build verification:** `cargo run -p xtask -- build-ebpf` builds
-the `syva-ebpf` object with nightly Rust, `rust-src`, and `bpf-linker`.
+the release `syva-ebpf` object with nightly Rust, `rust-src`, and
+`bpf-linker`. The release object is the runtime artifact; debug eBPF builds are
+development-only.
 The VM installs Ubuntu `linux-tools-*`; on some architectures `bpftool` is
 provided through those packages rather than a package literally named
 `bpftool`.

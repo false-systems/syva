@@ -32,6 +32,9 @@ cargo run -p xtask -- build-ebpf
 cargo run -p xtask -- ci
 ```
 
+`build-ebpf` builds the release eBPF object by default because that is the
+runtime artifact. Use `--debug` only for development.
+
 macOS uses Lima for Linux verification:
 
 ```bash
@@ -118,6 +121,10 @@ Fail-open hook errors are degraded security, not harmless warnings.
 - Full BPF load/attach/runtime verification requires a privileged Linux host.
 - Lima covers Linux build/test/eBPF object compilation from macOS, not guaranteed
   runtime attachment.
+- Syva v0.2 supports six BPF-LSM hooks. Cgroup movement / zone escape
+  protection is not enforced through BPF-LSM because `cgroup_attach_task` is not
+  a BPF-LSM hook on supported kernels; implement that follow-up with a valid
+  cgroup BPF mechanism or another kernel-supported hook.
 - `/proc` and `/sys` coverage remains incomplete.
 - `INODE_ZONE_MAP` is keyed by inode only; `(dev, ino)` is still needed.
 - Kubernetes adapter status/finalizers/leader election are not implemented.
