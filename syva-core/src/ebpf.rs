@@ -7,14 +7,14 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::types::{NetworkMode, ZonePolicy, ZoneType};
 use aya::maps::HashMap as AyaHashMap;
 use aya::maps::RingBuf;
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
-use crate::types::{ZonePolicy, ZoneType, NetworkMode};
 use syva_ebpf_common::{
-    ZoneInfoKernel, ZonePolicyKernel, ZoneCommKey, SelfTestResult, SelfTestInodeResult,
-    SelfTestUnixResult, EnforcementCounters, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+    EnforcementCounters, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult, ZoneCommKey,
+    ZoneInfoKernel, ZonePolicyKernel, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
 };
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
@@ -73,14 +73,16 @@ impl EnforceEbpf {
 
         fs::create_dir_all(&pin_path)?;
 
-        let btf = Btf::from_sys_fs()
-            .map_err(|e| anyhow::anyhow!("failed to load BTF: {e} — kernel needs CONFIG_DEBUG_INFO_BTF=y"))?;
+        let btf = Btf::from_sys_fs().map_err(|e| {
+            anyhow::anyhow!("failed to load BTF: {e} — kernel needs CONFIG_DEBUG_INFO_BTF=y")
+        })?;
 
         // Resolve kernel struct offsets via pahole.
         let offsets = resolve_offsets();
 
-        let obj_data = fs::read(&obj_path)
-            .map_err(|e| anyhow::anyhow!("failed to read eBPF object {}: {e}", obj_path.display()))?;
+        let obj_data = fs::read(&obj_path).map_err(|e| {
+            anyhow::anyhow!("failed to read eBPF object {}: {e}", obj_path.display())
+        })?;
 
         let mut loader = EbpfLoader::new();
         loader.btf(Some(&btf)).map_pin_path(&pin_path);
@@ -89,9 +91,9 @@ impl EnforceEbpf {
             loader.set_global(name.as_str(), val, true);
         }
 
-        let mut bpf = loader
-            .load(&obj_data)
-            .map_err(|e| anyhow::anyhow!("failed to load eBPF: {e} — check CONFIG_BPF_LSM=y and lsm=bpf"))?;
+        let mut bpf = loader.load(&obj_data).map_err(|e| {
+            anyhow::anyhow!("failed to load eBPF: {e} — check CONFIG_BPF_LSM=y and lsm=bpf")
+        })?;
 
         // Phase 1: Load all LSM programs (validates with kernel verifier).
         // Programs are NOT attached yet — no enforcement until attach_programs().
@@ -104,7 +106,10 @@ impl EnforceEbpf {
             tracing::debug!(program = name, "loaded LSM program");
         }
 
-        tracing::info!(programs = LSM_PROGRAMS.len(), "eBPF programs loaded (not yet attached)");
+        tracing::info!(
+            programs = LSM_PROGRAMS.len(),
+            "eBPF programs loaded (not yet attached)"
+        );
 
         Ok(Self { bpf, pin_path })
     }
@@ -114,14 +119,18 @@ impl EnforceEbpf {
     /// but ZONE_MEMBERSHIP is empty (all containers would appear unzoned).
     pub fn attach_programs(&mut self) -> anyhow::Result<()> {
         for &name in LSM_PROGRAMS {
-            let prog: &mut Lsm = self.bpf
+            let prog: &mut Lsm = self
+                .bpf
                 .program_mut(name)
                 .ok_or_else(|| anyhow::anyhow!("LSM program '{name}' not found"))?
                 .try_into()?;
             prog.attach()?;
             tracing::info!(program = name, "attached LSM program");
         }
-        tracing::info!(programs = LSM_PROGRAMS.len(), "all LSM programs attached — enforcement active");
+        tracing::info!(
+            programs = LSM_PROGRAMS.len(),
+            "all LSM programs attached — enforcement active"
+        );
         Ok(())
     }
 
@@ -151,7 +160,8 @@ impl EnforceEbpf {
         let info = ZoneInfoKernel { zone_id, flags };
 
         let mut map: AyaHashMap<_, u64, ZoneInfoKernel> = AyaHashMap::try_from(
-            self.bpf.map_mut("ZONE_MEMBERSHIP")
+            self.bpf
+                .map_mut("ZONE_MEMBERSHIP")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_MEMBERSHIP map not found"))?,
         )?;
 
@@ -163,7 +173,8 @@ impl EnforceEbpf {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_zone_member(&mut self, cgroup_id: u64) -> anyhow::Result<()> {
         let mut map: AyaHashMap<_, u64, ZoneInfoKernel> = AyaHashMap::try_from(
-            self.bpf.map_mut("ZONE_MEMBERSHIP")
+            self.bpf
+                .map_mut("ZONE_MEMBERSHIP")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_MEMBERSHIP map not found"))?,
         )?;
         let _ = map.remove(&cgroup_id);
@@ -179,14 +190,12 @@ impl EnforceEbpf {
             u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
         });
         let allow_host_net = policy.network.mode == NetworkMode::Host;
-        let kernel_policy = ZonePolicyKernel::from_caps(
-            &policy.capabilities.allowed,
-            allow_ptrace,
-            allow_host_net,
-        );
+        let kernel_policy =
+            ZonePolicyKernel::from_caps(&policy.capabilities.allowed, allow_ptrace, allow_host_net);
 
         let mut map = Array::<_, ZonePolicyKernel>::try_from(
-            self.bpf.map_mut("ZONE_POLICY")
+            self.bpf
+                .map_mut("ZONE_POLICY")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
         )?;
 
@@ -199,14 +208,20 @@ impl EnforceEbpf {
         use aya::maps::PerCpuArray;
 
         let map = PerCpuArray::<_, EnforcementCounters>::try_from(
-            self.bpf.map("ENFORCEMENT_COUNTERS")
+            self.bpf
+                .map("ENFORCEMENT_COUNTERS")
                 .ok_or_else(|| anyhow::anyhow!("ENFORCEMENT_COUNTERS map not found"))?,
         )?;
 
         let mut results = Vec::new();
         for (idx, &name) in LSM_PROGRAMS.iter().enumerate() {
             let per_cpu = map.get(&(idx as u32), 0)?;
-            let mut total = EnforcementCounters { allow: 0, deny: 0, error: 0, lost: 0 };
+            let mut total = EnforcementCounters {
+                allow: 0,
+                deny: 0,
+                error: 0,
+                lost: 0,
+            };
             for cpu_val in per_cpu.iter() {
                 total.allow += cpu_val.allow;
                 total.deny += cpu_val.deny;
@@ -239,7 +254,8 @@ impl EnforceEbpf {
             let result = tokio::task::block_in_place(|| {
                 use aya::maps::Array;
                 let map = Array::<_, SelfTestResult>::try_from(
-                    self.bpf.map("SELF_TEST")
+                    self.bpf
+                        .map("SELF_TEST")
                         .ok_or_else(|| anyhow::anyhow!("SELF_TEST map not found"))?,
                 )?;
                 anyhow::Ok(map.get(&0, 0)?)
@@ -282,13 +298,16 @@ impl EnforceEbpf {
         // Get its expected inode via stat.
         let expected_ino = std::fs::metadata("/proc/self/status")
             .map(|m| m.ino())
-            .map_err(|e| anyhow::anyhow!("failed to stat /proc/self/status for inode self-test: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("failed to stat /proc/self/status for inode self-test: {e}")
+            })?;
 
         for attempt in 0..20 {
             let result = tokio::task::block_in_place(|| {
                 use aya::maps::Array;
                 let map = Array::<_, SelfTestInodeResult>::try_from(
-                    self.bpf.map("SELF_TEST_INODE")
+                    self.bpf
+                        .map("SELF_TEST_INODE")
                         .ok_or_else(|| anyhow::anyhow!("SELF_TEST_INODE map not found"))?,
                 )?;
                 anyhow::Ok(map.get(&0, 0)?)
@@ -306,7 +325,8 @@ impl EnforceEbpf {
                         "inode offset self-test FAILED: expected inode {} but eBPF \
                          derived {} — FILE_F_INODE_OFFSET or INODE_I_INO_OFFSET is wrong \
                          for this kernel. Install pahole and restart.",
-                        expected_ino, result.offset_ino,
+                        expected_ino,
+                        result.offset_ino,
                     );
                 }
             }
@@ -315,7 +335,9 @@ impl EnforceEbpf {
             }
         }
 
-        anyhow::bail!("inode self-test timed out — file_open hook may not be writing SELF_TEST_INODE")
+        anyhow::bail!(
+            "inode self-test timed out — file_open hook may not be writing SELF_TEST_INODE"
+        )
     }
 
     /// Verify that SOCK_CGRP_DATA_CGROUP_OFFSET is correct.
@@ -325,8 +347,8 @@ impl EnforceEbpf {
     /// derived peer cgroup_id is non-zero, indicating the offset chain reads
     /// plausible data from the peer socket.
     pub async fn verify_unix_self_test(&self) -> anyhow::Result<()> {
-        use std::time::Duration;
         use std::os::unix::net::UnixStream;
+        use std::time::Duration;
 
         // Trigger unix_stream_connect by connecting to ourselves via a socketpair.
         // socketpair() creates a connected pair — the connect path fires the LSM hook.
@@ -337,7 +359,8 @@ impl EnforceEbpf {
             let result = tokio::task::block_in_place(|| {
                 use aya::maps::Array;
                 let map = Array::<_, SelfTestUnixResult>::try_from(
-                    self.bpf.map("SELF_TEST_UNIX")
+                    self.bpf
+                        .map("SELF_TEST_UNIX")
                         .ok_or_else(|| anyhow::anyhow!("SELF_TEST_UNIX map not found"))?,
                 )?;
                 anyhow::Ok(map.get(&0, 0)?)
@@ -368,14 +391,25 @@ impl EnforceEbpf {
     /// Allow cross-zone communication between two zones.
     ///
     /// Writes both directions (src→dst and dst→src) into ZONE_ALLOWED_COMMS.
-    pub fn set_zone_allowed_comms(&mut self, src_zone_id: u32, dst_zone_id: u32) -> anyhow::Result<()> {
+    pub fn set_zone_allowed_comms(
+        &mut self,
+        src_zone_id: u32,
+        dst_zone_id: u32,
+    ) -> anyhow::Result<()> {
         let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
-            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+            self.bpf
+                .map_mut("ZONE_ALLOWED_COMMS")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
         )?;
 
-        let fwd = ZoneCommKey { src_zone: src_zone_id, dst_zone: dst_zone_id };
-        let rev = ZoneCommKey { src_zone: dst_zone_id, dst_zone: src_zone_id };
+        let fwd = ZoneCommKey {
+            src_zone: src_zone_id,
+            dst_zone: dst_zone_id,
+        };
+        let rev = ZoneCommKey {
+            src_zone: dst_zone_id,
+            dst_zone: src_zone_id,
+        };
         map.insert(fwd, 1u8, 0)?;
         map.insert(rev, 1u8, 0)?;
         Ok(())
@@ -386,10 +420,15 @@ impl EnforceEbpf {
         use aya::maps::Array;
 
         let mut map = Array::<_, ZonePolicyKernel>::try_from(
-            self.bpf.map_mut("ZONE_POLICY")
+            self.bpf
+                .map_mut("ZONE_POLICY")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_POLICY map not found"))?,
         )?;
-        let zeroed = ZonePolicyKernel { caps_mask: 0, flags: 0, _pad: 0 };
+        let zeroed = ZonePolicyKernel {
+            caps_mask: 0,
+            flags: 0,
+            _pad: 0,
+        };
         map.set(zone_id, zeroed, 0)?;
         Ok(())
     }
@@ -399,7 +438,8 @@ impl EnforceEbpf {
         // Collect keys to remove (can't mutate while iterating).
         let keys_to_remove: Vec<ZoneCommKey> = {
             let map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
-                self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+                self.bpf
+                    .map_mut("ZONE_ALLOWED_COMMS")
                     .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
             )?;
 
@@ -410,7 +450,8 @@ impl EnforceEbpf {
         };
 
         let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
-            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+            self.bpf
+                .map_mut("ZONE_ALLOWED_COMMS")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
         )?;
 
@@ -425,11 +466,18 @@ impl EnforceEbpf {
     /// preserving any other comms involving either zone.
     pub fn remove_zone_comm_pair(&mut self, zone_a: u32, zone_b: u32) -> anyhow::Result<()> {
         let mut map: AyaHashMap<_, ZoneCommKey, u8> = AyaHashMap::try_from(
-            self.bpf.map_mut("ZONE_ALLOWED_COMMS")
+            self.bpf
+                .map_mut("ZONE_ALLOWED_COMMS")
                 .ok_or_else(|| anyhow::anyhow!("ZONE_ALLOWED_COMMS map not found"))?,
         )?;
-        let fwd = ZoneCommKey { src_zone: zone_a, dst_zone: zone_b };
-        let rev = ZoneCommKey { src_zone: zone_b, dst_zone: zone_a };
+        let fwd = ZoneCommKey {
+            src_zone: zone_a,
+            dst_zone: zone_b,
+        };
+        let rev = ZoneCommKey {
+            src_zone: zone_b,
+            dst_zone: zone_a,
+        };
         let _ = map.remove(&fwd);
         let _ = map.remove(&rev);
         Ok(())
@@ -439,7 +487,8 @@ impl EnforceEbpf {
     pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
         let keys_to_remove: Vec<u64> = {
             let map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
-                self.bpf.map_mut("INODE_ZONE_MAP")
+                self.bpf
+                    .map_mut("INODE_ZONE_MAP")
                     .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
             )?;
 
@@ -451,7 +500,8 @@ impl EnforceEbpf {
         };
 
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
-            self.bpf.map_mut("INODE_ZONE_MAP")
+            self.bpf
+                .map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
 
@@ -462,6 +512,10 @@ impl EnforceEbpf {
     }
 
     /// Register a single path's inode in INODE_ZONE_MAP (non-recursive).
+    ///
+    /// Limitation: the current BPF map key is inode number only, not `(dev,
+    /// ino)`. This can collide across filesystems and must be fixed with the
+    /// kernel-side map definition.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_single_inode(&mut self, zone_id: u32, path: &str) -> anyhow::Result<usize> {
         let canon = fs::canonicalize(path)
@@ -471,7 +525,8 @@ impl EnforceEbpf {
         let ino = meta.ino();
 
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
-            self.bpf.map_mut("INODE_ZONE_MAP")
+            self.bpf
+                .map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
         map.insert(ino, zone_id, 0)?;
@@ -496,13 +551,19 @@ impl EnforceEbpf {
     const INODE_SCAN_MAX_DEPTH: usize = 16;
 
     /// Maximum inodes per zone to prevent one zone from starving others.
-    const INODE_SCAN_MAX_PER_ZONE: usize = (syva_ebpf_common::MAX_INODES / syva_ebpf_common::MAX_ZONES) as usize;
+    const INODE_SCAN_MAX_PER_ZONE: usize =
+        (syva_ebpf_common::MAX_INODES / syva_ebpf_common::MAX_ZONES) as usize;
 
-    pub fn populate_inode_zone_map(&mut self, zone_id: u32, paths: &[String]) -> anyhow::Result<usize> {
+    pub fn populate_inode_zone_map(
+        &mut self,
+        zone_id: u32,
+        paths: &[String],
+    ) -> anyhow::Result<usize> {
         use std::collections::{HashSet, VecDeque};
 
         let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
-            self.bpf.map_mut("INODE_ZONE_MAP")
+            self.bpf
+                .map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
 
@@ -526,7 +587,8 @@ impl EnforceEbpf {
             while let Some((path, depth)) = work.pop_front() {
                 if count >= Self::INODE_SCAN_MAX_PER_ZONE {
                     tracing::warn!(
-                        zone_id, max = Self::INODE_SCAN_MAX_PER_ZONE,
+                        zone_id,
+                        max = Self::INODE_SCAN_MAX_PER_ZONE,
                         "inode scan cap reached — remaining host_paths skipped"
                     );
                     break;
@@ -553,7 +615,6 @@ impl EnforceEbpf {
 
         Ok(count)
     }
-
 }
 
 impl Drop for EnforceEbpf {
@@ -592,9 +653,7 @@ fn find_ebpf_object() -> anyhow::Result<PathBuf> {
         }
     }
 
-    anyhow::bail!(
-        "eBPF object not found — run `cargo xtask build-ebpf` or pass --ebpf-obj"
-    )
+    anyhow::bail!("eBPF object not found — run `cargo xtask build-ebpf` or pass --ebpf-obj")
 }
 
 /// Offset definitions: (struct, field, global_name, default)
@@ -628,17 +687,25 @@ fn resolve_offsets() -> Vec<(String, u64)> {
     OFFSET_DEFS
         .iter()
         .map(|&(type_name, field_name, global_name, default)| {
-            let offset = btf.as_ref()
+            let offset = btf
+                .as_ref()
                 .and_then(|b| b.struct_field_offset(type_name, field_name))
                 .map(|v| v as u64)
                 .unwrap_or_else(|| {
-                    tracing::debug!(r#type = type_name, field = field_name, "using default offset");
+                    tracing::debug!(
+                        r#type = type_name,
+                        field = field_name,
+                        "using default offset"
+                    );
                     default
                 });
 
             if offset != default {
                 tracing::info!(
-                    r#type = type_name, field = field_name, default, resolved = offset,
+                    r#type = type_name,
+                    field = field_name,
+                    default,
+                    resolved = offset,
                     "kernel offset differs — using resolved value"
                 );
             }

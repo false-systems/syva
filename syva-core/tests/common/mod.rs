@@ -19,8 +19,6 @@ pub(crate) fn spawn_core(socket_path: &std::path::Path) -> anyhow::Result<CorePr
     let bin = std::env::var("CARGO_BIN_EXE_syva-core")
         .unwrap_or_else(|_| "target/debug/syva-core".to_string());
     let child = Command::new(bin)
-        .arg("--policy-source")
-        .arg("local")
         .arg("--socket-path")
         .arg(socket_path)
         .stdout(Stdio::inherit())

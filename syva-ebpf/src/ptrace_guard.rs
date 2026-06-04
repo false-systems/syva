@@ -1,9 +1,9 @@
 use aya_ebpf::programs::LsmContext;
 
-use crate::{lookup_caller_zone, lookup_task_zone, is_cross_zone_allowed,
-            count_decision, emit_deny_event, ZONE_POLICY};
-use syva_ebpf_common::{ZONE_FLAG_GLOBAL, ZONE_ID_HOST, POLICY_FLAG_ALLOW_PTRACE,
-                        PROG_PTRACE_CHECK, HOOK_PTRACE_CHECK};
+use crate::{count_decision, emit_deny_event, lookup_caller_zone, lookup_task_zone, ZONE_POLICY};
+use syva_ebpf_common::{
+    HOOK_PTRACE_CHECK, POLICY_FLAG_ALLOW_PTRACE, PROG_PTRACE_CHECK, ZONE_FLAG_GLOBAL, ZONE_ID_HOST,
+};
 
 pub fn ptrace_access_check(ctx: &LsmContext) -> i32 {
     let (ret, is_error) = match try_ptrace_check(ctx) {
@@ -31,7 +31,9 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
 
     // Resolve target zone FIRST — before any policy check.
     let target_ptr: u64 = unsafe { ctx.arg(0) };
-    if target_ptr == 0 { return Ok(0); }
+    if target_ptr == 0 {
+        return Ok(0);
+    }
 
     let target = match unsafe { lookup_task_zone(target_ptr) } {
         Some(info) => info,
@@ -44,7 +46,7 @@ fn try_ptrace_check(ctx: &LsmContext) -> Result<i32, i64> {
 
     // Same zone: allow only if POLICY_FLAG_ALLOW_PTRACE is set.
     if caller.zone_id == target.zone_id {
-        if let Some(policy) = unsafe { ZONE_POLICY.get(caller.zone_id) } {
+        if let Some(policy) = ZONE_POLICY.get(caller.zone_id) {
             if policy.flags & POLICY_FLAG_ALLOW_PTRACE != 0 {
                 return Ok(0);
             }

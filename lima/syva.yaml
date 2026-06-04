@@ -1,0 +1,80 @@
+# Minimal Linux development VM for Syva on macOS.
+#
+# Start with:
+#   limactl start --name=syva-dev ./lima/syva.yaml
+#
+# The macOS home directory is mounted writable at the same path in the guest,
+# so this repository is available at the same absolute path inside Linux.
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+cpus: 4
+memory: "6GiB"
+disk: "80GiB"
+
+mounts:
+  - location: "~"
+    writable: true
+
+containerd:
+  system: false
+  user: false
+
+provision:
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        clang \
+        curl \
+        git \
+        libelf-dev \
+        libssl-dev \
+        lld \
+        llvm \
+        pkg-config \
+        protobuf-compiler \
+        linux-tools-common \
+        linux-tools-generic
+
+  - mode: user
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      if ! command -v rustup >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --profile minimal --default-toolchain stable
+      fi
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustup toolchain install stable
+      rustup component add rustfmt clippy
+      rustup toolchain install nightly --component rust-src
+      cargo install bpf-linker --locked || true
+
+message: |
+  Syva Linux development VM is ready.
+
+  From macOS:
+    make lima-shell
+    make lima-check
+
+  Inside the VM:
+    cd /Users/yair/projects/syva
+    cargo check --workspace
+    cargo run -p xtask -- build-ebpf
+
+  Compile checks and eBPF object builds are supported here. Loading/attaching
+  BPF LSM programs may require a privileged Linux host with suitable kernel
+  config and boot parameters; do not treat Lima runtime attach checks as
+  equivalent to native Linux CI unless they have been verified on this VM.

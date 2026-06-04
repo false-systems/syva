@@ -22,11 +22,16 @@ use crate::ebpf::EnforceEbpf;
 use crate::events::HOOK_NAMES;
 use crate::health::SharedHealth;
 use crate::ingest::{self, CoreZonePolicyInput};
+use crate::membership::{
+    BpfMembershipIntent, MembershipObservation, MembershipOutcome, MembershipService,
+    MembershipSource, PodIdentity,
+};
 use crate::types::ZoneType;
 use crate::zone::{ZoneRegistry, ZoneState, ZoneTransition};
 
 pub(crate) struct SyvaCoreService {
     pub(crate) registry: Arc<RwLock<ZoneRegistry>>,
+    pub(crate) memberships: Arc<RwLock<MembershipService>>,
     pub(crate) ebpf: Arc<Mutex<EnforceEbpf>>,
     pub(crate) health: SharedHealth,
     pub(crate) start_time: Instant,
@@ -43,10 +48,7 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("zone_name is required"));
         }
 
-        let policy = req
-            .policy
-            .map(proto_policy_to_core_input)
-            .transpose()?;
+        let policy = req.policy.map(proto_policy_to_core_input).transpose()?;
 
         let zone_id = ingest::register_zone_local(
             &self.registry,
@@ -128,26 +130,117 @@ impl SyvaCore for SyvaCoreService {
             return Err(Status::invalid_argument("cgroup_id must be non-zero"));
         }
 
-        let mut registry = self.registry.write().await;
-        let zone_id = match registry.add_container(&req.container_id, &req.zone_name, req.cgroup_id) {
-            Ok(id) => id,
-            Err(error) => {
+        let (zone_id, zone_type) = {
+            let registry = self.registry.read().await;
+            let Some(zone_id) = registry.zone_id(&req.zone_name) else {
                 return Ok(Response::new(AttachContainerResponse {
                     ok: false,
-                    message: format!("{error}"),
+                    message: format!("zone '{}' is not registered", req.zone_name),
+                }));
+            };
+            let zone_type = registry
+                .zone_type(&req.zone_name)
+                .unwrap_or(ZoneType::NonGlobal);
+            (zone_id, zone_type)
+        };
+
+        let observation = attach_request_to_observation(&req);
+        let membership_outcome = {
+            let mut memberships = self.memberships.write().await;
+            memberships.observe_upsert(observation, zone_id, zone_type)
+        };
+
+        let intent = match membership_outcome {
+            MembershipOutcome::Applied { intent } => {
+                let mut registry = self.registry.write().await;
+                if let Err(error) =
+                    registry.add_container(&req.container_id, &req.zone_name, req.cgroup_id)
+                {
+                    self.memberships
+                        .write()
+                        .await
+                        .remove(&req.container_id, None);
+                    return Ok(Response::new(AttachContainerResponse {
+                        ok: false,
+                        message: format!("{error}"),
+                    }));
+                }
+                intent
+            }
+            MembershipOutcome::Unchanged { intent } => intent,
+            MembershipOutcome::Stale {
+                existing_generation,
+            } => {
+                self.health.write().await.mark_membership_degraded(format!(
+                    "stale membership update ignored for container '{}' (existing generation {})",
+                    req.container_id, existing_generation
+                ));
+                return Ok(Response::new(AttachContainerResponse {
+                    ok: false,
+                    message: format!(
+                        "stale membership update ignored; existing generation is {existing_generation}"
+                    ),
                 }));
             }
+            MembershipOutcome::Conflict {
+                existing_zone,
+                requested_zone,
+                ..
+            } => {
+                self.health
+                    .write()
+                    .await
+                    .mark_membership_degraded(format!(
+                        "conflicting membership for container '{}': existing zone '{}', requested zone '{}'",
+                        req.container_id, existing_zone, requested_zone
+                    ));
+                return Ok(Response::new(AttachContainerResponse {
+                    ok: false,
+                    message: format!(
+                        "conflicting membership: existing zone '{existing_zone}', requested zone '{requested_zone}'"
+                    ),
+                }));
+            }
+            MembershipOutcome::Removed { .. } | MembershipOutcome::NotFound => {
+                return Err(Status::internal("unexpected membership outcome"));
+            }
         };
-        let zone_type = registry.zone_type(&req.zone_name).unwrap_or(ZoneType::NonGlobal);
 
         let mut ebpf = self.ebpf.lock().await;
-        if let Err(error) = ebpf.add_zone_member(req.cgroup_id, zone_id, zone_type) {
-            registry.remove_container(&req.container_id, None);
-            return Err(Status::internal(format!(
-                "BPF add_zone_member failed: {error}"
-            )));
+        if let BpfMembershipIntent::Add {
+            cgroup_id,
+            zone_id,
+            zone_type,
+        } = intent
+        {
+            if let Err(error) = ebpf.add_zone_member(cgroup_id, zone_id, zone_type) {
+                self.registry
+                    .write()
+                    .await
+                    .remove_container(&req.container_id, None);
+                self.memberships
+                    .write()
+                    .await
+                    .remove(&req.container_id, None);
+                self.health.write().await.mark_membership_degraded(format!(
+                    "BPF membership add failed for container '{}': {error}",
+                    req.container_id
+                ));
+                return Err(Status::internal(format!(
+                    "BPF add_zone_member failed: {error}"
+                )));
+            }
+        } else {
+            return Err(Status::internal(
+                "unexpected BPF membership intent for attach",
+            ));
         }
+        self.memberships
+            .write()
+            .await
+            .mark_applied(&req.container_id);
 
+        let registry = self.registry.read().await;
         let mut health = self.health.write().await;
         health.containers_active = registry.container_count();
 
@@ -172,6 +265,22 @@ impl SyvaCore for SyvaCoreService {
         let req = request.into_inner();
         if req.container_id.is_empty() {
             return Err(Status::invalid_argument("container_id is required"));
+        }
+
+        let membership_outcome = self
+            .memberships
+            .write()
+            .await
+            .remove(&req.container_id, Some(req.generation));
+        if let MembershipOutcome::Stale {
+            existing_generation,
+        } = membership_outcome
+        {
+            self.health.write().await.mark_membership_degraded(format!(
+                "stale detach ignored for container '{}' (existing generation {})",
+                req.container_id, existing_generation
+            ));
+            return Ok(Response::new(DetachContainerResponse { ok: false }));
         }
 
         let mut registry = self.registry.write().await;
@@ -463,5 +572,27 @@ fn parse_proto_zone_type(value: i32) -> Result<ZoneType, Status> {
         other => Err(Status::invalid_argument(format!(
             "unsupported zone_type: {other}"
         ))),
+    }
+}
+
+fn attach_request_to_observation(req: &AttachContainerRequest) -> MembershipObservation {
+    let pod = if req.pod_namespace.is_empty() && req.pod_name.is_empty() && req.pod_uid.is_empty() {
+        None
+    } else {
+        Some(PodIdentity {
+            namespace: req.pod_namespace.clone(),
+            name: req.pod_name.clone(),
+            uid: req.pod_uid.clone(),
+        })
+    };
+
+    MembershipObservation {
+        container_id: req.container_id.clone(),
+        pod,
+        cgroup_id: req.cgroup_id,
+        zone_name: req.zone_name.clone(),
+        source: MembershipSource::from_label(&req.source),
+        generation: req.generation,
+        observed_at: std::time::SystemTime::now(),
     }
 }

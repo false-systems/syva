@@ -19,7 +19,6 @@ pub(crate) struct CoreZonePolicyInput {
 pub(crate) struct RemoveZoneResult {
     pub ok: bool,
     pub message: String,
-    pub fully_removed: bool,
 }
 
 pub(crate) async fn register_zone_local(
@@ -101,7 +100,6 @@ pub(crate) async fn remove_zone_local(
                     RemoveZoneResult {
                         ok: true,
                         message: String::new(),
-                        fully_removed: false,
                     },
                 )
             } else {
@@ -113,7 +111,6 @@ pub(crate) async fn remove_zone_local(
                     RemoveZoneResult {
                         ok: true,
                         message: String::new(),
-                        fully_removed: true,
                     },
                 )
             }
@@ -129,7 +126,6 @@ pub(crate) async fn remove_zone_local(
                             "zone '{}' has {} active containers — use drain=true or detach them first",
                             zone_name, refcount
                         ),
-                        fully_removed: false,
                     },
                 )
             } else {
@@ -141,7 +137,6 @@ pub(crate) async fn remove_zone_local(
                     RemoveZoneResult {
                         ok: true,
                         message: String::new(),
-                        fully_removed: true,
                     },
                 )
             }

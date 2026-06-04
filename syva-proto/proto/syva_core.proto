@@ -72,6 +72,13 @@ message AttachContainerRequest {
     string zone_name = 2;
     // cgroup_id resolved by adapter from /proc/{pid}/cgroup
     uint64 cgroup_id = 3;
+    string pod_namespace = 4;
+    string pod_name = 5;
+    string pod_uid = 6;
+    // Adapter/source name, for example "file", "kubernetes", or "api".
+    string source = 7;
+    // Monotonic source generation. Stale updates do not replace newer state.
+    uint64 generation = 8;
 }
 
 message AttachContainerResponse {
@@ -81,6 +88,8 @@ message AttachContainerResponse {
 
 message DetachContainerRequest {
     string container_id = 1;
+    string source = 2;
+    uint64 generation = 3;
 }
 
 message DetachContainerResponse {

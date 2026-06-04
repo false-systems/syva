@@ -1,8 +1,10 @@
 use aya_ebpf::programs::LsmContext;
 
-use crate::{lookup_caller_zone, is_cross_zone_allowed, read_file_ino,
-            count_decision, emit_deny_event, INODE_ZONE_MAP};
-use syva_ebpf_common::{ZONE_FLAG_GLOBAL, PROG_MMAP_FILE, HOOK_MMAP_FILE};
+use crate::{
+    count_decision, emit_deny_event, is_cross_zone_allowed, lookup_caller_zone, read_file_ino,
+    INODE_ZONE_MAP,
+};
+use syva_ebpf_common::{HOOK_MMAP_FILE, PROG_MMAP_FILE, ZONE_FLAG_GLOBAL};
 
 /// PROT_EXEC flag value from linux/mman.h.
 const PROT_EXEC: u64 = 0x4;

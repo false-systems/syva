@@ -1,17 +1,19 @@
 # syva-adapter-k8s
 
 `syva-k8s` watches `SyvaZonePolicy` CRDs in one namespace and reconciles them
-into zones in `syva-cp` for one configured team.
+into the local `syva-core` Unix-socket API.
 
 Start:
 
 ```bash
 syva-k8s \
-    --namespace syva-system \
-    --cp-endpoint http://syva-cp.syva-system.svc:50051 \
-    --team-id 00000000-0000-0000-0000-000000000000
+  --namespace syva-system \
+  --core-socket /run/syva/syva-core.sock
 ```
 
 Notes:
-- The CRD remains the source of truth; direct API edits will be overwritten by the watcher.
-- Pod annotation / container membership sync is deferred until `ContainerService` exists end to end.
+
+- The CRD is the source of truth for zone policy on the node.
+- The adapter reconciles zones and mutual communication pairs.
+- Automatic pod/container membership watching is not wired yet. Pods must be
+  attached through `syva.core.v1 AttachContainer` until that integration lands.

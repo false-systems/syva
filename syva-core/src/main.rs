@@ -1,7 +1,7 @@
 //! syva-core — eBPF enforcement engine.
 //!
-//! The core engine manages BPF programs and maps and consumes desired
-//! zone state from syva-cp.
+//! The core engine manages BPF programs and maps and consumes desired zone
+//! state through the local syva.core.v1 Unix-socket API.
 //!
 //! Usage:
 //!   syva-core                          # Start the enforcement engine
@@ -10,11 +10,11 @@
 
 mod btf;
 mod container_id;
-mod cp_reconcile;
 mod ebpf;
 mod events;
 mod health;
 mod ingest;
+mod membership;
 mod rpc;
 pub mod types;
 mod zone;
@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use syva_cp_client::CpClientConfig;
 use syva_proto::syva_core::syva_core_server::SyvaCoreServer;
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, RwLock};
@@ -48,49 +47,9 @@ struct Cli {
     #[arg(long, default_value = "9091")]
     health_port: u16,
 
-    /// Policy ingestion source.
-    #[arg(long, default_value = "cp")]
-    policy_source: PolicySource,
-
     /// Local syva.core.v1 Unix socket path.
     #[arg(long, default_value = "/run/syva/syva-core.sock")]
     socket_path: PathBuf,
-
-    /// syva-cp endpoint. Required when --policy-source=cp.
-    #[arg(long, env = "SYVA_CP_ENDPOINT")]
-    cp_endpoint: Option<String>,
-
-    /// Hostname to report to syva-cp. Defaults to the system hostname.
-    #[arg(long, env = "SYVA_NODE_NAME")]
-    node_name: Option<String>,
-
-    /// Path to the stable node fingerprint file (for example /etc/machine-id).
-    #[arg(
-        long,
-        env = "SYVA_NODE_FINGERPRINT_PATH",
-        default_value = "/etc/machine-id"
-    )]
-    fingerprint_path: PathBuf,
-
-    /// Optional cluster identifier to report at node registration time.
-    #[arg(long, env = "SYVA_CLUSTER_ID")]
-    cluster_id: Option<String>,
-
-    /// Node labels to send at registration. Format: key=value,key=value
-    #[arg(long, env = "SYVA_NODE_LABELS", value_delimiter = ',')]
-    node_labels: Vec<String>,
-
-    /// Path where the registered node ID is persisted across restarts.
-    #[arg(
-        long,
-        env = "SYVA_NODE_ID_PATH",
-        default_value = "/var/lib/syva/node-id"
-    )]
-    node_id_path: PathBuf,
-
-    /// Heartbeat interval in seconds for CP mode.
-    #[arg(long, env = "SYVA_HEARTBEAT_SECS", default_value = "15")]
-    heartbeat_secs: u64,
 }
 
 #[derive(Subcommand)]
@@ -106,12 +65,6 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum PolicySource {
-    Cp,
-    Local,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -170,23 +123,19 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
 
     // Create zone registry.
     let registry = Arc::new(RwLock::new(zone::ZoneRegistry::new()));
+    let memberships = Arc::new(RwLock::new(membership::MembershipService::new()));
     let ebpf = Arc::new(Mutex::new(mgr));
 
-    let local_server_task = if matches!(config.policy_source, PolicySource::Local) {
-        Some(
-            spawn_local_core_server(
-                config.socket_path.clone(),
-                registry.clone(),
-                ebpf.clone(),
-                health_state.clone(),
-                start_time,
-                cancel.clone(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let mut local_server_task = spawn_local_core_server(
+        config.socket_path.clone(),
+        registry.clone(),
+        memberships.clone(),
+        ebpf.clone(),
+        health_state.clone(),
+        start_time,
+        cancel.clone(),
+    )
+    .await?;
 
     tracing::info!("startup complete — enforcement active");
 
@@ -221,8 +170,8 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
                                         hook,
                                         new_errors,
                                         total_errors = totals.error,
-                                        "enforcement errors detected — kernel struct reads \
-                                         failing (fail-open). Run `syva-core status` to inspect."
+                                        "enforcement errors detected — security status is degraded \
+                                         because kernel reads failed open. Run `syva-core status` to inspect."
                                     );
                                 }
                                 last_errors[idx] = totals.error;
@@ -244,96 +193,39 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         }
     });
 
-    match config.policy_source {
-        PolicySource::Cp => {
-            let cp_endpoint = config.cp_endpoint.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--cp-endpoint or SYVA_CP_ENDPOINT is required when --policy-source=cp"
-                )
-            })?;
-            let node_name = config
-                .node_name
-                .clone()
-                .or_else(system_hostname)
-                .unwrap_or_else(|| "unknown".to_string());
-            let cp_config = CpClientConfig {
-                endpoint: cp_endpoint,
-                node_name,
-                cluster_id: config.cluster_id.clone(),
-                fingerprint: read_fingerprint(&config.fingerprint_path),
-                labels: parse_labels(&config.node_labels),
-                node_id_path: config.node_id_path.clone(),
-                heartbeat_interval: Duration::from_secs(config.heartbeat_secs),
-                ..Default::default()
-            };
+    let mut local_server_exited = false;
 
-            let (cp, registration) = connect_and_register_with_retry(cp_config).await;
-            tracing::info!(node_id = %registration.node_id, "registered with syva-cp");
-
-            let _heartbeat = cp.spawn_heartbeat_loop();
-            let reconciler = cp_reconcile::Reconciler::new(
-                cp,
-                registry.clone(),
-                ebpf.clone(),
-                health_state.clone(),
-            );
-            let mut reconcile_task = tokio::spawn(async move {
-                reconciler.run().await;
-            });
-
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("received SIGINT; shutting down");
-                }
-                _ = sigterm.recv() => {
-                    tracing::info!("received SIGTERM; shutting down");
-                }
-                _ = &mut reconcile_task => {
-                    tracing::warn!("reconcile loop exited");
-                }
-            }
-
-            reconcile_task.abort();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received SIGINT; shutting down");
         }
-        PolicySource::Local => {
-            let mut local_server_task = local_server_task
-                .ok_or_else(|| anyhow::anyhow!("local server task was not started"))?;
-            let mut local_server_exited = false;
-
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("received SIGINT; shutting down");
-                }
-                _ = sigterm.recv() => {
-                    tracing::info!("received SIGTERM; shutting down");
-                }
-                result = &mut local_server_task => {
-                    local_server_exited = true;
-                    match result {
-                        Ok(Ok(())) => tracing::info!("local gRPC server exited"),
-                        Ok(Err(error)) => tracing::warn!(%error, "local gRPC server exited with error"),
-                        Err(error) => tracing::warn!(%error, "local gRPC server task failed"),
-                    }
-                }
-            }
-
-            cancel.cancel();
-            if !local_server_exited {
-                match tokio::time::timeout(Duration::from_secs(10), local_server_task).await {
-                    Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(error))) => {
-                        tracing::warn!(%error, "local gRPC server shutdown failed")
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "local gRPC server task failed during shutdown")
-                    }
-                    Err(_) => tracing::warn!("timed out waiting for local gRPC server shutdown"),
-                }
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM; shutting down");
+        }
+        result = &mut local_server_task => {
+            local_server_exited = true;
+            match result {
+                Ok(Ok(())) => tracing::info!("local gRPC server exited"),
+                Ok(Err(error)) => tracing::warn!(%error, "local gRPC server exited with error"),
+                Err(error) => tracing::warn!(%error, "local gRPC server task failed"),
             }
         }
     }
 
     cancel.cancel();
+    if !local_server_exited {
+        match tokio::time::timeout(Duration::from_secs(10), local_server_task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::warn!(%error, "local gRPC server shutdown failed")
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "local gRPC server task failed during shutdown")
+            }
+            Err(_) => tracing::warn!("timed out waiting for local gRPC server shutdown"),
+        }
+    }
+
     // Drop ebpf manager (cleans up BPF pins).
     drop(ebpf);
     tracing::info!("syva-core stopped");
@@ -343,6 +235,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
 async fn spawn_local_core_server(
     socket_path: PathBuf,
     registry: Arc<RwLock<zone::ZoneRegistry>>,
+    memberships: Arc<RwLock<membership::MembershipService>>,
     ebpf: Arc<Mutex<ebpf::EnforceEbpf>>,
     health: health::SharedHealth,
     start_time: Instant,
@@ -373,6 +266,7 @@ async fn spawn_local_core_server(
 
     let service = rpc::SyvaCoreService {
         registry,
+        memberships,
         ebpf,
         health,
         start_time,
@@ -439,87 +333,6 @@ fn syva_group_gid() -> Option<u32> {
             None
         }
     })
-}
-
-async fn connect_and_register_with_retry(
-    config: CpClientConfig,
-) -> (syva_cp_client::CpClient, syva_cp_client::NodeRegistration) {
-    let mut backoff = Duration::from_millis(250);
-    let max_backoff = Duration::from_secs(30);
-
-    loop {
-        match syva_cp_client::CpClient::connect(config.clone()).await {
-            Ok(cp) => match cp.register().await {
-                Ok(registration) => return (cp, registration),
-                Err(error) => {
-                    tracing::warn!(
-                        endpoint = %config.endpoint,
-                        error = %error,
-                        backoff_ms = backoff.as_millis(),
-                        "could not register with syva-cp; retrying"
-                    );
-                }
-            },
-            Err(error) => {
-                tracing::warn!(
-                    endpoint = %config.endpoint,
-                    error = %error,
-                    backoff_ms = backoff.as_millis(),
-                    "could not connect to syva-cp; retrying"
-                );
-            }
-        }
-
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(max_backoff);
-    }
-}
-
-pub(crate) fn parse_labels(entries: &[String]) -> std::collections::BTreeMap<String, String> {
-    let mut labels = std::collections::BTreeMap::new();
-
-    for entry in entries {
-        let trimmed = entry.trim();
-        if let Some((key, value)) = trimmed.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-            if key.is_empty() {
-                tracing::warn!(entry = trimmed, "ignoring node label with empty key");
-                continue;
-            }
-            labels.insert(key.to_string(), value.to_string());
-        } else {
-            tracing::warn!(entry = trimmed, "ignoring malformed node label");
-        }
-    }
-
-    labels
-}
-
-pub(crate) fn read_fingerprint(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|contents| contents.trim().to_string())
-        .filter(|contents| !contents.is_empty())
-}
-
-fn system_hostname() -> Option<String> {
-    let mut buffer = [0_u8; 256];
-    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
-    if result != 0 {
-        return None;
-    }
-
-    let length = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    let hostname = String::from_utf8_lossy(&buffer[..length]).into_owned();
-    if hostname.is_empty() {
-        None
-    } else {
-        Some(hostname)
-    }
 }
 
 async fn cmd_status() -> anyhow::Result<()> {

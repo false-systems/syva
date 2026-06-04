@@ -28,8 +28,7 @@ pub fn load_policies_from_dir(dir: &Path) -> Result<HashMap<String, FilePolicy>>
         return Ok(policies);
     }
 
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("read_dir {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry?;
@@ -45,10 +44,10 @@ pub fn load_policies_from_dir(dir: &Path) -> Result<HashMap<String, FilePolicy>>
             continue;
         }
 
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let policy: FilePolicy = toml::from_str(&text)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let policy: FilePolicy =
+            toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         policy.policy.validate(stem)?;
         policies.insert(stem.to_string(), policy);
     }

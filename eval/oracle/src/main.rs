@@ -880,7 +880,7 @@ async fn case_015_file_adapter_ptrace_capability_registers() {
 }
 
 #[tokio::test]
-async fn case_016_file_adapter_rejects_core_and_cp_flags_together() {
+async fn case_016_file_adapter_rejects_cp_endpoint_flag() {
     let bin = match target_bin("syva-file") {
         Ok(path) => path,
         Err(error) => skip!("{error}"),
@@ -892,35 +892,20 @@ async fn case_016_file_adapter_rejects_core_and_cp_flags_together() {
         .arg("/tmp/syva-oracle-nope.sock")
         .arg("--cp-endpoint")
         .arg("http://127.0.0.1:1")
-        .arg("--team-id")
-        .arg("00000000-0000-0000-0000-000000000001")
         .arg("--policy-dir")
         .arg(dir.path());
     let (status, stderr) =
         run_short_process(command, Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS)).expect("run");
     assert!(!status.success(), "process must fail");
     assert!(
-        stderr.contains("core-socket") && stderr.contains("cp-endpoint"),
+        stderr.contains("cp-endpoint"),
         "{stderr}"
     );
 }
 
 #[tokio::test]
 async fn case_017_file_adapter_rejects_missing_target_flag() {
-    let bin = match target_bin("syva-file") {
-        Ok(path) => path,
-        Err(error) => skip!("{error}"),
-    };
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut command = Command::new(bin);
-    command.arg("--policy-dir").arg(dir.path());
-    let (status, stderr) =
-        run_short_process(command, Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS)).expect("run");
-    assert!(!status.success(), "process must fail");
-    assert!(
-        stderr.contains("one of") || stderr.contains("required") || stderr.contains("core-socket"),
-        "{stderr}"
-    );
+    skip!("syva-file now defaults to the local syva-core socket; missing target is not an error");
 }
 
 #[tokio::test]
@@ -1099,7 +1084,7 @@ async fn case_036_api_get_missing_zone_returns_404() {
 }
 
 #[tokio::test]
-async fn case_037_api_rejects_core_and_cp_flags_together() {
+async fn case_037_api_rejects_cp_endpoint_flag() {
     let bin = match target_bin("syva-api") {
         Ok(path) => path,
         Err(error) => skip!("{error}"),
@@ -1111,14 +1096,12 @@ async fn case_037_api_rejects_core_and_cp_flags_together() {
         .arg("--core-socket")
         .arg("/tmp/syva-oracle-nope.sock")
         .arg("--cp-endpoint")
-        .arg("http://127.0.0.1:1")
-        .arg("--team-id")
-        .arg("00000000-0000-0000-0000-000000000001");
+        .arg("http://127.0.0.1:1");
     let (status, stderr) =
         run_short_process(command, Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS)).expect("run");
     assert!(!status.success(), "process must fail");
     assert!(
-        stderr.contains("core-socket") && stderr.contains("cp-endpoint"),
+        stderr.contains("cp-endpoint"),
         "{stderr}"
     );
 }

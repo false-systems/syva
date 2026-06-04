@@ -1,18 +1,19 @@
 # syva-adapter-file
 
-`syva-file` reconciles a directory of TOML policies into zones in `syva-cp`.
-Each `*.toml` filename becomes the zone name within one configured team.
+`syva-file` reconciles a directory of TOML policy files into the local
+`syva-core` Unix-socket API. Each `*.toml` filename becomes the zone name.
 
 Start:
 
 ```bash
 syva-file \
-    --policy-dir /etc/syva/policies \
-    --cp-endpoint http://syva-cp.syva-system.svc:50051 \
-    --team-id 00000000-0000-0000-0000-000000000000
+  --policy-dir /etc/syva/policies \
+  --core-socket /run/syva/syva-core.sock
 ```
 
 Notes:
-- `verify` still works as a dry-run parser and validator.
-- Reconcile is polling-based in session 4b.
-- Containerd watcher / container membership sync is deferred until `ContainerService` exists end to end.
+
+- `syva-file verify` validates TOML policy files without connecting to core.
+- The adapter reconciles zones, host paths, and mutual communication pairs.
+- Automatic container membership watching is not wired yet. Containers must be
+  attached through `syva.core.v1 AttachContainer` until that integration lands.

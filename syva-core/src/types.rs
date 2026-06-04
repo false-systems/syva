@@ -23,7 +23,9 @@ impl MemoryLimit {
 
     fn checked_parse(n: &str, multiplier: u64) -> Result<u64, String> {
         let value = n.parse::<u64>().map_err(|e| e.to_string())?;
-        value.checked_mul(multiplier).ok_or_else(|| "memory limit too large".to_string())
+        value
+            .checked_mul(multiplier)
+            .ok_or_else(|| "memory limit too large".to_string())
     }
 
     fn parse(s: &str) -> Result<u64, String> {
@@ -164,7 +166,6 @@ impl ZonePolicy {
             );
         }
 
-
         // M5: Bound policy arrays to prevent one zone from exhausting BPF maps.
         if self.filesystem.host_paths.len() > 1000 {
             anyhow::bail!("zone {zone_name}: host_paths exceeds limit of 1000 entries");
@@ -173,7 +174,9 @@ impl ZonePolicy {
             anyhow::bail!("zone {zone_name}: allowed_zones exceeds limit of 100 entries");
         }
         if self.capabilities.allowed.len() > 41 {
-            anyhow::bail!("zone {zone_name}: capabilities.allowed exceeds maximum of 41 Linux capabilities");
+            anyhow::bail!(
+                "zone {zone_name}: capabilities.allowed exceeds maximum of 41 Linux capabilities"
+            );
         }
 
         Ok(())
@@ -303,7 +306,10 @@ mod tests {
 
     #[test]
     fn memory_limit_parse_ti() {
-        assert_eq!(MemoryLimit::parse("1Ti").unwrap(), 1024u64 * 1024 * 1024 * 1024);
+        assert_eq!(
+            MemoryLimit::parse("1Ti").unwrap(),
+            1024u64 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
