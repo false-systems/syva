@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: syva-fmt
+        name: syva fmt
+        entry: make fmt
+        language: system
+        pass_filenames: false
+      - id: syva-release-docs
+        name: syva release-doc drift check
+        entry: make check-release-docs
+        language: system
+        pass_filenames: false
+      - id: syva-proto-check
+        name: syva proto check
+        entry: make proto-check
+        language: system
+        pass_filenames: false

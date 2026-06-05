@@ -51,6 +51,30 @@ cargo run -p xtask -- ci
 tests, eval crate builds, and eBPF object compilation. No Postgres service is
 required.
 
+## Local Guardrails
+
+Use the Makefile hierarchy for ordinary development:
+
+```sh
+make fmt
+make lint
+make test
+make precommit
+make ci
+```
+
+`make precommit` and `make ci` are non-privileged. They include release-doc
+drift checks and the release eBPF object build, but they do not load or attach
+BPF LSM programs.
+
+Optional pre-commit hook setup:
+
+```sh
+pipx install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
 ## Direct macOS checks
 
 These checks avoid Linux-only `aya` userspace paths:
@@ -90,3 +114,8 @@ that path.
 **Blackbox enforcement verification:** the eval/oracle suite talks to a live
 `syva-core`. It only verifies real enforcement if the VM can load and attach
 BPF LSM programs successfully.
+
+**Container integration test:** `sudo -E make verify-container-integration`
+needs a container runtime in the VM (`docker`, `nerdctl`, or `podman`; install
+e.g. `sudo apt-get install -y podman`). It proves `file_open` enforcement against
+a real container. See `docs/release/v0.2-runtime-verification.md`.

@@ -108,24 +108,39 @@ communication policy; container membership must currently be supplied through
 Fast host-safe checks:
 
 ```sh
-cargo fmt --all -- --check
-cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api
-cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client
+make macos-check
 ```
 
 Linux-only checks:
 
 ```sh
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --manifest-path eval/oracle/Cargo.toml
-cargo build --manifest-path eval/harness/Cargo.toml
-cargo run -p xtask -- build-ebpf
+make fmt
+make lint
+make test
+make precommit
+make ci
 ```
 
-`build-ebpf` builds the release eBPF object by default. Use
+`make precommit` and `make ci` are non-privileged gates: formatting, clippy,
+workspace tests, eval crate builds, release-doc drift checks, proto build check,
+and release eBPF object build. They do not run BPF-LSM attach or container
+runtime tests. On macOS, run the full gate through Lima with `make lima-check`;
+direct host checks are limited to `make macos-check` and the lightweight
+pre-commit hooks.
+
+`cargo run -p xtask -- build-ebpf` builds the release eBPF object by default. Use
 `cargo run -p xtask -- build-ebpf --debug` only for development experiments.
+
+Optional pre-commit hook setup:
+
+```sh
+pipx install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+The hook set runs fast formatting/proto/release-doc checks. Run
+`make precommit` before pushing release-candidate changes.
 
 ## Testing on macOS with Lima
 
@@ -158,7 +173,11 @@ BPF LSM support:
 ```sh
 sudo -E make verify-runtime
 sudo -E make verify-integration
+sudo -E make verify-container-integration
 ```
+
+All three are **privileged Linux / BPF-LSM** gates (the container gate also needs
+a container runtime); they are `#[ignore]`d in normal `cargo test`.
 
 `verify-runtime` runs the ignored local-mode runtime tests explicitly. It checks
 Linux, root, and the required `syva` group before attempting BPF load/attach,
@@ -168,6 +187,12 @@ self-tests, and local core RPC verification.
 kernel denial: a zone-a workload in a cgroup can read a zone-a file but is
 blocked with `EPERM` when reading a zone-b file. This is process/cgroup
 enforcement evidence, not container runtime discovery.
+
+`verify-container-integration` proves the same `file_open` denial against a
+**real container** (`docker`/`nerdctl`/`podman`; override with
+`SYVA_CONTAINER_RUNTIME`). It requires a container runtime in addition to the
+privileged BPF-LSM preflight, and fails clearly rather than falling back to a
+process test. It proves one container-backed `file_open` path, not every hook.
 
 See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 

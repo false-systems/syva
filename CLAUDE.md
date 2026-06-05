@@ -18,18 +18,17 @@ streams in this repository.
 Host-safe checks:
 
 ```bash
-cargo fmt --all -- --check
-cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api
-cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client
+make macos-check
 ```
 
 Linux full checks:
 
 ```bash
-cargo check --workspace
-cargo test --workspace
-cargo run -p xtask -- build-ebpf
-cargo run -p xtask -- ci
+make fmt
+make lint
+make test
+make precommit
+make ci
 ```
 
 `build-ebpf` builds the release eBPF object by default because that is the
@@ -46,10 +45,14 @@ make lima-shell
 `make lima-check` runs format check, clippy, workspace check, workspace tests,
 eval crate builds, and eBPF object compilation in the `syva-dev` Lima VM.
 
-Privileged runtime evidence is separate:
+Privileged runtime evidence is separate (privileged Linux / BPF-LSM only; the
+container gate also needs a container runtime). All are `#[ignore]`d in normal
+`cargo test`:
 
 ```bash
-sudo -E make verify-runtime
+sudo -E make verify-runtime              # load + attach 6 hooks + self-tests
+sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
+sudo -E make verify-container-integration # same denial against a real container
 ```
 
 ## Active Crates

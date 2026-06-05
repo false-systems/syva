@@ -1,0 +1,22 @@
+name: privileged-runtime
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify-runtime:
+    name: privileged v0.2 runtime gates
+    runs-on: [self-hosted, linux, bpf-lsm, privileged]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host evidence
+        run: |
+          uname -a
+          id
+          cat /sys/kernel/security/lsm
+      - name: Verify load, attach, and self-tests
+        run: sudo -E make verify-runtime
+      - name: Verify process/cgroup file_open enforcement
+        run: sudo -E make verify-integration
+      - name: Verify container file_open enforcement
+        run: sudo -E make verify-container-integration
