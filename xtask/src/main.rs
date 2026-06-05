@@ -220,12 +220,7 @@ fn check_release_docs() -> Result<()> {
                 in_fence = !in_fence;
                 continue;
             }
-            if in_fence
-                || lower.contains("release-doc drift check")
-                || lower.contains("stale active claims")
-                || lower.trim_start().starts_with("active `")
-                || lower.trim_start().starts_with("claims that lima")
-            {
+            if in_fence {
                 continue;
             }
             if lower.contains("7 hooks")
