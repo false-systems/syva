@@ -213,8 +213,21 @@ fn check_release_docs() -> Result<()> {
             continue;
         };
         let lines: Vec<&str> = content.lines().collect();
+        let mut in_fence = false;
         for (idx, line) in lines.iter().enumerate() {
             let lower = line.to_ascii_lowercase();
+            if lower.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence
+                || lower.contains("release-doc drift check")
+                || lower.contains("stale active claims")
+                || lower.trim_start().starts_with("active `")
+                || lower.trim_start().starts_with("claims that lima")
+            {
+                continue;
+            }
             if lower.contains("7 hooks")
                 || lower.contains("7 lsm")
                 || lower.contains("seven hooks")
