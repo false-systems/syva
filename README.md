@@ -196,6 +196,24 @@ process test. It proves one container-backed `file_open` path, not every hook.
 
 See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 
+## Deployment (Lima development)
+
+A single-node development deployment path exists for the Lima VM. It deploys
+`syva-core` as a node-local agent and proves the *deployed* instance blocks a
+real container's cross-zone `file_open`:
+
+```sh
+make lima-up
+make lima-bootstrap          # install/verify deps (idempotent)
+make lima-deploy             # build + install + start syva-core, prove healthy
+make lima-verify-deployment  # prove the deployed core blocks a real container
+make lima-undeploy           # stop and clean up
+```
+
+`make lima-smoke` runs bootstrap → deploy → verify → undeploy in one command.
+This is a development deployment proof, not a production/Kubernetes install. See
+[docs/deployment/lima.md](docs/deployment/lima.md).
+
 ## Run
 
 Linux only, with the required BPF privileges and kernel config:

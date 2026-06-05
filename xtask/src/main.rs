@@ -44,6 +44,9 @@ enum Cli {
     /// Run the privileged BPF-LSM **container** integration test: a real
     /// container in zone-a is blocked from reading a zone-b file.
     VerifyContainerIntegration,
+    /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
+    /// container's cross-zone file_open. Does not start its own core.
+    VerifyDeployment,
     /// Run the standard active-project CI sequence.
     Ci,
 }
@@ -65,6 +68,7 @@ fn main() -> Result<()> {
         Cli::VerifyRuntime => verify_runtime(),
         Cli::VerifyIntegration => verify_integration(),
         Cli::VerifyContainerIntegration => verify_container_integration(),
+        Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
 }
@@ -434,6 +438,48 @@ fn verify_container_integration() -> Result<()> {
     }
 
     build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_container_file_open",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Verify an ALREADY-DEPLOYED syva-core. Unlike verify-container-integration,
+/// this does not build the eBPF object or start a core — it targets the running
+/// instance at SYVA_SOCKET and runs the container test in existing-core mode.
+fn verify_deployment() -> Result<()> {
+    privileged_runtime_preflight("verify-deployment")?;
+
+    let runtime = std::env::var("SYVA_CONTAINER_RUNTIME").ok();
+    let found = match &runtime {
+        Some(r) => has_command(r),
+        None => ["docker", "nerdctl", "podman"]
+            .iter()
+            .any(|r| has_command(r)),
+    };
+    if !found {
+        bail!("verify-deployment requires docker, nerdctl, podman, or another supported container runtime");
+    }
+
+    let socket = std::env::var("SYVA_SOCKET").map_err(|_| {
+        anyhow::anyhow!(
+            "verify-deployment requires SYVA_SOCKET=<path> pointing at a deployed syva-core (run `make lima-deploy` first)"
+        )
+    })?;
+    if !PathBuf::from(&socket).exists() {
+        bail!("syva-core socket {socket} not found — is syva-core deployed and running? (make lima-deploy)");
+    }
+
+    // SYVA_SOCKET is inherited by the test process and selects existing-core mode.
     run_root_command(
         "cargo",
         &[

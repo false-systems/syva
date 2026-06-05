@@ -39,7 +39,8 @@ use std::time::{Duration, Instant};
 
 use syva_proto::syva_core::syva_core_client::SyvaCoreClient;
 use syva_proto::syva_core::{
-    AttachContainerRequest, RegisterHostPathRequest, RegisterZoneRequest, StatusRequest, ZonePolicy,
+    AttachContainerRequest, DetachContainerRequest, RegisterHostPathRequest, RegisterZoneRequest,
+    StatusRequest, ZonePolicy,
 };
 use tonic::transport::Channel;
 
@@ -174,10 +175,21 @@ async fn container_file_open_cross_zone_is_blocked() -> anyhow::Result<()> {
         workdir: workdir.clone(),
     };
 
+    // Target Syvä: an already-deployed core (SYVA_SOCKET) for deployment
+    // verification, or a managed core for the standalone container test.
+    let deployed_socket = std::env::var_os("SYVA_SOCKET").map(PathBuf::from);
+    let deployment_mode = deployed_socket.is_some();
+
     // --- Declared contract: printed BEFORE running the workload. ---
-    println!("=== syva container integration contract ===");
-    println!("PASS:  container in zone-a can read its own zone-a file.");
-    println!("BLOCK: container in zone-a cannot read protected zone-b file.");
+    if deployment_mode {
+        println!("=== syva deployment verification contract ===");
+        println!("PASS:  deployed Syvä allows a container in zone-a to read its zone-a file.");
+        println!("BLOCK: deployed Syvä blocks a container in zone-a from reading the zone-b file.");
+    } else {
+        println!("=== syva container integration contract ===");
+        println!("PASS:  container in zone-a can read its own zone-a file.");
+        println!("BLOCK: container in zone-a cannot read protected zone-b file.");
+    }
     println!("HOOK:  file_open");
     println!("EXPECTED DENIAL: EPERM / Operation not permitted");
     println!("EXPECTED KERNEL EVIDENCE: file_open deny_delta=1");
@@ -208,10 +220,36 @@ async fn container_file_open_cross_zone_is_blocked() -> anyhow::Result<()> {
         "precondition failed: secret file is not intrinsically readable"
     );
 
-    // --- Deploy Syvä (loads + attaches eBPF, runs self-tests). ---
-    let sock_dir = tempfile::tempdir()?;
-    let socket_path = sock_dir.path().join("syva-core.sock");
-    let _core = common::spawn_core(&socket_path)?;
+    // --- Obtain a Syvä client: connect to the deployed core, or spawn a
+    //     managed one for the standalone test. In deployment mode we do NOT
+    //     start a core — the point is to verify the already-deployed instance. ---
+    let managed: Option<(tempfile::TempDir, common::CoreProcess)>;
+    let socket_path = match deployed_socket {
+        Some(path) => {
+            if !path.exists() {
+                anyhow::bail!(
+                    "SYVA_SOCKET={} does not exist — is syva-core deployed and running? \
+                     (run `make lima-deploy` first)",
+                    path.display()
+                );
+            }
+            println!(
+                "mode: existing-core (deployment), socket={}",
+                path.display()
+            );
+            managed = None;
+            path
+        }
+        None => {
+            println!("mode: managed-core (standalone container test)");
+            let dir = tempfile::tempdir()?;
+            let sp = dir.path().join("syva-core.sock");
+            let core = common::spawn_core(&sp)?;
+            managed = Some((dir, core));
+            sp
+        }
+    };
+    let _managed = managed;
     let mut client = common::wait_for_core(&socket_path).await?;
 
     for zone in [ZONE_A, ZONE_B] {
@@ -259,9 +297,10 @@ async fn container_file_open_cross_zone_is_blocked() -> anyhow::Result<()> {
 
     // Resolve the container's host cgroup and attach it to zone-a.
     let (cgroup_id, cgroup_rel) = container_cgroup_id(&runtime, &container)?;
+    let attach_container_id = format!("c0a-{pid:08x}");
     let attach = client
         .attach_container(AttachContainerRequest {
-            container_id: format!("c0a-{pid:08x}"),
+            container_id: attach_container_id.clone(),
             zone_name: ZONE_A.to_string(),
             cgroup_id,
             source: "integration".to_string(),
@@ -345,5 +384,18 @@ async fn container_file_open_cross_zone_is_blocked() -> anyhow::Result<()> {
         "file_open allow: {allow_after} (GLOBAL counter: allowed opens system-wide, \
          including unzoned/system processes; NOT workload-specific)"
     );
+
+    // In deployment mode the core outlives this test, so detach our membership
+    // to keep the deployed instance clean for the next run. Best-effort: the
+    // container/files are removed by Drop, and unique names keep reruns safe.
+    if deployment_mode {
+        let _ = client
+            .detach_container(DetachContainerRequest {
+                container_id: attach_container_id,
+                ..Default::default()
+            })
+            .await;
+        println!("deployment: detached test container membership");
+    }
     Ok(())
 }
