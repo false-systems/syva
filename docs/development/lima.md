@@ -90,3 +90,8 @@ that path.
 **Blackbox enforcement verification:** the eval/oracle suite talks to a live
 `syva-core`. It only verifies real enforcement if the VM can load and attach
 BPF LSM programs successfully.
+
+**Container integration test:** `sudo -E make verify-container-integration`
+needs a container runtime in the VM (`docker`, `nerdctl`, or `podman`; install
+e.g. `sudo apt-get install -y podman`). It proves `file_open` enforcement against
+a real container. See `docs/release/v0.2-runtime-verification.md`.

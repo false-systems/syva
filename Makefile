@@ -2,7 +2,7 @@ LIMA_NAME ?= syva-dev
 LIMA_CONFIG ?= ./lima/syva.yaml
 REPO_DIR := $(shell pwd)
 
-.PHONY: lima-up lima-shell lima-check lima-test lima-ebpf-build eval-build verify-runtime verify-integration macos-check
+.PHONY: lima-up lima-shell lima-check lima-test lima-ebpf-build eval-build verify-runtime verify-integration verify-container-integration macos-check
 
 lima-up:
 	limactl start --name=$(LIMA_NAME) $(LIMA_CONFIG)
@@ -29,6 +29,12 @@ verify-runtime:
 # blocks a forbidden cross-zone file_open. Run as: sudo -E make verify-integration
 verify-integration:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-integration
+
+# Privileged Linux / BPF-LSM + container runtime: proves a real container in
+# zone-a is blocked from reading a zone-b file. Needs docker/nerdctl/podman.
+# Run as: sudo -E make verify-container-integration
+verify-container-integration:
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-container-integration
 
 macos-check:
 	cargo fmt --all -- --check

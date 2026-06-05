@@ -31,6 +31,9 @@ enum Cli {
     /// Run the privileged BPF-LSM integration test that proves the kernel
     /// blocks a forbidden cross-zone action.
     VerifyIntegration,
+    /// Run the privileged BPF-LSM **container** integration test: a real
+    /// container in zone-a is blocked from reading a zone-b file.
+    VerifyContainerIntegration,
     /// Run the standard active-project CI sequence.
     Ci,
 }
@@ -46,6 +49,7 @@ fn main() -> Result<()> {
         Cli::EvalBuild => build_eval_crates(),
         Cli::VerifyRuntime => verify_runtime(),
         Cli::VerifyIntegration => verify_integration(),
+        Cli::VerifyContainerIntegration => verify_container_integration(),
         Cli::Ci => {
             run_root_command("cargo", &["fmt", "--all", "--", "--check"])?;
             run_root_command(
@@ -182,6 +186,49 @@ fn verify_integration() -> Result<()> {
             "--nocapture",
         ],
     )
+}
+
+/// Run the privileged **container** integration test: deploy the local core and
+/// prove a real container in zone-a is blocked from reading a zone-b file.
+fn verify_container_integration() -> Result<()> {
+    privileged_runtime_preflight("verify-container-integration")?;
+
+    // Require a Docker-CLI-compatible container runtime up front so the failure
+    // is clear (the target is real-container-only, never a process fallback).
+    let runtime = std::env::var("SYVA_CONTAINER_RUNTIME").ok();
+    let found = match &runtime {
+        Some(r) => has_command(r),
+        None => ["docker", "nerdctl", "podman"]
+            .iter()
+            .any(|r| has_command(r)),
+    };
+    if !found {
+        bail!("verify-container-integration requires docker, nerdctl, podman, or another supported container runtime");
+    }
+
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_container_file_open",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+fn has_command(bin: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {bin}"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn verify_runtime() -> Result<()> {
