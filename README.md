@@ -158,7 +158,11 @@ BPF LSM support:
 ```sh
 sudo -E make verify-runtime
 sudo -E make verify-integration
+sudo -E make verify-container-integration
 ```
+
+All three are **privileged Linux / BPF-LSM** gates (the container gate also needs
+a container runtime); they are `#[ignore]`d in normal `cargo test`.
 
 `verify-runtime` runs the ignored local-mode runtime tests explicitly. It checks
 Linux, root, and the required `syva` group before attempting BPF load/attach,
@@ -168,6 +172,12 @@ self-tests, and local core RPC verification.
 kernel denial: a zone-a workload in a cgroup can read a zone-a file but is
 blocked with `EPERM` when reading a zone-b file. This is process/cgroup
 enforcement evidence, not container runtime discovery.
+
+`verify-container-integration` proves the same `file_open` denial against a
+**real container** (`docker`/`nerdctl`/`podman`; override with
+`SYVA_CONTAINER_RUNTIME`). It requires a container runtime in addition to the
+privileged BPF-LSM preflight, and fails clearly rather than falling back to a
+process test. It proves one container-backed `file_open` path, not every hook.
 
 See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 

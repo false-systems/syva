@@ -46,10 +46,14 @@ make lima-shell
 `make lima-check` runs format check, clippy, workspace check, workspace tests,
 eval crate builds, and eBPF object compilation in the `syva-dev` Lima VM.
 
-Privileged runtime evidence is separate:
+Privileged runtime evidence is separate (privileged Linux / BPF-LSM only; the
+container gate also needs a container runtime). All are `#[ignore]`d in normal
+`cargo test`:
 
 ```bash
-sudo -E make verify-runtime
+sudo -E make verify-runtime              # load + attach 6 hooks + self-tests
+sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
+sudo -E make verify-container-integration # same denial against a real container
 ```
 
 ## Active Crates
