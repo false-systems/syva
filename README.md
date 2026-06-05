@@ -108,24 +108,39 @@ communication policy; container membership must currently be supplied through
 Fast host-safe checks:
 
 ```sh
-cargo fmt --all -- --check
-cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api
-cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client
+make macos-check
 ```
 
 Linux-only checks:
 
 ```sh
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --manifest-path eval/oracle/Cargo.toml
-cargo build --manifest-path eval/harness/Cargo.toml
-cargo run -p xtask -- build-ebpf
+make fmt
+make lint
+make test
+make precommit
+make ci
 ```
 
-`build-ebpf` builds the release eBPF object by default. Use
+`make precommit` and `make ci` are non-privileged gates: formatting, clippy,
+workspace tests, eval crate builds, release-doc drift checks, proto build check,
+and release eBPF object build. They do not run BPF-LSM attach or container
+runtime tests. On macOS, run the full gate through Lima with `make lima-check`;
+direct host checks are limited to `make macos-check` and the lightweight
+pre-commit hooks.
+
+`cargo run -p xtask -- build-ebpf` builds the release eBPF object by default. Use
 `cargo run -p xtask -- build-ebpf --debug` only for development experiments.
+
+Optional pre-commit hook setup:
+
+```sh
+pipx install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+The hook set runs fast formatting/proto/release-doc checks. Run
+`make precommit` before pushing release-candidate changes.
 
 ## Testing on macOS with Lima
 

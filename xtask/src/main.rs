@@ -18,6 +18,8 @@ enum Cli {
     },
     /// Check Rust formatting.
     Fmt,
+    /// Run clippy for the active workspace.
+    Lint,
     /// Check the active Rust workspace.
     Check,
     /// Run workspace tests.
@@ -26,6 +28,14 @@ enum Cli {
     LinuxBpfCheck,
     /// Build eval/oracle and eval/harness so contract tests do not bitrot.
     EvalBuild,
+    /// Check syva-proto builds from the checked-in .proto definitions.
+    CheckProto,
+    /// Check release-critical docs do not drift from v0.2 runtime guarantees.
+    CheckReleaseDocs,
+    /// Check the runtime eBPF artifact policy: release build by default.
+    CheckEbpfArtifactPolicy,
+    /// Run the non-privileged pre-commit gate.
+    Precommit,
     /// Run ignored privileged runtime verification tests.
     VerifyRuntime,
     /// Run the privileged BPF-LSM integration test that proves the kernel
@@ -42,32 +52,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli {
         Cli::BuildEbpf { release, debug } => build_ebpf(release || !debug),
-        Cli::Fmt => run_root_command("cargo", &["fmt", "--all", "--", "--check"]),
+        Cli::Fmt => fmt(),
+        Cli::Lint => lint(),
         Cli::Check => run_root_command("cargo", &["check", "--workspace"]),
         Cli::Test => run_root_command("cargo", &["test", "--workspace"]),
-        Cli::LinuxBpfCheck => build_ebpf(true),
+        Cli::LinuxBpfCheck => check_ebpf_artifact_policy(),
         Cli::EvalBuild => build_eval_crates(),
+        Cli::CheckProto => check_proto(),
+        Cli::CheckReleaseDocs => check_release_docs(),
+        Cli::CheckEbpfArtifactPolicy => check_ebpf_artifact_policy(),
+        Cli::Precommit => precommit(),
         Cli::VerifyRuntime => verify_runtime(),
         Cli::VerifyIntegration => verify_integration(),
         Cli::VerifyContainerIntegration => verify_container_integration(),
-        Cli::Ci => {
-            run_root_command("cargo", &["fmt", "--all", "--", "--check"])?;
-            run_root_command(
-                "cargo",
-                &[
-                    "clippy",
-                    "--workspace",
-                    "--all-targets",
-                    "--",
-                    "-D",
-                    "warnings",
-                ],
-            )?;
-            run_root_command("cargo", &["check", "--workspace"])?;
-            run_root_command("cargo", &["test", "--workspace"])?;
-            build_eval_crates()?;
-            build_ebpf(true)
-        }
+        Cli::Ci => ci(),
     }
 }
 
@@ -119,6 +117,227 @@ fn build_ebpf(release: bool) -> Result<()> {
 
     println!("eBPF object built: {}", artifact.display());
     Ok(())
+}
+
+fn fmt() -> Result<()> {
+    run_root_command("cargo", &["fmt", "--all", "--", "--check"])?;
+    run_root_command(
+        "cargo",
+        &[
+            "fmt",
+            "--manifest-path",
+            "syva-ebpf/Cargo.toml",
+            "--",
+            "--check",
+        ],
+    )
+}
+
+fn lint() -> Result<()> {
+    run_root_command(
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )
+}
+
+fn check_proto() -> Result<()> {
+    run_root_command("cargo", &["check", "-p", "syva-proto"])
+}
+
+fn precommit() -> Result<()> {
+    fmt()?;
+    lint()?;
+    run_root_command("cargo", &["test", "--workspace"])?;
+    check_proto()?;
+    check_release_docs()?;
+    check_ebpf_artifact_policy()
+}
+
+fn ci() -> Result<()> {
+    fmt()?;
+    lint()?;
+    run_root_command("cargo", &["check", "--workspace"])?;
+    run_root_command("cargo", &["test", "--workspace"])?;
+    build_eval_crates()?;
+    check_proto()?;
+    check_release_docs()?;
+    check_ebpf_artifact_policy()
+}
+
+fn check_ebpf_artifact_policy() -> Result<()> {
+    build_ebpf(true)?;
+
+    let root = project_root();
+    let release = root.join("syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf");
+    if !release.exists() {
+        bail!("release eBPF object was not built at {}", release.display());
+    }
+
+    let loader = fs::read_to_string(root.join("syva-core/src/ebpf.rs"))
+        .context("failed to read syva-core/src/ebpf.rs")?;
+    let release_idx = loader
+        .find("bpfel-unknown-none/release/syva-ebpf")
+        .context("loader does not mention the release eBPF object")?;
+    let debug_idx = loader
+        .find("bpfel-unknown-none/debug/syva-ebpf")
+        .context("loader does not mention the debug eBPF object fallback")?;
+    if release_idx > debug_idx {
+        bail!("loader must prefer release eBPF object before debug fallback");
+    }
+
+    println!("release eBPF artifact policy ok: {}", release.display());
+    Ok(())
+}
+
+fn check_release_docs() -> Result<()> {
+    let root = project_root();
+    let files = tracked_files()?;
+    let mut failures = Vec::new();
+
+    for file in &files {
+        if !is_release_checked_file(file) {
+            continue;
+        }
+        if file == "xtask/src/main.rs" {
+            continue;
+        }
+        let path = root.join(file);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("7 hooks")
+                || lower.contains("7 lsm")
+                || lower.contains("seven hooks")
+                || lower.contains("seven lsm")
+            {
+                failures.push(format!("{file}:{} stale hook-count claim: {line}", idx + 1));
+            }
+            if lower.contains("syva_cgroup_attach") {
+                failures.push(format!(
+                    "{file}:{} active removed hook symbol: {line}",
+                    idx + 1
+                ));
+            }
+            if lower.contains("cgroup_attach_task") {
+                let start = idx.saturating_sub(2);
+                let end = usize::min(idx + 3, lines.len());
+                let window = lines[start..end].join(" ").to_ascii_lowercase();
+                let allowed = [
+                    "not a bpf-lsm hook",
+                    "not enforced",
+                    "known gap",
+                    "out of v0.2 scope",
+                    "does not attach",
+                    "do not reintroduce",
+                    "assert!",
+                ]
+                .iter()
+                .any(|phrase| window.contains(phrase));
+                if !allowed {
+                    failures.push(format!(
+                        "{file}:{} cgroup_attach_task must only appear as an explicit known gap: {line}",
+                        idx + 1
+                    ));
+                }
+            }
+            if (lower.contains("lima proves runtime")
+                || lower.contains("lima verifies runtime")
+                || lower.contains("lima proves enforcement")
+                || lower.contains("lima verifies enforcement"))
+                && !(lower.contains("not") || lower.contains("unless"))
+            {
+                failures.push(format!(
+                    "{file}:{} Lima runtime claim needs privileged BPF-LSM caveat: {line}",
+                    idx + 1
+                ));
+            }
+            if lower.contains("debug ebpf")
+                && (lower.contains("default") || lower.contains("runtime artifact"))
+            {
+                let start = idx.saturating_sub(1);
+                let end = usize::min(idx + 2, lines.len());
+                let window = lines[start..end].join(" ").to_ascii_lowercase();
+                if !window.contains("development") {
+                    failures.push(format!(
+                        "{file}:{} debug eBPF must not be described as the runtime default: {line}",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    for file in [
+        "README.md",
+        "CLAUDE.md",
+        "AGENT.md",
+        "SKILLS.md",
+        "docs/release/v0.2-runtime-verification.md",
+    ] {
+        let path = root.join(file);
+        if !path.exists() {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read release gate doc {file}"))?;
+        for gate in [
+            "verify-runtime",
+            "verify-integration",
+            "verify-container-integration",
+        ] {
+            if !content.contains(gate) {
+                failures.push(format!("{file} must mention release gate `{gate}`"));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        bail!("release documentation drift check failed");
+    }
+
+    println!("release documentation drift check ok");
+    Ok(())
+}
+
+fn tracked_files() -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(project_root())
+        .output()
+        .context("failed to list tracked files")?;
+    if !output.status.success() {
+        bail!("git ls-files failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+fn is_release_checked_file(file: &str) -> bool {
+    if file.starts_with("docs/archive/") {
+        return false;
+    }
+    matches!(
+        file.rsplit('.').next(),
+        Some("md" | "rs" | "proto" | "toml" | "yaml" | "yml")
+    ) || matches!(
+        file,
+        "Makefile" | "AGENT.md" | "CLAUDE.md" | "README.md" | "SKILLS.md"
+    )
 }
 
 fn build_eval_crates() -> Result<()> {

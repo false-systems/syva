@@ -62,6 +62,27 @@ HTTP requests ─► syva-api ────┘                                   
 | Why the removed v0.3 control plane existed (historical) | `docs/archive/0002-control-plane.md` |
 | Write-discipline patterns from the removed CP code (reference) | `docs/archive/0003-transactional-write-discipline.md` |
 
+## Release gates
+
+Non-privileged:
+
+```bash
+make precommit
+make ci
+```
+
+Privileged Linux / BPF-LSM:
+
+```bash
+sudo -E make verify-runtime
+sudo -E make verify-integration
+sudo -E make verify-container-integration
+```
+
+`verify-container-integration` also requires `docker`, `nerdctl`, `podman`, or
+`SYVA_CONTAINER_RUNTIME`. Lima is build/test/eBPF-object verification unless
+these privileged commands have actually passed inside the VM.
+
 ## When stuck
 
 - **Don't improvise.** Stop and report what you found.

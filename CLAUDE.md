@@ -18,18 +18,17 @@ streams in this repository.
 Host-safe checks:
 
 ```bash
-cargo fmt --all -- --check
-cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api
-cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client
+make macos-check
 ```
 
 Linux full checks:
 
 ```bash
-cargo check --workspace
-cargo test --workspace
-cargo run -p xtask -- build-ebpf
-cargo run -p xtask -- ci
+make fmt
+make lint
+make test
+make precommit
+make ci
 ```
 
 `build-ebpf` builds the release eBPF object by default because that is the

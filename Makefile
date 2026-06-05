@@ -2,7 +2,42 @@ LIMA_NAME ?= syva-dev
 LIMA_CONFIG ?= ./lima/syva.yaml
 REPO_DIR := $(shell pwd)
 
-.PHONY: lima-up lima-shell lima-check lima-test lima-ebpf-build eval-build verify-runtime verify-integration verify-container-integration macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build eval-build verify-runtime verify-integration verify-container-integration macos-check
+
+fmt:
+	cargo run -p xtask -- fmt
+
+lint:
+	cargo run -p xtask -- lint
+
+test:
+	cargo run -p xtask -- test
+
+check:
+	$(MAKE) fmt
+	$(MAKE) lint
+	$(MAKE) test
+
+precommit:
+	cargo run -p xtask -- precommit
+
+ci:
+	cargo run -p xtask -- ci
+
+linux-bpf-check:
+	cargo run -p xtask -- linux-bpf-check
+
+eval-build:
+	cargo run -p xtask -- eval-build
+
+proto-check:
+	cargo run -p xtask -- check-proto
+
+check-release-docs:
+	cargo run -p xtask -- check-release-docs
+
+check-ebpf-artifact-policy:
+	cargo run -p xtask -- check-ebpf-artifact-policy
 
 lima-up:
 	limactl start --name=$(LIMA_NAME) $(LIMA_CONFIG)
@@ -18,9 +53,6 @@ lima-test:
 
 lima-ebpf-build:
 	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; export PATH="$$HOME/.cargo/bin:$$PATH"; cargo run -p xtask -- build-ebpf'
-
-eval-build:
-	cargo run -p xtask -- eval-build
 
 verify-runtime:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-runtime

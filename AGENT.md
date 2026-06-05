@@ -43,12 +43,24 @@ make lima-shell
 Native Linux:
 
 ```bash
-cargo run -p xtask -- ci
+make precommit
+make ci
 ```
 
 `cargo run -p xtask -- build-ebpf` builds the release eBPF object by default.
 Runtime attach/enforcement tests still need a privileged Linux kernel with BPF
 LSM support.
+
+Privileged release gates:
+
+```bash
+sudo -E make verify-runtime
+sudo -E make verify-integration
+sudo -E make verify-container-integration
+```
+
+The container gate also requires `docker`, `nerdctl`, `podman`, or
+`SYVA_CONTAINER_RUNTIME`.
 
 ## Debugging
 
