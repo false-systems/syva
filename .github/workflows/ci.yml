@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rust-src,rustfmt
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
       # aya-ebpf links via bpf-linker (wraps LLVM). Not a rustup component —
       # comes from crates.io and takes a minute to compile.
@@ -136,7 +136,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rust-src
+          components: rust-src,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
