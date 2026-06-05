@@ -157,11 +157,19 @@ BPF LSM support:
 
 ```sh
 sudo -E make verify-runtime
+sudo -E make verify-integration
 ```
 
-This runs the ignored local-mode runtime tests explicitly. It checks Linux,
-root, and the required `syva` group before attempting BPF load/attach and local
-core RPC verification. See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
+`verify-runtime` runs the ignored local-mode runtime tests explicitly. It checks
+Linux, root, and the required `syva` group before attempting BPF load/attach,
+self-tests, and local core RPC verification.
+
+`verify-integration` uses the same privileged preflight, then proves a real
+kernel denial: a zone-a workload in a cgroup can read a zone-a file but is
+blocked with `EPERM` when reading a zone-b file. This is process/cgroup
+enforcement evidence, not container runtime discovery.
+
+See [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 
 ## Run
 
@@ -183,5 +191,6 @@ RUST_LOG=syva_file=debug cargo run --bin syva-file -- \
 ## Roadmap
 
 Next work should focus on wiring real pod/container watchers into
-`AttachContainer`, adding `(dev, ino)` file identity, and exercising runtime
-load/attach behavior on a privileged Linux host in CI or blackbox tests.
+`AttachContainer`, adding `(dev, ino)` file identity, expanding privileged
+runtime blackbox coverage, and moving privileged runtime verification into a
+self-hosted or otherwise suitable Linux CI path.
