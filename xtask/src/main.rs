@@ -28,6 +28,9 @@ enum Cli {
     EvalBuild,
     /// Run ignored privileged runtime verification tests.
     VerifyRuntime,
+    /// Run the privileged BPF-LSM integration test that proves the kernel
+    /// blocks a forbidden cross-zone action.
+    VerifyIntegration,
     /// Run the standard active-project CI sequence.
     Ci,
 }
@@ -42,6 +45,7 @@ fn main() -> Result<()> {
         Cli::LinuxBpfCheck => build_ebpf(true),
         Cli::EvalBuild => build_eval_crates(),
         Cli::VerifyRuntime => verify_runtime(),
+        Cli::VerifyIntegration => verify_integration(),
         Cli::Ci => {
             run_root_command("cargo", &["fmt", "--all", "--", "--check"])?;
             run_root_command(
@@ -124,9 +128,11 @@ fn build_eval_crates() -> Result<()> {
     )
 }
 
-fn verify_runtime() -> Result<()> {
+/// Shared preflight for privileged runtime checks: Linux, root, `syva` group,
+/// and an active BPF LSM. `context` names the check in error messages.
+fn privileged_runtime_preflight(context: &str) -> Result<()> {
     if !cfg!(target_os = "linux") {
-        bail!("runtime verification requires Linux with BPF LSM support; Lima build checks are not runtime enforcement evidence");
+        bail!("{context} requires Linux with BPF LSM support; macOS/Lima build checks are not runtime enforcement evidence");
     }
 
     let uid_output = Command::new("id")
@@ -135,7 +141,7 @@ fn verify_runtime() -> Result<()> {
         .context("failed to check current uid with id -u")?;
     let uid = String::from_utf8_lossy(&uid_output.stdout);
     if uid.trim() != "0" {
-        bail!("runtime verification must be run as root so syva-core can load and attach BPF LSM programs");
+        bail!("{context} must be run as root so syva-core can load and attach BPF LSM programs");
     }
 
     let group_status = Command::new("getent")
@@ -143,17 +149,43 @@ fn verify_runtime() -> Result<()> {
         .status()
         .context("failed to check for required syva group")?;
     if !group_status.success() {
-        bail!("runtime verification requires a 'syva' group for the syva-core Unix socket");
+        bail!("{context} requires a 'syva' group for the syva-core Unix socket");
     }
 
     let lsm = fs::read_to_string("/sys/kernel/security/lsm")
         .context("failed to read /sys/kernel/security/lsm; is securityfs mounted?")?;
     if !lsm.split(',').any(|entry| entry.trim() == "bpf") {
         bail!(
-            "runtime verification requires BPF LSM; /sys/kernel/security/lsm is {}",
+            "{context} requires BPF LSM; /sys/kernel/security/lsm is {}",
             lsm.trim()
         );
     }
+
+    Ok(())
+}
+
+/// Run the privileged integration test that deploys the local core, attaches a
+/// workload cgroup to a zone, and proves the kernel blocks a cross-zone read.
+fn verify_integration() -> Result<()> {
+    privileged_runtime_preflight("verify-integration")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_file_open_enforcement",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+fn verify_runtime() -> Result<()> {
+    privileged_runtime_preflight("runtime verification")?;
 
     build_ebpf(true)?;
 
