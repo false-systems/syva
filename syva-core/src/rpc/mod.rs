@@ -21,7 +21,7 @@ use tonic::{Request, Response, Status};
 use crate::container_id::is_valid_container_id;
 use crate::ebpf::EnforceEbpf;
 use crate::events::HOOK_NAMES;
-use crate::health::SharedHealth;
+use crate::health::{BpfMapOperation, MembershipUpdateResult, SharedHealth};
 use crate::ingest::{self, CoreZonePolicyInput};
 use crate::membership::{
     BpfMembershipIntent, MembershipObservation, MembershipOutcome, MembershipService,
@@ -149,7 +149,10 @@ impl SyvaCore for SyvaCoreService {
         let (zone_id, zone_type) = {
             let registry = self.registry.read().await;
             let Some(zone_id) = registry.zone_id(&req.zone_name) else {
-                self.health.write().await.record_membership_update("error");
+                self.health
+                    .write()
+                    .await
+                    .record_membership_update(MembershipUpdateResult::Error);
                 tracing::warn!(
                     event = "syva.membership.attach",
                     component = "syva-core",
@@ -198,7 +201,7 @@ impl SyvaCore for SyvaCoreService {
                 let registry = self.registry.read().await;
                 let mut health = self.health.write().await;
                 health.containers_active = registry.container_count();
-                health.record_membership_update("unchanged");
+                health.record_membership_update(MembershipUpdateResult::Unchanged);
 
                 tracing::info!(
                     event = "syva.membership.attach",
@@ -221,7 +224,7 @@ impl SyvaCore for SyvaCoreService {
                 existing_generation,
             } => {
                 let mut health = self.health.write().await;
-                health.record_membership_update("stale");
+                health.record_membership_update(MembershipUpdateResult::Stale);
                 health.mark_membership_degraded(format!(
                     "stale membership update ignored for container '{}' (existing generation {})",
                     req.container_id, existing_generation
@@ -250,7 +253,7 @@ impl SyvaCore for SyvaCoreService {
                 ..
             } => {
                 let mut health = self.health.write().await;
-                health.record_membership_update("conflict");
+                health.record_membership_update(MembershipUpdateResult::Conflict);
                 health.mark_membership_degraded(format!(
                         "conflicting membership for container '{}': existing zone '{}', requested zone '{}'",
                         req.container_id, existing_zone, requested_zone
@@ -295,9 +298,9 @@ impl SyvaCore for SyvaCoreService {
                     .await
                     .remove(&req.container_id, None);
                 let mut health = self.health.write().await;
-                health.record_membership_update("error");
+                health.record_membership_update(MembershipUpdateResult::Error);
                 health.record_bpf_map_error(
-                    "update",
+                    BpfMapOperation::Update,
                     format!(
                         "BPF membership add failed for container '{}': {error}",
                         req.container_id
@@ -331,7 +334,7 @@ impl SyvaCore for SyvaCoreService {
         let registry = self.registry.read().await;
         let mut health = self.health.write().await;
         health.containers_active = registry.container_count();
-        health.record_membership_update("applied");
+        health.record_membership_update(MembershipUpdateResult::Applied);
 
         tracing::info!(
             event = "syva.membership.attach",
@@ -379,7 +382,7 @@ impl SyvaCore for SyvaCoreService {
                 let message =
                     format!("stale detach ignored; existing generation is {existing_generation}");
                 let mut health = self.health.write().await;
-                health.record_membership_update("stale");
+                health.record_membership_update(MembershipUpdateResult::Stale);
                 health.mark_membership_degraded(format!(
                     "stale detach ignored for container '{}' (existing generation {})",
                     req.container_id, existing_generation
@@ -403,7 +406,7 @@ impl SyvaCore for SyvaCoreService {
                 self.health
                     .write()
                     .await
-                    .record_membership_update("unchanged");
+                    .record_membership_update(MembershipUpdateResult::Unchanged);
                 tracing::info!(
                     event = "syva.membership.detach",
                     component = "syva-core",
@@ -428,9 +431,9 @@ impl SyvaCore for SyvaCoreService {
             if let Err(error) = ebpf.remove_zone_member(cgroup_id) {
                 tracing::warn!(cgroup_id, %error, "failed to remove zone member from BPF map");
                 let mut health = self.health.write().await;
-                health.record_membership_update("error");
+                health.record_membership_update(MembershipUpdateResult::Error);
                 health.record_bpf_map_error(
-                    "delete",
+                    BpfMapOperation::Delete,
                     format!(
                         "BPF membership remove failed for container '{}': {error}",
                         req.container_id
@@ -457,7 +460,7 @@ impl SyvaCore for SyvaCoreService {
             let mut health = self.health.write().await;
             health.containers_active = registry.container_count();
             health.zones_loaded = registry.zone_count();
-            health.record_membership_update("applied");
+            health.record_membership_update(MembershipUpdateResult::Applied);
 
             tracing::info!(
                 event = "syva.membership.detach",
@@ -503,7 +506,7 @@ impl SyvaCore for SyvaCoreService {
             ingest::allow_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b).await
         {
             self.health.write().await.record_bpf_map_error(
-                "update",
+                BpfMapOperation::Update,
                 format!(
                     "BPF allowed comms update failed for zones '{}' and '{}': {error}",
                     req.zone_a, req.zone_b
@@ -541,7 +544,7 @@ impl SyvaCore for SyvaCoreService {
             ingest::deny_comm_local(&self.registry, &self.ebpf, &req.zone_a, &req.zone_b).await
         {
             self.health.write().await.record_bpf_map_error(
-                "delete",
+                BpfMapOperation::Delete,
                 format!(
                     "BPF allowed comms delete failed for zones '{}' and '{}': {error}",
                     req.zone_a, req.zone_b
@@ -617,7 +620,7 @@ impl SyvaCore for SyvaCoreService {
             Ok(count) => count,
             Err(error) => {
                 self.health.write().await.record_bpf_map_error(
-                    "update",
+                    BpfMapOperation::Update,
                     format!(
                         "BPF inode map update failed for zone '{}' path '{}': {error}",
                         req.zone_name, req.path

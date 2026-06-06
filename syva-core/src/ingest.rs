@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::ebpf::EnforceEbpf;
-use crate::health::SharedHealth;
+use crate::health::{BpfMapOperation, SharedHealth};
 use crate::types::ZoneType;
 use crate::zone::ZoneRegistry;
 
@@ -60,7 +60,7 @@ pub(crate) async fn register_zone_local(
                     health.write().await.zones_loaded = registry.zone_count();
                 }
                 health.write().await.record_bpf_map_error(
-                    "update",
+                    BpfMapOperation::Update,
                     format!("BPF zone policy update failed for zone '{zone_name}': {error}"),
                 );
                 return Err(error);
@@ -74,7 +74,7 @@ pub(crate) async fn register_zone_local(
                     Err(error) => {
                         tracing::warn!(zone = zone_name, %error, "inode map population failed");
                         health.write().await.record_bpf_map_error(
-                            "update",
+                            BpfMapOperation::Update,
                             format!("BPF inode map update failed for zone '{zone_name}': {error}"),
                         );
                     }
@@ -155,19 +155,19 @@ pub(crate) async fn remove_zone_local(
         let mut ebpf = ebpf.lock().await;
         if let Err(error) = ebpf.remove_zone_policy(zone_id) {
             health.write().await.record_bpf_map_error(
-                "delete",
+                BpfMapOperation::Delete,
                 format!("BPF zone policy delete failed for zone '{zone_name}': {error}"),
             );
         }
         if let Err(error) = ebpf.remove_zone_comms(zone_id) {
             health.write().await.record_bpf_map_error(
-                "delete",
+                BpfMapOperation::Delete,
                 format!("BPF zone comms delete failed for zone '{zone_name}': {error}"),
             );
         }
         if let Err(error) = ebpf.remove_zone_inodes(zone_id) {
             health.write().await.record_bpf_map_error(
-                "delete",
+                BpfMapOperation::Delete,
                 format!("BPF inode map delete failed for zone '{zone_name}': {error}"),
             );
         }

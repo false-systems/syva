@@ -166,7 +166,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         health_state
             .write()
             .await
-            .mark_selftest("cgroup", health::SelfTestStatus::Failed);
+            .mark_selftest(health::SelfTestName::Cgroup, health::SelfTestStatus::Failed);
         tracing::error!(
             event = "syva.selftest.failed",
             component = "syva-core",
@@ -180,12 +180,12 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     health_state
         .write()
         .await
-        .mark_selftest("cgroup", health::SelfTestStatus::Passed);
+        .mark_selftest(health::SelfTestName::Cgroup, health::SelfTestStatus::Passed);
     if let Err(error) = mgr.verify_inode_self_test().await {
         health_state
             .write()
             .await
-            .mark_selftest("inode", health::SelfTestStatus::Failed);
+            .mark_selftest(health::SelfTestName::Inode, health::SelfTestStatus::Failed);
         tracing::error!(
             event = "syva.selftest.failed",
             component = "syva-core",
@@ -199,12 +199,12 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     health_state
         .write()
         .await
-        .mark_selftest("inode", health::SelfTestStatus::Passed);
+        .mark_selftest(health::SelfTestName::Inode, health::SelfTestStatus::Passed);
     if let Err(error) = mgr.verify_unix_self_test().await {
         health_state
             .write()
             .await
-            .mark_selftest("unix", health::SelfTestStatus::Failed);
+            .mark_selftest(health::SelfTestName::Unix, health::SelfTestStatus::Failed);
         tracing::error!(
             event = "syva.selftest.failed",
             component = "syva-core",
@@ -218,7 +218,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     health_state
         .write()
         .await
-        .mark_selftest("unix", health::SelfTestStatus::Passed);
+        .mark_selftest(health::SelfTestName::Unix, health::SelfTestStatus::Passed);
 
     // Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).

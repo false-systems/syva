@@ -39,6 +39,23 @@ pub enum SelfTestStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTestName {
+    Cgroup,
+    Inode,
+    Unix,
+}
+
+impl SelfTestName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cgroup => "cgroup",
+            Self::Inode => "inode",
+            Self::Unix => "unix",
+        }
+    }
+}
+
 impl SelfTestStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -89,6 +106,44 @@ pub struct MembershipMetrics {
     pub error: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BpfMapOperation {
+    Read,
+    Update,
+    Delete,
+}
+
+impl BpfMapOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipUpdateResult {
+    Applied,
+    Unchanged,
+    Stale,
+    Conflict,
+    Error,
+}
+
+impl MembershipUpdateResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Stale => "stale",
+            Self::Conflict => "conflict",
+            Self::Error => "error",
+        }
+    }
+}
+
 impl SecurityStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -98,6 +153,8 @@ impl SecurityStatus {
         }
     }
 }
+
+const ACTIVE_DEGRADATION_WINDOW_SECS: u64 = 300;
 
 /// Shared health state, written by the main loop, read by HTTP handlers.
 pub struct HealthState {
@@ -117,8 +174,8 @@ pub struct HealthState {
     pub last_counter_read_ok: bool,
     pub last_counter_read_success_unix: Option<u64>,
     pub bpf_map_errors: BpfMapErrors,
-    pub degraded: bool,
     pub degraded_message: Option<String>,
+    pub degraded_until_unix: Option<u64>,
     pub membership_updates: MembershipMetrics,
 }
 
@@ -139,8 +196,8 @@ impl HealthState {
             last_counter_read_ok: true,
             last_counter_read_success_unix: None,
             bpf_map_errors: BpfMapErrors::default(),
-            degraded: false,
             degraded_message: None,
+            degraded_until_unix: None,
             membership_updates: MembershipMetrics::default(),
         }
     }
@@ -154,46 +211,54 @@ impl HealthState {
         self.attached_hooks = attached_hooks;
     }
 
-    pub fn mark_selftest(&mut self, test: &str, status: SelfTestStatus) {
+    pub fn mark_selftest(&mut self, test: SelfTestName, status: SelfTestStatus) {
         match test {
-            "cgroup" => self.selftests.cgroup = status,
-            "inode" => self.selftests.inode = status,
-            "unix" => self.selftests.unix = status,
-            _ => {}
+            SelfTestName::Cgroup => self.selftests.cgroup = status,
+            SelfTestName::Inode => self.selftests.inode = status,
+            SelfTestName::Unix => self.selftests.unix = status,
         }
     }
 
-    pub fn record_bpf_map_error(&mut self, operation: &str, message: impl Into<String>) {
+    pub fn record_bpf_map_error(&mut self, operation: BpfMapOperation, message: impl Into<String>) {
         match operation {
-            "read" => self.bpf_map_errors.read += 1,
-            "update" => self.bpf_map_errors.update += 1,
-            "delete" => self.bpf_map_errors.delete += 1,
-            _ => {}
+            BpfMapOperation::Read => self.bpf_map_errors.read += 1,
+            BpfMapOperation::Update => self.bpf_map_errors.update += 1,
+            BpfMapOperation::Delete => self.bpf_map_errors.delete += 1,
         }
-        self.degraded = true;
-        self.degraded_message = Some(message.into());
+        self.mark_active_degradation(message);
     }
 
     pub fn mark_counter_read_failed(&mut self, message: impl Into<String>) {
         self.last_counter_read_ok = false;
         self.bpf_map_errors.read += 1;
-        self.degraded = true;
-        self.degraded_message = Some(message.into());
+        self.mark_active_degradation(message);
     }
 
     pub fn mark_membership_degraded(&mut self, message: impl Into<String>) {
-        self.degraded = true;
-        self.degraded_message = Some(message.into());
+        self.mark_active_degradation(message);
     }
 
-    pub fn record_membership_update(&mut self, result: &str) {
+    pub fn record_membership_update(&mut self, result: MembershipUpdateResult) {
         match result {
-            "applied" => self.membership_updates.applied += 1,
-            "unchanged" => self.membership_updates.unchanged += 1,
-            "stale" => self.membership_updates.stale += 1,
-            "conflict" => self.membership_updates.conflict += 1,
-            "error" => self.membership_updates.error += 1,
-            _ => {}
+            MembershipUpdateResult::Applied => self.membership_updates.applied += 1,
+            MembershipUpdateResult::Unchanged => self.membership_updates.unchanged += 1,
+            MembershipUpdateResult::Stale => self.membership_updates.stale += 1,
+            MembershipUpdateResult::Conflict => self.membership_updates.conflict += 1,
+            MembershipUpdateResult::Error => self.membership_updates.error += 1,
+        }
+    }
+
+    fn mark_active_degradation(&mut self, message: impl Into<String>) {
+        self.degraded_message = Some(message.into());
+        self.degraded_until_unix = Some(unix_now().saturating_add(ACTIVE_DEGRADATION_WINDOW_SECS));
+    }
+
+    fn active_degradation_message(&self) -> Option<&str> {
+        let until = self.degraded_until_unix?;
+        if unix_now() <= until {
+            self.degraded_message.as_deref()
+        } else {
+            None
         }
     }
 
@@ -230,12 +295,9 @@ impl HealthState {
             return SecurityStatus::Unsafe;
         }
 
-        if self.degraded
+        if self.active_degradation_message().is_some()
             || !self.hook_degraded_reasons.is_empty()
             || !self.last_counter_read_ok
-            || self.bpf_map_errors.read > 0
-            || self.bpf_map_errors.update > 0
-            || self.bpf_map_errors.delete > 0
         {
             return SecurityStatus::Degraded;
         }
@@ -259,30 +321,23 @@ impl HealthState {
             ));
         }
         for (name, status) in [
-            ("cgroup", self.selftests.cgroup),
-            ("inode", self.selftests.inode),
-            ("unix", self.selftests.unix),
+            (SelfTestName::Cgroup, self.selftests.cgroup),
+            (SelfTestName::Inode, self.selftests.inode),
+            (SelfTestName::Unix, self.selftests.unix),
         ] {
             if status != SelfTestStatus::Passed {
-                reasons.push(format!("mandatory {name} self-test is {}", status.as_str()));
+                reasons.push(format!(
+                    "mandatory {} self-test is {}",
+                    name.as_str(),
+                    status.as_str()
+                ));
             }
         }
         if !self.last_counter_read_ok {
             reasons.push("last BPF counter read failed".to_string());
         }
-        if self.bpf_map_errors.read > 0 {
-            reasons.push("BPF map read errors observed".to_string());
-        }
-        if self.bpf_map_errors.update > 0 {
-            reasons.push("BPF map update errors observed".to_string());
-        }
-        if self.bpf_map_errors.delete > 0 {
-            reasons.push("BPF map delete errors observed".to_string());
-        }
-        if let Some(message) = self.degraded_message.as_ref() {
-            reasons.push(message.clone());
-        } else if self.degraded {
-            reasons.push("enforcement confidence is degraded".to_string());
+        if let Some(message) = self.active_degradation_message() {
+            reasons.push(message.to_string());
         }
 
         reasons.extend(self.hook_degraded_reasons.iter().cloned());
@@ -573,13 +628,14 @@ pub fn render_metrics(health: &HealthState) -> String {
     );
     out.push_str("# TYPE syva_bpf_map_errors_total counter\n");
     for (operation, value) in [
-        ("read", health.bpf_map_errors.read),
-        ("update", health.bpf_map_errors.update),
-        ("delete", health.bpf_map_errors.delete),
+        (BpfMapOperation::Read, health.bpf_map_errors.read),
+        (BpfMapOperation::Update, health.bpf_map_errors.update),
+        (BpfMapOperation::Delete, health.bpf_map_errors.delete),
     ] {
         out.push_str(&format!(
             "syva_bpf_map_errors_total{{operation=\"{}\",map=\"all\"}} {}\n",
-            operation, value
+            operation.as_str(),
+            value
         ));
     }
 
@@ -600,15 +656,31 @@ pub fn render_metrics(health: &HealthState) -> String {
     out.push_str("# HELP syva_membership_updates_total Membership update outcomes.\n");
     out.push_str("# TYPE syva_membership_updates_total counter\n");
     for (result, value) in [
-        ("applied", health.membership_updates.applied),
-        ("unchanged", health.membership_updates.unchanged),
-        ("stale", health.membership_updates.stale),
-        ("conflict", health.membership_updates.conflict),
-        ("error", health.membership_updates.error),
+        (
+            MembershipUpdateResult::Applied,
+            health.membership_updates.applied,
+        ),
+        (
+            MembershipUpdateResult::Unchanged,
+            health.membership_updates.unchanged,
+        ),
+        (
+            MembershipUpdateResult::Stale,
+            health.membership_updates.stale,
+        ),
+        (
+            MembershipUpdateResult::Conflict,
+            health.membership_updates.conflict,
+        ),
+        (
+            MembershipUpdateResult::Error,
+            health.membership_updates.error,
+        ),
     ] {
         out.push_str(&format!(
             "syva_membership_updates_total{{result=\"{}\"}} {}\n",
-            result, value
+            result.as_str(),
+            value
         ));
     }
 
@@ -647,9 +719,9 @@ mod tests {
         if attached {
             state.mark_ebpf_loaded();
             state.mark_attached(crate::events::HOOK_NAMES.len());
-            state.mark_selftest("cgroup", SelfTestStatus::Passed);
-            state.mark_selftest("inode", SelfTestStatus::Passed);
-            state.mark_selftest("unix", SelfTestStatus::Passed);
+            state.mark_selftest(SelfTestName::Cgroup, SelfTestStatus::Passed);
+            state.mark_selftest(SelfTestName::Inode, SelfTestStatus::Passed);
+            state.mark_selftest(SelfTestName::Unix, SelfTestStatus::Passed);
         }
         state
     }
@@ -778,6 +850,21 @@ mod tests {
     }
 
     #[test]
+    fn transient_degradation_recovers_after_active_window() {
+        let mut state = make_state(true, 4, 9);
+        state.record_bpf_map_error(BpfMapOperation::Update, "BPF map update failed");
+
+        assert_eq!(state.security_status(), SecurityStatus::Degraded);
+        assert_eq!(state.bpf_map_errors.update, 1);
+
+        state.degraded_until_unix = Some(unix_now().saturating_sub(1));
+
+        assert_eq!(state.security_status(), SecurityStatus::Healthy);
+        assert_eq!(state.bpf_map_errors.update, 1);
+        assert!(state.degraded_reasons().is_empty());
+    }
+
+    #[test]
     fn unattached_is_unsafe() {
         let state = make_state(false, 0, 0);
 
@@ -853,8 +940,8 @@ mod tests {
         let mut state = HealthState::new();
         state.mark_ebpf_loaded();
         state.mark_attached(crate::events::HOOK_NAMES.len());
-        state.mark_selftest("cgroup", SelfTestStatus::Passed);
-        state.mark_selftest("inode", SelfTestStatus::Passed);
+        state.mark_selftest(SelfTestName::Cgroup, SelfTestStatus::Passed);
+        state.mark_selftest(SelfTestName::Inode, SelfTestStatus::Passed);
 
         assert_eq!(state.security_status(), SecurityStatus::Unsafe);
         assert!(state
@@ -877,9 +964,9 @@ mod tests {
     #[test]
     fn membership_metrics_render_outcomes() {
         let mut state = make_state(true, 1, 1);
-        state.record_membership_update("applied");
-        state.record_membership_update("stale");
-        state.record_membership_update("conflict");
+        state.record_membership_update(MembershipUpdateResult::Applied);
+        state.record_membership_update(MembershipUpdateResult::Stale);
+        state.record_membership_update(MembershipUpdateResult::Conflict);
 
         let output = render_metrics(&state);
         assert!(output.contains("syva_membership_updates_total{result=\"applied\"} 1"));

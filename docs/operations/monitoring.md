@@ -14,6 +14,11 @@ whether mandatory self-tests passed, and whether enforcement has degraded.
 curl -s http://127.0.0.1:9091/healthz
 ```
 
+By default the health server binds `0.0.0.0`. In production deployments, expose
+it only to trusted node-local or cluster monitoring paths, for example with a
+localhost bind where appropriate or Kubernetes NetworkPolicy around the Syva
+DaemonSet.
+
 The health response is JSON:
 
 ```json
