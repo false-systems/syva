@@ -2,7 +2,10 @@ LIMA_NAME ?= syva-dev
 LIMA_CONFIG ?= ./lima/syva.yaml
 REPO_DIR := $(shell pwd)
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build eval-build verify-runtime verify-integration verify-container-integration macos-check
+LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
+LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
+
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -67,6 +70,38 @@ verify-integration:
 # Run as: sudo -E make verify-container-integration
 verify-container-integration:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-container-integration
+
+# Verify an ALREADY-DEPLOYED syva-core (does not start its own core).
+# Needs SYVA_SOCKET (default /run/syva/syva-core.sock) + a container runtime.
+# Run as: sudo -E make verify-deployment   (after `make lima-deploy`)
+verify-deployment:
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" \
+	  SYVA_SOCKET="$${SYVA_SOCKET:-/run/syva/syva-core.sock}" cargo run -p xtask -- verify-deployment
+
+# ---- Lima development deployment lifecycle (single-node, dev only) ----
+
+lima-bootstrap:
+	$(LIMA_SH) 'set -euo pipefail; export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; bash deploy/lima/bootstrap.sh'
+
+lima-deploy:
+	$(LIMA_SH) 'set -euo pipefail; export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; bash deploy/lima/deploy.sh'
+
+lima-verify-deployment:
+	$(LIMA_SH) '$(LIMA_SUDO) SYVA_SOCKET=/run/syva/syva-core.sock cargo run -p xtask -- verify-deployment'
+
+lima-undeploy:
+	$(LIMA_SH) 'set -uo pipefail; cd "$(REPO_DIR)"; bash deploy/lima/undeploy.sh'
+
+lima-reset:
+	-$(LIMA_SH) 'set -uo pipefail; cd "$(REPO_DIR)"; bash deploy/lima/undeploy.sh'
+	@echo "lima-reset: undeployed. To recreate the VM: limactl stop $(LIMA_NAME) && limactl start $(LIMA_CONFIG)"
+
+# One-command deployment proof: bootstrap -> deploy -> verify -> undeploy.
+lima-smoke:
+	$(MAKE) lima-bootstrap
+	$(MAKE) lima-deploy
+	$(MAKE) lima-verify-deployment
+	$(MAKE) lima-undeploy
 
 macos-check:
 	cargo fmt --all -- --check
