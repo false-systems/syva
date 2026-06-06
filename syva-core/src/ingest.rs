@@ -59,6 +59,10 @@ pub(crate) async fn register_zone_local(
                     let _ = registry.unregister_zone(zone_name);
                     health.write().await.zones_loaded = registry.zone_count();
                 }
+                health.write().await.record_bpf_map_error(
+                    "update",
+                    format!("BPF zone policy update failed for zone '{zone_name}': {error}"),
+                );
                 return Err(error);
             }
 
@@ -69,6 +73,10 @@ pub(crate) async fn register_zone_local(
                     }
                     Err(error) => {
                         tracing::warn!(zone = zone_name, %error, "inode map population failed");
+                        health.write().await.record_bpf_map_error(
+                            "update",
+                            format!("BPF inode map update failed for zone '{zone_name}': {error}"),
+                        );
                     }
                 }
             }
@@ -145,9 +153,24 @@ pub(crate) async fn remove_zone_local(
 
     if let Some(zone_id) = cleanup_zone_id {
         let mut ebpf = ebpf.lock().await;
-        let _ = ebpf.remove_zone_policy(zone_id);
-        let _ = ebpf.remove_zone_comms(zone_id);
-        let _ = ebpf.remove_zone_inodes(zone_id);
+        if let Err(error) = ebpf.remove_zone_policy(zone_id) {
+            health.write().await.record_bpf_map_error(
+                "delete",
+                format!("BPF zone policy delete failed for zone '{zone_name}': {error}"),
+            );
+        }
+        if let Err(error) = ebpf.remove_zone_comms(zone_id) {
+            health.write().await.record_bpf_map_error(
+                "delete",
+                format!("BPF zone comms delete failed for zone '{zone_name}': {error}"),
+            );
+        }
+        if let Err(error) = ebpf.remove_zone_inodes(zone_id) {
+            health.write().await.record_bpf_map_error(
+                "delete",
+                format!("BPF inode map delete failed for zone '{zone_name}': {error}"),
+            );
+        }
         tracing::info!(zone = zone_name, zone_id, "zone removed");
     } else if outcome.ok && drain {
         tracing::info!(zone = zone_name, "zone marked as draining");

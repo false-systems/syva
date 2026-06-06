@@ -31,6 +31,26 @@ make precommit
 make ci
 ```
 
+Every `make` target wraps one source of truth: `cargo run -p xtask -- <cmd>`
+(`fmt`, `lint`, `check`, `test`, `proto-check`, `check-release-docs`,
+`check-ebpf-artifact-policy`, `eval-build`, `precommit`, `ci`, `build-ebpf`).
+CI (`.github/workflows/ci.yml`) invokes the same xtask commands, so `make ci`
+reproduces CI locally.
+
+Run a focused test:
+
+```bash
+cargo test -p syva-core zone::tests::register_zone_is_idempotent  # one unit test
+cargo test -p <crate> <name-substring>                           # by name
+```
+
+The eval suites live outside the workspace (own manifests, run via `--manifest-path`):
+
+```bash
+cargo test --manifest-path eval/oracle/Cargo.toml -- case_003 --exact --nocapture
+cargo run  --manifest-path eval/harness/Cargo.toml               # spec harness
+```
+
 `build-ebpf` builds the release eBPF object by default because that is the
 runtime artifact. Use `--debug` only for development.
 
@@ -55,6 +75,30 @@ sudo -E make verify-integration          # process/cgroup file_open denial (EPER
 sudo -E make verify-container-integration # same denial against a real container
 ```
 
+## Release-Doc Drift Guardrail
+
+`cargo run -p xtask -- check-release-docs` (run by `make precommit`, `make ci`,
+and the CI `guardrails` job) fails the build when tracked docs/code drift from
+the v0.2 contract. It scans tracked `*.md`/`*.rs`/`*.proto`/`*.toml`/`*.yaml`
+(excluding `docs/archive/`, and skipping fenced code blocks) and, outside code
+fences, rejects:
+
+```text
+- stale hook counts: "7 hooks" / "seven hooks" / "7 lsm"   (v0.2 has six)
+- "syva_cgroup_attach"
+- "cgroup_attach_task" UNLESS nearby text marks it a known gap
+  ("not a bpf-lsm hook", "out of v0.2 scope", "do not reintroduce", assert!)
+- "lima proves/verifies runtime|enforcement" without a "not"/"unless" caveat
+- "debug ebpf" called the "default"/"runtime artifact" (release is the default)
+```
+
+It also requires `README.md`, `CLAUDE.md`, `AGENT.md`, `SKILLS.md`, and
+`docs/release/v0.2-runtime-verification.md` to each mention all three runtime
+gates: `verify-runtime`, `verify-integration`, `verify-container-integration`.
+Preserve these invariants when editing docs (put illustrative trigger strings
+inside code fences, which the checker skips). `xtask/src/main.rs` is exempt
+because it stores the trigger strings as literals.
+
 ## Active Crates
 
 | Crate | Binary | Purpose |
@@ -71,6 +115,45 @@ sudo -E make verify-container-integration # same denial against a real container
 
 Eval crates under `eval/` are outside the workspace and use their own
 manifests.
+
+## Enforcement Model
+
+`syva-core` populates BPF maps; six eBPF LSM programs (`syva-ebpf/src/`) read
+them on every relevant syscall and allow or deny:
+
+| Hook (LSM) | File | Blocks cross-zone |
+| --- | --- | --- |
+| `file_open` | `file_guard.rs` | file open |
+| `bprm_check_security` | `exec_guard.rs` | exec |
+| `mmap_file` | `mmap_guard.rs` | `mmap(PROT_EXEC)` |
+| `ptrace_access_check` | `ptrace_guard.rs` | ptrace |
+| `task_kill` | `signal_guard.rs` | signals |
+| `unix_stream_connect` | `unix_guard.rs` | Unix socket connect |
+
+Every hook follows one decision shape: resolve the caller's zone from
+`bpf_get_current_cgroup_id()` → `ZONE_MEMBERSHIP`; resolve the target's zone
+(file/exec via inode → `INODE_ZONE_MAP`); allow if same zone or an explicit
+`ZONE_ALLOWED_COMMS` pair, otherwise deny. A deny returns `-1`, surfaced to
+userspace as **EPERM** ("Operation not permitted"), not EACCES. A caller or
+target not in any zone is invisible to enforcement (allowed). On a
+`bpf_probe_read` failure the hook **fails open** and increments an error
+counter.
+
+Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
+`ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
+(ring buffer), plus `SELF_TEST*` maps used only to validate offset chains at
+startup. Kernel struct offsets are resolved from BTF at startup (`btf.rs`) and
+patched into eBPF globals — no offsets are hardcoded.
+
+## Key Files
+
+`syva-core/src/`: `ebpf.rs` (load/attach, BPF map ops, self-tests, eBPF-object
+discovery — release preferred over debug), `zone.rs` (zone registry + ID
+allocation), `membership.rs` (container→zone), `ingest.rs` (RPC→map apply),
+`rpc/mod.rs` (`syva.core.v1` gRPC service), `health.rs` (`/healthz` + `/metrics`),
+`events.rs` (ring-buffer drain, `HOOK_NAMES`), `btf.rs` (offset resolution),
+`container_id.rs` (ID validation). Privileged integration tests are under
+`syva-core/tests/` (all `#[ignore]`d; driven by the `verify-*` gates).
 
 ## Core Startup
 
@@ -110,12 +193,19 @@ Automatic pod/container watcher integration still needs to call
 
 ## Health
 
+The health server (`:9091`, configurable via `--health-port`) serves
+`/healthz` (readiness JSON with the security status) and `/metrics`
+(Prometheus enforcement-confidence metrics). See
+`docs/operations/monitoring.md` for scrape, alert, and dashboard details.
 Security status is:
 
-- `healthy`: BPF attached and no active degradation.
-- `degraded`: Syva is running, but hook error/lost counters or membership
-  reconciliation problems reduce enforcement confidence.
-- `unsafe`: BPF is not attached or startup self-tests failed.
+- `healthy`: eBPF loaded, all six supported hooks attached, mandatory self-tests
+  passed, BPF counter reads are succeeding, and no active degradation is known.
+- `degraded`: Syva is running, but BPF map errors, hook error/lost deltas,
+  failed counter reads, or membership reconciliation problems reduce
+  enforcement confidence.
+- `unsafe`: eBPF is not loaded, fewer than six hooks are attached, or mandatory
+  startup self-tests failed.
 
 Fail-open hook errors are degraded security, not harmless warnings.
 

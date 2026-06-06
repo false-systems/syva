@@ -51,6 +51,10 @@ struct Cli {
     /// Local syva.core.v1 Unix socket path.
     #[arg(long, default_value = "/run/syva/syva-core.sock")]
     socket_path: PathBuf,
+
+    /// Log format: text or json.
+    #[arg(long, default_value = "text", env = "SYVA_LOG_FORMAT")]
+    log_format: LogFormat,
 }
 
 #[derive(Subcommand)]
@@ -74,6 +78,12 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
 struct LocalCoreServerState {
     registry: Arc<RwLock<zone::ZoneRegistry>>,
     memberships: Arc<RwLock<membership::MembershipService>>,
@@ -85,11 +95,8 @@ struct LocalCoreServerState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("syva_core=info".parse()?))
-        .init();
-
     let cli = Cli::parse();
+    init_logging(&cli.log_format)?;
 
     match cli.command {
         Some(Commands::Status) => cmd_status().await,
@@ -98,9 +105,26 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn init_logging(format: &LogFormat) -> anyhow::Result<()> {
+    let env_filter = EnvFilter::from_default_env().add_directive("syva_core=info".parse()?);
+    match format {
+        LogFormat::Text => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_env_filter(env_filter)
+            .init(),
+    }
+    Ok(())
+}
+
 /// Main enforcement engine loop.
 async fn cmd_run(config: Cli) -> anyhow::Result<()> {
-    tracing::info!("syva-core starting");
+    tracing::info!(
+        event = "syva.startup.begin",
+        component = "syva-core",
+        "syva-core starting"
+    );
     let start_time = Instant::now();
 
     // Health state — shared with the HTTP server. Starts as unhealthy
@@ -109,7 +133,16 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     health::spawn_health_server(config.health_port, health_state.clone()).await?;
 
     // Load eBPF programs (but do NOT attach — no enforcement yet).
-    let mut mgr = ebpf::EnforceEbpf::load(config.ebpf_obj.as_deref())?;
+    let mut mgr = ebpf::EnforceEbpf::load(config.ebpf_obj.as_deref()).map_err(|error| {
+        tracing::error!(
+            event = "syva.startup.failed",
+            component = "syva-core",
+            %error,
+            "syva-core startup failed during eBPF load"
+        );
+        error
+    })?;
+    health_state.write().await.mark_ebpf_loaded();
 
     // Do not take the ENFORCEMENT_EVENTS ring buffer here — it is single-consumer
     // and the gRPC WatchEvents RPC needs to acquire it. Event logging for the core
@@ -117,15 +150,75 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Attach eBPF hooks — enforcement becomes active.
-    mgr.attach_programs()?;
+    let attached_hooks = mgr.attach_programs().map_err(|error| {
+        tracing::error!(
+            event = "syva.startup.failed",
+            component = "syva-core",
+            %error,
+            "syva-core startup failed during eBPF attach"
+        );
+        error
+    })?;
+    health_state.write().await.mark_attached(attached_hooks);
 
     // Validate kernel struct offsets via self-tests.
-    mgr.verify_self_test().await?;
-    mgr.verify_inode_self_test().await?;
-    mgr.verify_unix_self_test().await?;
-
-    // Health: BPF attached and self-tests passed — mark healthy.
-    health_state.write().await.attached = true;
+    if let Err(error) = mgr.verify_self_test().await {
+        health_state
+            .write()
+            .await
+            .mark_selftest("cgroup", health::SelfTestStatus::Failed);
+        tracing::error!(
+            event = "syva.selftest.failed",
+            component = "syva-core",
+            test = "cgroup",
+            result = "error",
+            %error,
+            "cgroup self-test failed"
+        );
+        return Err(error);
+    }
+    health_state
+        .write()
+        .await
+        .mark_selftest("cgroup", health::SelfTestStatus::Passed);
+    if let Err(error) = mgr.verify_inode_self_test().await {
+        health_state
+            .write()
+            .await
+            .mark_selftest("inode", health::SelfTestStatus::Failed);
+        tracing::error!(
+            event = "syva.selftest.failed",
+            component = "syva-core",
+            test = "inode",
+            result = "error",
+            %error,
+            "inode self-test failed"
+        );
+        return Err(error);
+    }
+    health_state
+        .write()
+        .await
+        .mark_selftest("inode", health::SelfTestStatus::Passed);
+    if let Err(error) = mgr.verify_unix_self_test().await {
+        health_state
+            .write()
+            .await
+            .mark_selftest("unix", health::SelfTestStatus::Failed);
+        tracing::error!(
+            event = "syva.selftest.failed",
+            component = "syva-core",
+            test = "unix",
+            result = "error",
+            %error,
+            "unix self-test failed"
+        );
+        return Err(error);
+    }
+    health_state
+        .write()
+        .await
+        .mark_selftest("unix", health::SelfTestStatus::Passed);
 
     // Drop unnecessary capabilities. After BPF load and map population,
     // we only need open file descriptors (already held by the Bpf struct).
@@ -152,7 +245,13 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     )
     .await?;
 
-    tracing::info!("startup complete — enforcement active");
+    tracing::info!(
+        event = "syva.startup.ready",
+        component = "syva-core",
+        expected_hooks = events::HOOK_NAMES.len(),
+        attached_hooks,
+        "startup complete — enforcement active"
+    );
 
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -200,7 +299,19 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
                             monitor_health.write().await.update_hook_counters(hook_snapshot);
                         }
                         Err(e) => {
-                            tracing::debug!(%e, "failed to read enforcement counters");
+                            tracing::warn!(
+                                event = "syva.health.degraded",
+                                component = "syva-core",
+                                reason = "bpf_map_read_error",
+                                previous_state = "healthy",
+                                new_state = "degraded",
+                                %e,
+                                "failed to read enforcement counters — security status is degraded"
+                            );
+                            monitor_health
+                                .write()
+                                .await
+                                .mark_counter_read_failed(format!("BPF counter read failed: {e}"));
                         }
                     }
                 }
@@ -489,11 +600,14 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
 
                     if json_mode {
                         let json = serde_json::json!({
+                            "event": if decision == "deny" { "syva.enforcement.denied" } else { "syva.enforcement.observed" },
+                            "component": "syva-core",
                             "timestamp_ns": event.timestamp_ns,
                             "hook": hook,
-                            "action": decision,
+                            "result": decision,
+                            "errno": if decision == "deny" { "EPERM" } else { "" },
                             "pid": event.pid,
-                            "caller_zone": event.caller_zone,
+                            "source_zone": event.caller_zone,
                             "target_zone": event.target_zone,
                             "context": event.context,
                         });

@@ -81,7 +81,13 @@ impl EnforceEbpf {
             Some(p) => p.to_path_buf(),
             None => find_ebpf_object()?,
         };
-        tracing::info!(path = %obj_path.display(), "loading eBPF object");
+        tracing::info!(
+            event = "syva.ebpf.object_selected",
+            component = "syva-core",
+            object_path = %obj_path.display(),
+            result = "ok",
+            "loading eBPF object"
+        );
 
         let pin_path = PathBuf::from(BPF_PIN_PATH);
 
@@ -145,7 +151,11 @@ impl EnforceEbpf {
         }
 
         tracing::info!(
+            event = "syva.ebpf.loaded",
+            component = "syva-core",
+            object_path = %obj_path.display(),
             programs = LSM_PROGRAMS.len(),
+            result = "ok",
             "eBPF programs loaded (not yet attached)"
         );
 
@@ -155,25 +165,48 @@ impl EnforceEbpf {
     /// Attach all loaded LSM programs. Call this AFTER zone membership is
     /// populated to eliminate the startup race window where hooks are active
     /// but ZONE_MEMBERSHIP is empty (all containers would appear unzoned).
-    pub fn attach_programs(&mut self) -> anyhow::Result<()> {
+    pub fn attach_programs(&mut self) -> anyhow::Result<usize> {
+        tracing::info!(
+            event = "syva.ebpf.attach.begin",
+            component = "syva-core",
+            expected_hooks = LSM_PROGRAMS.len(),
+            "attaching supported BPF-LSM programs"
+        );
+        let mut attached = 0usize;
         for program in LSM_PROGRAMS {
             let prog: &mut Lsm = self
                 .bpf
                 .program_mut(program.program_name)
                 .ok_or_else(|| anyhow::anyhow!("LSM program '{}' not found", program.program_name))?
                 .try_into()?;
-            prog.attach()?;
+            if let Err(error) = prog.attach() {
+                tracing::error!(
+                    event = "syva.ebpf.attach.failed",
+                    component = "syva-core",
+                    program = program.program_name,
+                    hook = program.hook_name,
+                    result = "error",
+                    %error,
+                    "failed to attach LSM program"
+                );
+                return Err(error.into());
+            }
+            attached += 1;
             tracing::info!(
+                event = "syva.ebpf.attached",
+                component = "syva-core",
                 program = program.program_name,
                 hook = program.hook_name,
+                result = "ok",
                 "attached LSM program"
             );
         }
         tracing::info!(
-            programs = LSM_PROGRAMS.len(),
+            attached_hooks = attached,
+            expected_hooks = LSM_PROGRAMS.len(),
             "all LSM programs attached — enforcement active"
         );
-        Ok(())
+        Ok(attached)
     }
 
     /// Take ownership of the ring buffer for event streaming.
@@ -306,6 +339,10 @@ impl EnforceEbpf {
             if result.helper_cgroup_id != 0 {
                 if result.helper_cgroup_id == result.offset_cgroup_id {
                     tracing::info!(
+                        event = "syva.selftest.passed",
+                        component = "syva-core",
+                        test = "cgroup",
+                        result = "ok",
                         cgroup_id = result.helper_cgroup_id,
                         "self-test passed: kernel struct offsets verified"
                     );
@@ -392,6 +429,10 @@ impl EnforceEbpf {
             if result.offset_ino != 0 {
                 if result.offset_ino == expected_ino {
                     tracing::info!(
+                        event = "syva.selftest.passed",
+                        component = "syva-core",
+                        test = "inode",
+                        result = "ok",
                         inode = result.offset_ino,
                         "inode self-test passed: FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET verified"
                     );
@@ -490,6 +531,10 @@ impl EnforceEbpf {
                 // self-tests) because the socketpair peer is in our own process.
                 // A non-zero result confirms the offset chain reads valid memory.
                 tracing::info!(
+                    event = "syva.selftest.passed",
+                    component = "syva-core",
+                    test = "unix",
+                    result = "ok",
                     peer_cgroup_id = result.peer_cgroup_id,
                     "unix self-test passed: SOCK_CGRP_DATA_CGROUP_OFFSET verified"
                 );
