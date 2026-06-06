@@ -30,6 +30,13 @@ if ! command -v bpf-linker >/dev/null 2>&1; then
 fi
 echo "ok: $(command -v bpf-linker)"
 
+say "curl (health checks)"
+if ! command -v curl >/dev/null 2>&1; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl
+fi
+echo "ok: $(command -v curl)"
+
 say "Container runtime ($RUNTIME)"
 if ! command -v "$RUNTIME" >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
@@ -55,9 +62,37 @@ else
   echo "BPF LSM is NOT active. Enabling it on the kernel command line (requires reboot)."
   if [ -f /etc/default/grub ]; then
     sudo cp -n /etc/default/grub /etc/default/grub.syva-bak || true
-    sudo sed -i \
-      's|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX="lsm=lockdown,capability,landlock,yama,apparmor,bpf"|' \
-      /etc/default/grub
+    current_cmdline="$(sudo sed -n 's/^GRUB_CMDLINE_LINUX=//p' /etc/default/grub | tail -n 1)"
+    current_cmdline="${current_cmdline%\"}"
+    current_cmdline="${current_cmdline#\"}"
+    current_lsms="$(printf '%s' "$LSM" | tr -d '[:space:]')"
+    if [ -z "$current_lsms" ] || printf '%s' "$current_lsms" | grep -q '[<>]'; then
+      current_lsms="lockdown,capability,landlock,yama,apparmor"
+    fi
+
+    if [[ " $current_cmdline " =~ [[:space:]]lsm=([^[:space:]]+) ]]; then
+      existing_lsms="${BASH_REMATCH[1]}"
+      if printf '%s' "$existing_lsms" | tr ',' '\n' | grep -qx bpf; then
+        new_lsms="$existing_lsms"
+      else
+        new_lsms="$existing_lsms,bpf"
+      fi
+      new_cmdline="${current_cmdline/lsm=$existing_lsms/lsm=$new_lsms}"
+    else
+      if printf '%s' "$current_lsms" | tr ',' '\n' | grep -qx bpf; then
+        new_lsms="$current_lsms"
+      else
+        new_lsms="$current_lsms,bpf"
+      fi
+      new_cmdline="${current_cmdline:+$current_cmdline }lsm=$new_lsms"
+    fi
+
+    escaped_cmdline="$(printf '%s' "$new_cmdline" | sed 's/[\/&]/\\&/g')"
+    if sudo grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
+      sudo sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$escaped_cmdline\"/" /etc/default/grub
+    else
+      printf 'GRUB_CMDLINE_LINUX="%s"\n' "$new_cmdline" | sudo tee -a /etc/default/grub >/dev/null
+    fi
     sudo update-grub
     cat >&2 <<'EOF'
 
