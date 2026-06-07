@@ -7,6 +7,9 @@ a *zone*, keeps zone membership and policy in BPF maps, and uses kernel LSM hook
 to **deny cross-zone operations before they happen** — file opens, exec,
 executable `mmap`, `ptrace`, signals, and Unix-socket connects.
 
+Current release: **v0.2.1**. This is a patch release on the v0.2 kernel
+enforcement line; the canonical control API remains `syva.core.v1`.
+
 No sidecar. No proxy. No remote control plane. Run `syva-core` per node, point an
 adapter at it, done.
 
@@ -71,7 +74,8 @@ container runtime); they are `#[ignore]`d in normal `cargo test`. See
 - **Adapters for your world** — TOML files (`syva-file`), Kubernetes
   `SyvaZonePolicy` CRDs (`syva-k8s`), or REST (`syva-api`).
 - **Operator CLI** — `syvactl` talks to a running core over gRPC:
-  `status`, `zones list`, `comms list`, `events --follow`.
+  `status`, `zones list/register/remove`, `host-paths register`,
+  `comms list/allow/deny`, and `events --follow`.
 - **Observability built in** — `/healthz` (`healthy` / `degraded` / `unsafe`
   with reasons) and `/metrics` (per-hook decisions, self-test state, BPF map
   errors, membership outcomes); Grafana dashboard and Prometheus alerts under
