@@ -106,6 +106,7 @@ because it stores the trigger strings as literals.
 | `syva-proto` | - | `syva.core.v1` protobuf API |
 | `syva-core-client` | - | Unix-socket gRPC client for adapters |
 | `syva-core` | `syva-core` | Linux eBPF enforcement engine and local API |
+| `syvactl` | `syvactl` | Thin local operator CLI over `syva.core.v1` |
 | `syva-adapter-file` | `syva-file` | TOML policy reconciler |
 | `syva-adapter-k8s` | `syva-k8s` | `SyvaZonePolicy` CRD reconciler |
 | `syva-adapter-api` | `syva-api` | REST proxy to local core |
@@ -115,6 +116,11 @@ because it stores the trigger strings as literals.
 
 Eval crates under `eval/` are outside the workspace and use their own
 manifests.
+
+API docs live under `docs/api/`. The protobuf/gRPC API (`syva.core.v1`) is the
+source of truth; OpenAPI documents only the partial REST API; `syvactl` is a
+thin local gRPC client. Keep `cargo run -p xtask -- check-api-docs` and
+`cargo run -p xtask -- check-openapi` green when changing the control surface.
 
 ## Enforcement Model
 

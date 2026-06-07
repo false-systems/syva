@@ -59,7 +59,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show current enforcement status.
+    /// Show current enforcement status (uses the top-level --socket-path).
     Status,
     /// Stream enforcement events.
     Events {
@@ -97,9 +97,12 @@ struct LocalCoreServerState {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_logging(&cli.log_format)?;
+    // `status` queries the same socket the engine serves; reuse the top-level
+    // --socket-path so `syva-core --socket-path X status` targets X.
+    let status_socket = cli.socket_path.clone();
 
     match cli.command {
-        Some(Commands::Status) => cmd_status().await,
+        Some(Commands::Status) => cmd_status(status_socket).await,
         Some(Commands::Events { follow, format }) => cmd_events(follow, format).await,
         None => cmd_run(cli).await,
     }
@@ -458,7 +461,24 @@ fn syva_group_gid() -> Option<u32> {
     })
 }
 
-async fn cmd_status() -> anyhow::Result<()> {
+async fn cmd_status(socket_path: PathBuf) -> anyhow::Result<()> {
+    match syva_core_client::connect_unix_socket(&socket_path).await {
+        Ok(mut client) => {
+            let status = client
+                .status(syva_core_client::syva_core::StatusRequest {})
+                .await?
+                .into_inner();
+            print_grpc_status(&status);
+            return Ok(());
+        }
+        Err(error) => {
+            println!(
+                "socket unavailable at {}; showing BPF pinned counter fallback only ({error})",
+                socket_path.display()
+            );
+        }
+    }
+
     use aya::maps::PerCpuArray;
     use syva_ebpf_common::EnforcementCounters;
 
@@ -544,6 +564,27 @@ async fn cmd_status() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_grpc_status(status: &syva_core_client::syva_core::StatusResponse) {
+    println!("syva: ACTIVE (gRPC Status)");
+    println!("  attached: {}", status.attached);
+    println!("  zones_active: {}", status.zones_active);
+    println!("  containers_active: {}", status.containers_active);
+    println!("  uptime_secs: {}", status.uptime_secs);
+    println!("  max_zones: {}", status.max_zones);
+    println!("  hooks:");
+    for hook in &status.hooks {
+        let flag = if hook.error > 0 || hook.lost > 0 {
+            " !"
+        } else {
+            ""
+        };
+        println!(
+            "    {:<22} allow={:<8} deny={:<8} error={:<6} lost={}{}",
+            hook.hook, hook.allow, hook.deny, hook.error, hook.lost, flag
+        );
+    }
 }
 
 async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {

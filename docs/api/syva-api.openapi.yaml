@@ -1,0 +1,219 @@
+openapi: 3.1.0
+info:
+  title: Syva REST API
+  version: 0.2.0
+  description: >
+    Partial node-local REST API for Syva. The canonical control API is the
+    local syva.core.v1 gRPC API over the syva-core Unix socket.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /healthz:
+    get:
+      summary: REST API health check
+      responses:
+        "200":
+          description: syva-api is serving
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/zones:
+    post:
+      summary: Register a local zone through syva-core
+      description: >
+        Creates or updates a zone using the local core API. policy_json is
+        intentionally narrow in local mode and accepts host_paths,
+        allow_ptrace, and zone_type only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateZoneRequest"
+      responses:
+        "201":
+          description: zone registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateZoneResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    get:
+      summary: List zones
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, active, draining]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 0
+      responses:
+        "200":
+          description: zones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Zone"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/zones/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get one zone
+      responses:
+        "200":
+          description: zone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Zone"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    put:
+      summary: Update zone policy
+      description: >
+        Re-registers a zone with a narrow local policy_json if provided.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateZoneRequest"
+      responses:
+        "200":
+          description: updated zone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Zone"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Drain/remove a zone
+      description: Calls RemoveZone with drain=true.
+      responses:
+        "204":
+          description: accepted
+        "502":
+          $ref: "#/components/responses/Error"
+components:
+  responses:
+    Error:
+      description: error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+    CreateZoneRequest:
+      type: object
+      additionalProperties: false
+      required: [name, policy_json]
+      properties:
+        name:
+          type: string
+        policy_json:
+          $ref: "#/components/schemas/LocalPolicyJson"
+    UpdateZoneRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        policy_json:
+          $ref: "#/components/schemas/LocalPolicyJson"
+    CreateZoneResponse:
+      type: object
+      additionalProperties: false
+      required: [zone_id, policy_id, version]
+      properties:
+        zone_id:
+          type: string
+        policy_id:
+          type: string
+        version:
+          type: integer
+    Zone:
+      type: object
+      additionalProperties: false
+      required:
+        - zone_id
+        - team_id
+        - name
+        - status
+        - version
+      properties:
+        zone_id:
+          type: string
+        team_id:
+          type: string
+          description: Reserved for compatibility; empty in local mode.
+        name:
+          type: string
+        display_name:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [pending, active, draining]
+        version:
+          type: integer
+        current_policy_id:
+          type: [string, "null"]
+        current_policy_json:
+          type: [object, "null"]
+        selector_json:
+          type: [object, "null"]
+        metadata_json:
+          type: [object, "null"]
+    LocalPolicyJson:
+      type: object
+      additionalProperties: false
+      properties:
+        host_paths:
+          type: array
+          items:
+            type: string
+          default: []
+        allow_ptrace:
+          type: boolean
+          default: false
+        zone_type:
+          type: string
+          enum: [standard, privileged, isolated]
+          default: standard

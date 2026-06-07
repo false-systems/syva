@@ -2124,6 +2124,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "syva-core-client",
  "syva-ebpf-common",
  "syva-proto",
  "tempfile",
@@ -2165,6 +2166,18 @@ dependencies = [
  "prost-types",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "syvactl"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "syva-core-client",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -2875,6 +2888,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_yaml",
 ]
 
 [[package]]

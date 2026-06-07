@@ -146,6 +146,10 @@ jobs:
           tool: bpf-linker
       - name: Check proto build
         run: cargo run -p xtask -- check-proto
+      - name: Check API docs
+        run: cargo run -p xtask -- check-api-docs
+      - name: Check OpenAPI
+        run: cargo run -p xtask -- check-openapi
       - name: Check release docs
         run: cargo run -p xtask -- check-release-docs
       - name: Check eBPF artifact policy

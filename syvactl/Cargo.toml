@@ -1,0 +1,16 @@
+[package]
+name = "syvactl"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "syvactl"
+path = "src/main.rs"
+
+[dependencies]
+syva-core-client = { path = "../syva-core-client" }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tonic = { workspace = true }

@@ -5,7 +5,7 @@ REPO_DIR := $(shell pwd)
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -35,6 +35,12 @@ eval-build:
 
 proto-check:
 	cargo run -p xtask -- check-proto
+
+check-api-docs:
+	cargo run -p xtask -- check-api-docs
+
+check-openapi:
+	cargo run -p xtask -- check-openapi
 
 check-release-docs:
 	cargo run -p xtask -- check-release-docs
@@ -105,5 +111,5 @@ lima-smoke:
 
 macos-check:
 	cargo fmt --all -- --check
-	cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api
-	cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client
+	cargo test -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syvactl
+	cargo check -p syva-proto -p syva-ebpf-common -p syva-adapter-api -p syva-core-client -p syvactl

@@ -4,6 +4,7 @@ members = [
     "syva-proto",
     "syva-core-client",
     "syva-core",
+    "syvactl",
     "syva-adapter-file",
     "syva-adapter-k8s",
     "syva-adapter-api",
