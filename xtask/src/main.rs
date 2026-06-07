@@ -32,6 +32,8 @@ enum Cli {
     CheckProto,
     /// Check API documentation covers the current local API.
     CheckApiDocs,
+    /// Check the versioned syvactl command contract.
+    CheckSyvactlContract,
     /// Check the REST OpenAPI document parses and covers implemented paths.
     CheckOpenapi,
     /// Check release-critical docs do not drift from v0.2 runtime guarantees.
@@ -67,6 +69,7 @@ fn main() -> Result<()> {
         Cli::EvalBuild => build_eval_crates(),
         Cli::CheckProto => check_proto(),
         Cli::CheckApiDocs => check_api_docs(),
+        Cli::CheckSyvactlContract => check_syvactl_contract(),
         Cli::CheckOpenapi => check_openapi(),
         Cli::CheckReleaseDocs => check_release_docs(),
         Cli::CheckEbpfArtifactPolicy => check_ebpf_artifact_policy(),
@@ -167,6 +170,7 @@ fn check_api_docs() -> Result<()> {
         "docs/api/grpc.md",
         "docs/api/api-compatibility.md",
         "docs/api/cli.md",
+        "docs/api/syvactl-command-contract.md",
         "docs/api/syva-api.openapi.yaml",
     ] {
         if !root.join(file).exists() {
@@ -210,7 +214,48 @@ fn check_api_docs() -> Result<()> {
         }
     }
 
+    check_syvactl_contract()?;
+
     println!("API documentation check ok");
+    Ok(())
+}
+
+fn check_syvactl_contract() -> Result<()> {
+    let root = project_root();
+    let path = root.join("docs/api/syvactl-command-contract.md");
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+
+    for required in [
+        "Contract: `syvactl/v0.1`",
+        "Status: Draft",
+        "Source of truth: `syva.core.v1` gRPC API",
+        "syvactl status",
+        "syvactl zones list",
+        "syvactl comms list",
+        "syvactl events --follow",
+        "syvactl zones register",
+        "syvactl zones remove",
+        "syvactl host-paths register",
+        "syvactl comms allow",
+        "syvactl comms deny",
+        "syvactl containers attach",
+        "syvactl containers detach",
+        "--socket <path>",
+        "--format <text|json>",
+        "Exit Codes",
+        "JSON output is the stable scripting interface",
+    ] {
+        if !content.contains(required) {
+            bail!("docs/api/syvactl-command-contract.md must mention `{required}`");
+        }
+    }
+
+    if content.contains("cgroup_attach_task") {
+        bail!("syvactl command contract must not contain active cgroup_attach_task claims");
+    }
+
+    println!("syvactl command contract check ok");
     Ok(())
 }
 

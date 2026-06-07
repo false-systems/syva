@@ -5,6 +5,11 @@ does not run a daemon, manage policy, or replace adapters. It is for inspecting
 and operating the local `syva-core` instance through the same Unix socket used
 by adapters.
 
+The versioned command compatibility contract is
+[`syvactl-command-contract.md`](syvactl-command-contract.md). This guide shows
+current usage; the contract defines stable command names, flags, JSON output,
+and exit-code categories.
+
 Default socket:
 
 ```text
@@ -43,6 +48,42 @@ syvactl zones list
 syvactl zones list --format json
 ```
 
+### syvactl zones register
+
+Calls gRPC `RegisterZone`.
+
+```sh
+syvactl zones register zone-a
+syvactl zones register zone-a --type privileged --format json
+```
+
+Supported `--type` values are `standard`, `privileged`, and `isolated`. The
+server remains responsible for accepting or rejecting the requested type.
+
+### syvactl zones remove
+
+Calls gRPC `RemoveZone` with `drain=false`.
+
+```sh
+syvactl zones remove zone-a
+syvactl zones remove zone-a --format json
+```
+
+If the server rejects removal, for example because active memberships remain,
+the command prints the server reason and exits with the domain-rejection code.
+
+### syvactl host-paths register
+
+Calls gRPC `RegisterHostPath`.
+
+```sh
+syvactl host-paths register zone-a /srv/zone-a/secret.txt
+syvactl host-paths register zone-a /srv/zone-a/secret.txt --format json
+```
+
+This registers the path/inode mapping used by file enforcement. The command
+prints only the path supplied by the operator.
+
 ### syvactl comms list
 
 Calls gRPC `ListComms`.
@@ -51,6 +92,24 @@ Calls gRPC `ListComms`.
 syvactl comms list
 syvactl comms list --zone zone-a
 syvactl comms list --format json
+```
+
+### syvactl comms allow
+
+Calls gRPC `AllowComm`.
+
+```sh
+syvactl comms allow zone-a zone-b
+syvactl comms allow zone-a zone-b --format json
+```
+
+### syvactl comms deny
+
+Calls gRPC `DenyComm`.
+
+```sh
+syvactl comms deny zone-a zone-b
+syvactl comms deny zone-a zone-b --format json
 ```
 
 ### syvactl events --follow
@@ -79,15 +138,21 @@ client has already taken the stream, the command reports the gRPC error from
 
 ## Write Commands
 
-This initial `syvactl` surface is intentionally read-only:
+`syvactl` now includes the Phase 2A low-risk local write commands. The current
+surface is:
 
 ```text
 status
 zones list
+zones register
+zones remove
+host-paths register
 comms list
+comms allow
+comms deny
 events --follow
 ```
 
-Write commands such as zone registration, attach/detach, and communication
-updates should be added only as thin wrappers over existing gRPC requests, with
-JSON output for automation and no duplicated adapter logic.
+Container attach/detach is intentionally not implemented yet. Those commands
+directly affect live membership and need the stricter generation/cgroup handling
+defined in the command contract.
