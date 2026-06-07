@@ -25,3 +25,13 @@ repos:
         entry: make proto-check
         language: system
         pass_filenames: false
+      - id: syva-api-docs
+        name: syva API docs check
+        entry: make check-api-docs
+        language: system
+        pass_filenames: false
+      - id: syva-openapi
+        name: syva OpenAPI check
+        entry: make check-openapi
+        language: system
+        pass_filenames: false

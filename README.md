@@ -37,6 +37,7 @@ Active components:
 - `syva-proto`: `syva.core.v1` protobuf API.
 - `syva-core-client`: shared Unix-socket gRPC client for adapters.
 - `syva-core`: Linux enforcement engine.
+- `syvactl`: thin local operator CLI over `syva.core.v1`.
 - `syva-adapter-file`: TOML policy directory reconciler.
 - `syva-adapter-k8s`: `SyvaZonePolicy` CRD reconciler.
 - `syva-adapter-api`: REST proxy to the local core API.
@@ -64,6 +65,10 @@ map-based:
 Kernel read failures fail open for node safety, but Syva treats them as degraded
 security. Hook error/lost counters move health from `healthy` to `degraded`.
 Missing BPF attachment is `unsafe` and returns an unhealthy readiness status.
+
+The canonical control API is the local gRPC API `syva.core.v1` on the
+`syva-core` Unix socket. `syvactl` is a thin operator client over that API. The
+REST API is partial and documented separately. See [`docs/api/`](docs/api/).
 
 ## Membership
 

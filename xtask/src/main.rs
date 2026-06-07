@@ -30,6 +30,10 @@ enum Cli {
     EvalBuild,
     /// Check syva-proto builds from the checked-in .proto definitions.
     CheckProto,
+    /// Check API documentation covers the current local API.
+    CheckApiDocs,
+    /// Check the REST OpenAPI document parses and covers implemented paths.
+    CheckOpenapi,
     /// Check release-critical docs do not drift from v0.2 runtime guarantees.
     CheckReleaseDocs,
     /// Check the runtime eBPF artifact policy: release build by default.
@@ -62,6 +66,8 @@ fn main() -> Result<()> {
         Cli::LinuxBpfCheck => check_ebpf_artifact_policy(),
         Cli::EvalBuild => build_eval_crates(),
         Cli::CheckProto => check_proto(),
+        Cli::CheckApiDocs => check_api_docs(),
+        Cli::CheckOpenapi => check_openapi(),
         Cli::CheckReleaseDocs => check_release_docs(),
         Cli::CheckEbpfArtifactPolicy => check_ebpf_artifact_policy(),
         Cli::Precommit => precommit(),
@@ -155,11 +161,86 @@ fn check_proto() -> Result<()> {
     run_root_command("cargo", &["check", "-p", "syva-proto"])
 }
 
+fn check_api_docs() -> Result<()> {
+    let root = project_root();
+    for file in [
+        "docs/api/grpc.md",
+        "docs/api/api-compatibility.md",
+        "docs/api/cli.md",
+        "docs/api/syva-api.openapi.yaml",
+    ] {
+        if !root.join(file).exists() {
+            bail!("missing API documentation file: {file}");
+        }
+    }
+
+    let grpc = fs::read_to_string(root.join("docs/api/grpc.md"))
+        .context("failed to read docs/api/grpc.md")?;
+    for required in [
+        "syva.core.v1",
+        "RegisterZone",
+        "RemoveZone",
+        "ListZones",
+        "AttachContainer",
+        "DetachContainer",
+        "AllowComm",
+        "DenyComm",
+        "ListComms",
+        "RegisterHostPath",
+        "Status",
+        "WatchEvents",
+        "generation `0`",
+        "ok: false",
+    ] {
+        if !grpc.contains(required) {
+            bail!("docs/api/grpc.md must mention `{required}`");
+        }
+    }
+
+    let cli = fs::read_to_string(root.join("docs/api/cli.md"))
+        .context("failed to read docs/api/cli.md")?;
+    for required in [
+        "syvactl status",
+        "syvactl zones list",
+        "syvactl comms list",
+        "syvactl events --follow",
+    ] {
+        if !cli.contains(required) {
+            bail!("docs/api/cli.md must mention `{required}`");
+        }
+    }
+
+    println!("API documentation check ok");
+    Ok(())
+}
+
+fn check_openapi() -> Result<()> {
+    let root = project_root();
+    let path = root.join("docs/api/syva-api.openapi.yaml");
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&content).context("failed to parse OpenAPI YAML")?;
+    let paths = value
+        .get("paths")
+        .and_then(|value| value.as_mapping())
+        .context("OpenAPI document must contain a paths mapping")?;
+    for path in ["/healthz", "/v1/zones", "/v1/zones/{name}"] {
+        if !paths.contains_key(serde_yaml::Value::String(path.to_string())) {
+            bail!("OpenAPI document must describe `{path}`");
+        }
+    }
+    println!("OpenAPI check ok");
+    Ok(())
+}
+
 fn precommit() -> Result<()> {
     fmt()?;
     lint()?;
     run_root_command("cargo", &["test", "--workspace"])?;
     check_proto()?;
+    check_api_docs()?;
+    check_openapi()?;
     check_release_docs()?;
     check_ebpf_artifact_policy()
 }
@@ -171,6 +252,8 @@ fn ci() -> Result<()> {
     run_root_command("cargo", &["test", "--workspace"])?;
     build_eval_crates()?;
     check_proto()?;
+    check_api_docs()?;
+    check_openapi()?;
     check_release_docs()?;
     check_ebpf_artifact_policy()
 }
