@@ -1,7 +1,7 @@
 # syvactl Command Contract
 
-Contract: `syvactl/v0.1`  
-Status: Draft  
+Contract: `syvactl/v0.1`
+Status: Draft
 Source of truth: `syva.core.v1` gRPC API
 
 This document defines the intended operator-facing command surface for
