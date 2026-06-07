@@ -420,15 +420,7 @@ fn print_status(format: OutputFormat, status: &syva_core_client::syva_core::Stat
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "attached": status.attached,
-                    "zones_active": status.zones_active,
-                    "containers_active": status.containers_active,
-                    "uptime_secs": status.uptime_secs,
-                    "max_zones": status.max_zones,
-                    "hooks": status.hooks.iter().map(hook_json).collect::<Vec<_>>(),
-                }))
-                .expect("status JSON serializes")
+                serde_json::to_string_pretty(&status_json(status)).expect("status JSON serializes")
             );
         }
         OutputFormat::Text => {
@@ -454,20 +446,7 @@ fn print_zones(format: OutputFormat, zones: &[syva_core_client::syva_core::ZoneS
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(
-                    &zones
-                        .iter()
-                        .map(|zone| {
-                            serde_json::json!({
-                                "name": zone.name,
-                                "zone_id": zone.zone_id,
-                                "state": zone.state,
-                                "containers_active": zone.containers_active,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                )
-                .expect("zone JSON serializes")
+                serde_json::to_string_pretty(&zones_json(zones)).expect("zone JSON serializes")
             );
         }
         OutputFormat::Text => {
@@ -490,18 +469,7 @@ fn print_comms(format: OutputFormat, pairs: &[syva_core_client::syva_core::CommP
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(
-                    &pairs
-                        .iter()
-                        .map(|pair| {
-                            serde_json::json!({
-                                "zone_a": pair.zone_a,
-                                "zone_b": pair.zone_b,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                )
-                .expect("comms JSON serializes")
+                serde_json::to_string_pretty(&comms_json(pairs)).expect("comms JSON serializes")
             );
         }
         OutputFormat::Text => {
@@ -553,6 +521,55 @@ fn hook_json(hook: &syva_core_client::syva_core::HookStatus) -> serde_json::Valu
         "deny": hook.deny,
         "error": hook.error,
         "lost": hook.lost,
+    })
+}
+
+fn status_json(status: &syva_core_client::syva_core::StatusResponse) -> serde_json::Value {
+    serde_json::json!({
+        "operation": "status",
+        "ok": true,
+        "status": {
+            "attached": status.attached,
+            "zones_active": status.zones_active,
+            "containers_active": status.containers_active,
+            "uptime_secs": status.uptime_secs,
+            "max_zones": status.max_zones,
+            "hooks": status.hooks.iter().map(hook_json).collect::<Vec<_>>(),
+        },
+    })
+}
+
+fn zones_json(zones: &[syva_core_client::syva_core::ZoneSummary]) -> serde_json::Value {
+    serde_json::json!({
+        "operation": "list_zones",
+        "ok": true,
+        "zones": zones
+            .iter()
+            .map(|zone| {
+                serde_json::json!({
+                    "name": zone.name,
+                    "zone_id": zone.zone_id,
+                    "state": zone.state,
+                    "containers_active": zone.containers_active,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn comms_json(pairs: &[syva_core_client::syva_core::CommPair]) -> serde_json::Value {
+    serde_json::json!({
+        "operation": "list_comms",
+        "ok": true,
+        "comms": pairs
+            .iter()
+            .map(|pair| {
+                serde_json::json!({
+                    "zone_a": pair.zone_a,
+                    "zone_b": pair.zone_b,
+                })
+            })
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -731,6 +748,58 @@ mod tests {
             <OutputFormat as clap::ValueEnum>::from_str("json", true),
             Ok(OutputFormat::Json)
         );
+    }
+
+    #[test]
+    fn status_json_uses_read_contract_envelope() {
+        let json = status_json(&syva_core_client::syva_core::StatusResponse {
+            attached: true,
+            zones_active: 2,
+            containers_active: 1,
+            uptime_secs: 42,
+            hooks: vec![syva_core_client::syva_core::HookStatus {
+                hook: "file_open".to_string(),
+                allow: 3,
+                deny: 4,
+                error: 0,
+                lost: 0,
+            }],
+            max_zones: 64,
+        });
+
+        assert_eq!(json["operation"], "status");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["status"]["attached"], true);
+        assert_eq!(json["status"]["zones_active"], 2);
+        assert_eq!(json["status"]["hooks"][0]["hook"], "file_open");
+    }
+
+    #[test]
+    fn zones_json_uses_read_contract_envelope() {
+        let json = zones_json(&[syva_core_client::syva_core::ZoneSummary {
+            name: "zone-a".to_string(),
+            zone_id: 7,
+            state: "active".to_string(),
+            containers_active: 1,
+        }]);
+
+        assert_eq!(json["operation"], "list_zones");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["zones"][0]["name"], "zone-a");
+        assert_eq!(json["zones"][0]["zone_id"], 7);
+    }
+
+    #[test]
+    fn comms_json_uses_read_contract_envelope() {
+        let json = comms_json(&[syva_core_client::syva_core::CommPair {
+            zone_a: "zone-a".to_string(),
+            zone_b: "zone-b".to_string(),
+        }]);
+
+        assert_eq!(json["operation"], "list_comms");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["comms"][0]["zone_a"], "zone-a");
+        assert_eq!(json["comms"][0]["zone_b"], "zone-b");
     }
 
     #[test]
