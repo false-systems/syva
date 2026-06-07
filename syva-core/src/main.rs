@@ -55,12 +55,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show current enforcement status.
-    Status {
-        /// syva-core Unix socket path.
-        #[arg(long, default_value = "/run/syva/syva-core.sock")]
-        socket: PathBuf,
-    },
+    /// Show current enforcement status (uses the top-level --socket-path).
+    Status,
     /// Stream enforcement events.
     Events {
         /// Follow events in real time.
@@ -94,9 +90,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    // `status` queries the same socket the engine serves; reuse the top-level
+    // --socket-path so `syva-core --socket-path X status` targets X.
+    let status_socket = cli.socket_path.clone();
 
     match cli.command {
-        Some(Commands::Status { socket }) => cmd_status(socket).await,
+        Some(Commands::Status) => cmd_status(status_socket).await,
         Some(Commands::Events { follow, format }) => cmd_events(follow, format).await,
         None => cmd_run(cli).await,
     }

@@ -55,7 +55,10 @@ syvactl comms list --format json
 
 ### syvactl events --follow
 
-Calls gRPC `WatchEvents`.
+Calls gRPC `WatchEvents`. `--follow` is **required**: `WatchEvents` is a live
+stream and syva-core hands out a single ring-buffer consumer, so a non-follow
+call would drain and release it. `syvactl events` without `--follow` exits with
+an error rather than consuming the stream.
 
 ```sh
 syvactl events --follow

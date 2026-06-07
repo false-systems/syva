@@ -76,6 +76,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    // Fail fast before connecting: WatchEvents is a live stream and syva-core
+    // hands out a single ring-buffer consumer, so a non-follow call would drain
+    // and release it. Require --follow.
+    if let Command::Events { follow: false } = cli.command {
+        anyhow::bail!(
+            "`syvactl events` requires --follow: WatchEvents is a live stream and a \
+             non-follow call would consume syva-core's single event-stream handle. \
+             Run `syvactl events --follow`."
+        );
+    }
+
     let mut client = syva_core_client::connect_unix_socket(&cli.socket)
         .await
         .with_context(|| format!("failed to connect to syva-core at {}", cli.socket.display()))?;
@@ -103,6 +114,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             print_comms(cli.format, &comms.pairs)?;
         }
         Command::Events { follow } => {
+            // `follow` is guaranteed true here (checked before connecting).
             let mut stream = client
                 .watch_events(WatchEventsRequest { follow })
                 .await?
