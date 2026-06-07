@@ -8,11 +8,11 @@ use tokio_util::sync::CancellationToken;
 
 pub const HOOK_NAMES: [&str; 6] = [
     "file_open",
-    "bprm_check",
+    "bprm_check_security",
     "ptrace_access_check",
     "task_kill",
     "mmap_file",
-    "unix_connect",
+    "unix_stream_connect",
 ];
 
 /// Maximum events to drain per tick. Prevents the blocking task from

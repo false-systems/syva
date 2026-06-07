@@ -1,0 +1,65 @@
+groups:
+  - name: syva-node-enforcement
+    rules:
+      - alert: SyvaUnsafe
+        expr: syva_health_state{state="unsafe"} == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Syva enforcement is unsafe
+          description: syva-core cannot currently claim node enforcement is active.
+
+      - alert: SyvaHooksMissing
+        expr: syva_ebpf_attached_hooks < syva_ebpf_expected_hooks
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Syva is missing BPF-LSM hooks
+          description: Fewer supported hooks are attached than expected on this node.
+
+      - alert: SyvaSelfTestFailed
+        expr: syva_selftest_passed == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Syva mandatory self-test is not passing
+          description: At least one required Syva runtime self-test is pending or failed.
+
+      - alert: SyvaBpfMapErrors
+        expr: increase(syva_bpf_map_errors_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Syva BPF map errors observed
+          description: Userspace observed BPF map read, update, or delete failures.
+
+      - alert: SyvaHookErrors
+        expr: increase(syva_hook_decisions_total{decision="error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Syva hook errors observed
+          description: Kernel hook errors may fail open and reduce enforcement confidence.
+
+      - alert: SyvaDegraded
+        expr: syva_health_state{state="degraded"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Syva enforcement is degraded
+          description: syva-core is running, but enforcement confidence is reduced.
+
+      - alert: SyvaDenialsObserved
+        expr: increase(syva_hook_decisions_total{decision="deny"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: Syva denials observed
+          description: Syva denied at least one operation. This is often expected enforcement behavior.

@@ -70,6 +70,11 @@ The canonical control API is the local gRPC API `syva.core.v1` on the
 `syva-core` Unix socket. `syvactl` is a thin operator client over that API. The
 REST API is partial and documented separately. See [`docs/api/`](docs/api/).
 
+`syva-core` exposes `/healthz` and `/metrics` for enforcement confidence:
+eBPF load state, six-hook attachment, mandatory self-tests, hook decisions, BPF
+map errors, and membership update outcomes. See
+[`docs/operations/monitoring.md`](docs/operations/monitoring.md).
+
 ## Membership
 
 `syva-core` has a membership service for:
@@ -106,7 +111,7 @@ communication policy; container membership must currently be supplied through
 - `INODE_ZONE_MAP` is still keyed by inode number only, not `(dev, ino)`, so
   cross-filesystem inode collisions remain a known correctness risk.
 - `SyvaZonePolicy` status/finalizers/leader election are not implemented.
-- Operational alerting around degraded health is still a follow-up.
+- Kubernetes adapter-specific metrics are still a follow-up.
 
 ## Local Checks
 
