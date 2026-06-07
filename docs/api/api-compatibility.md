@@ -10,13 +10,14 @@ syva.core.v1
 
 The REST API is partial and documented separately in
 `docs/api/syva-api.openapi.yaml`. `syvactl` is an operator convenience client
-over the gRPC API, not a second source of truth.
+over the gRPC API, not a second source of truth. Its command compatibility
+surface is documented in `docs/api/syvactl-command-contract.md`.
 
 ## Versioning
 
 - gRPC API package: `syva.core.v1`.
 - REST API path prefix: `/v1`.
-- CLI: `syvactl`, versioned with the repository release.
+- CLI: `syvactl`, with the draft command contract `syvactl/v0.1`.
 
 ## v0.2.x Compatibility Expectations
 
@@ -31,6 +32,8 @@ For v0.2 patch releases:
 - New RPCs are allowed if additive.
 - REST additions are allowed if OpenAPI is updated.
 - Machine-readable CLI output should use `--format json`.
+- Stable `syvactl` command names, global flags, JSON top-level keys, and
+  exit-code categories should follow the current command contract.
 - OpenAPI docs must match implemented REST endpoints.
 
 ## Breaking Changes
@@ -49,6 +52,9 @@ Examples of breaking changes:
 - changing a successful application-level rejection into a transport error
   without a compatibility note,
 - changing JSON output intended for automation without a compatibility note.
+- changing a stable `syvactl` command name, required positional argument,
+  global flag, JSON top-level key, or exit-code category without a contract
+  version bump.
 
 ## Documentation Requirements
 
@@ -59,6 +65,7 @@ Changes to the control surface should update:
 - `docs/api/api-compatibility.md` if policy changes
 - `docs/api/syva-api.openapi.yaml` for REST changes
 - `docs/api/cli.md` for CLI changes
+- `docs/api/syvactl-command-contract.md` for CLI compatibility changes
 
 The `check-api-docs` and `check-openapi` guardrails are intentionally light:
 they prevent missing or obviously stale API docs, but they are not a substitute

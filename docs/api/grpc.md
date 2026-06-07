@@ -10,6 +10,10 @@
 Intended users are local adapters, `syvactl`, and node-local automation. This is
 not a remote control-plane API.
 
+For the operator CLI command compatibility surface, see
+[`syvactl-command-contract.md`](syvactl-command-contract.md). `syvactl` maps to
+the RPCs documented here and must not invent separate control semantics.
+
 ## Error Model
 
 Syva uses two layers of errors:
