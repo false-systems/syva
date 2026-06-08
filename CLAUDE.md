@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-This file describes the active repository architecture for Claude Code.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository. It describes the active repository architecture.
 Read `AGENT.md` for working practices and `SKILLS.md` for security-model rules.
 
 ## Current State
@@ -74,6 +75,13 @@ sudo -E make verify-runtime              # load + attach 6 hooks + self-tests
 sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
 sudo -E make verify-container-integration # same denial against a real container
 ```
+
+The three gates above each start their own core. To verify a core that is
+already running, use `make verify-deployment` (needs `SYVA_SOCKET`, default
+`/run/syva/syva-core.sock`, plus a container runtime). The single-node Lima
+deployment lifecycle is `make lima-bootstrap` → `lima-deploy` →
+`lima-verify-deployment` → `lima-undeploy`, wrapped end to end by
+`make lima-smoke`.
 
 ## Release-Doc Drift Guardrail
 
@@ -158,7 +166,8 @@ discovery — release preferred over debug), `zone.rs` (zone registry + ID
 allocation), `membership.rs` (container→zone), `ingest.rs` (RPC→map apply),
 `rpc/mod.rs` (`syva.core.v1` gRPC service), `health.rs` (`/healthz` + `/metrics`),
 `events.rs` (ring-buffer drain, `HOOK_NAMES`), `btf.rs` (offset resolution),
-`container_id.rs` (ID validation). Privileged integration tests are under
+`container_id.rs` (ID validation), `types.rs` (shared core types). Privileged
+integration tests are under
 `syva-core/tests/` (all `#[ignore]`d; driven by the `verify-*` gates).
 
 ## Core Startup
