@@ -27,7 +27,7 @@ spec:
           operator: Exists
       initContainers:
         - name: cleanup-stale-bpf-pins
-          image: ghcr.io/false-systems/syva-core:0.2.0
+          image: ghcr.io/false-systems/syva-core:0.2.1
           command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
           resources:
             requests:
@@ -49,7 +49,7 @@ spec:
               add: ["SYS_ADMIN"]
       containers:
         - name: syva-core
-          image: ghcr.io/false-systems/syva-core:0.2.0
+          image: ghcr.io/false-systems/syva-core:0.2.1
           args:
             - --core-socket
             - /run/syva/syva-core.sock
@@ -103,15 +103,33 @@ spec:
               readOnly: true
 
         - name: syva-adapter-k8s
-          image: ghcr.io/false-systems/syva-adapter-k8s:0.2.0
+          image: ghcr.io/false-systems/syva-adapter-k8s:0.2.1
           args:
-            - --socket-path
+            - --core-socket
             - /run/syva/syva-core.sock
+            - --host-proc
+            - /host/proc
+            - --host-cgroup
+            - /sys/fs/cgroup
+            - --metrics-listen
+            - $(POD_IP):9092
+          ports:
+            - name: k8s-metrics
+              containerPort: 9092
+              protocol: TCP
           env:
-            - name: WATCH_NAMESPACE
+            - name: SYVA_K8S_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           resources:
             requests:
               cpu: "20m"
@@ -132,6 +150,9 @@ spec:
             - name: cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
 
       volumes:
         - name: syva-socket
@@ -143,6 +164,10 @@ spec:
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
             type: Directory
         - name: btf
           hostPath:

@@ -87,8 +87,9 @@ processes — and is not workload-specific.
 
 ## What this does not prove
 
-- Kubernetes adapter integration (the file/k8s watchers feeding `AttachContainer`
-  are not exercised end to end).
+- Kubernetes adapter integration is not exercised end to end by this Lima
+  deployment proof. Use `sudo -E make verify-k8s-membership` in a privileged
+  Linux/Kubernetes node to prove annotated pod membership and enforcement.
 - All six hooks end to end — only `file_open` is proven with a container.
 - cgroup-movement / zone-escape protection — out of v0.2 scope (not a BPF-LSM hook).
 - Production hardening or multi-node deployment.
@@ -131,6 +132,6 @@ opens. Only `deny_delta` is attributable to the test workload.
 
 - Container image build for `syva-core` + a DaemonSet packaging.
 - Privileged `securityContext` and runtime socket mounts for Kubernetes.
-- CRD or file-policy mounting and a Kubernetes adapter integration proof.
+- Broader Kubernetes runtime resolver coverage and production hardening.
 - A self-hosted privileged CI runner to run the runtime/deployment gates
   automatically (today they are manual via `workflow_dispatch`).

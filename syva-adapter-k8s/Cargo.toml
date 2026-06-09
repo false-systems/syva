@@ -18,7 +18,11 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 tonic = { workspace = true }
+axum = { workspace = true }
 kube = { version = "0.95", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.23", features = ["v1_29"] }
 schemars = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

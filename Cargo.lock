@@ -2097,6 +2097,7 @@ name = "syva-adapter-k8s"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "futures",
  "k8s-openapi",
@@ -2105,6 +2106,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syva-core-client",
+ "tempfile",
  "tokio",
  "tonic",
  "tracing",

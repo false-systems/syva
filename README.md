@@ -59,9 +59,12 @@ asserts a real `file_open deny_delta=1`:
   is blocked from another zone's file with `EPERM`.
 - `verify-container-integration` — the same denial against a **real container**
   (`docker` / `nerdctl` / `podman`).
+- `verify-k8s-membership` — an annotated Kubernetes pod is attached by
+  `syva-k8s` and blocked from a zone-b file by `file_open` enforcement.
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
-container runtime); they are `#[ignore]`d in normal `cargo test`. See
+container runtime, and the Kubernetes gate needs `kubectl` against a local
+single-node cluster); they are `#[ignore]`d in normal `cargo test`. See
 [docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
 
 ## Features
@@ -173,10 +176,12 @@ are idempotent and generation-aware: stale updates are ignored, conflicting zone
 assignments are reported, and successful observations produce explicit BPF map
 update intents.
 
-Automatic pod/container watcher integration is not finished yet — adapters
-reconcile zones, host paths, and communication policy, but container membership
-must currently be supplied through `syva.core.v1 AttachContainer` until the
-watcher path is wired end to end.
+`syva-k8s` includes an annotation-based membership watcher. Pods scheduled to
+the local node with `syva.false.systems/zone: <zone>` are reconciled into
+`AttachContainer` calls after the adapter resolves each running container's real
+host cgroup id. Pods without that annotation are ignored. `syva-file` still
+reconciles zones, host paths, and communication policy only; it does not watch
+workload membership yet.
 
 ## Limitations (honest)
 
@@ -192,7 +197,9 @@ watcher path is wired end to end.
 - `INODE_ZONE_MAP` is keyed by inode number only, not `(dev, ino)`, so
   cross-filesystem inode collisions remain a known correctness risk.
 - `SyvaZonePolicy` status / finalizers / leader election are not implemented.
-- Kubernetes adapter-specific metrics are still a follow-up.
+- Kubernetes membership assignment is annotation-based. The
+  `verify-k8s-membership` gate proves it end to end only when run on a
+  privileged Linux/Kubernetes node; it is not covered by macOS checks.
 
 ## Build, test, and verify
 
@@ -227,6 +234,7 @@ needs a container runtime):
 sudo -E make verify-runtime
 sudo -E make verify-integration
 sudo -E make verify-container-integration
+sudo -E make verify-k8s-membership
 ```
 
 ## Run it directly
@@ -248,6 +256,6 @@ RUST_LOG=syva_file=debug cargo run --bin syva-file -- \
 
 ## Roadmap
 
-Next: wire real pod/container watchers into `AttachContainer`, add `(dev, ino)`
-file identity, expand privileged runtime blackbox coverage, and move privileged
+Next: broaden Kubernetes runtime resolver coverage, add `(dev, ino)` file
+identity, expand privileged runtime blackbox coverage, and move privileged
 runtime verification into a self-hosted or otherwise suitable Linux CI path.

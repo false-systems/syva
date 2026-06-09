@@ -5,7 +5,7 @@ REPO_DIR := $(shell pwd)
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -79,6 +79,13 @@ verify-integration:
 # Run as: sudo -E make verify-container-integration
 verify-container-integration:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-container-integration
+
+# Privileged Linux / BPF-LSM + single-node Kubernetes: proves syva-k8s attaches
+# an annotated pod and the kernel blocks its forbidden cross-zone file_open.
+# Needs kubectl against a cluster running on this node. Run as:
+# sudo -E make verify-k8s-membership
+verify-k8s-membership:
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-k8s-membership
 
 # Verify an ALREADY-DEPLOYED syva-core (does not start its own core).
 # Needs SYVA_SOCKET (default /run/syva/syva-core.sock) + a container runtime.
