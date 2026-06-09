@@ -2059,7 +2059,7 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "syva-adapter-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2076,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "syva-adapter-file"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "syva-adapter-k8s"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "syva-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "syva-core-client"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hyper-util",
  "syva-proto",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "syva-proto"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "syvactl"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
