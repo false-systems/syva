@@ -173,10 +173,12 @@ are idempotent and generation-aware: stale updates are ignored, conflicting zone
 assignments are reported, and successful observations produce explicit BPF map
 update intents.
 
-Automatic pod/container watcher integration is not finished yet — adapters
-reconcile zones, host paths, and communication policy, but container membership
-must currently be supplied through `syva.core.v1 AttachContainer` until the
-watcher path is wired end to end.
+`syva-k8s` includes an annotation-based membership watcher. Pods scheduled to
+the local node with `syva.false.systems/zone: <zone>` are reconciled into
+`AttachContainer` calls after the adapter resolves each running container's real
+host cgroup id. Pods without that annotation are ignored. `syva-file` still
+reconciles zones, host paths, and communication policy only; it does not watch
+workload membership yet.
 
 ## Limitations (honest)
 
@@ -192,7 +194,8 @@ watcher path is wired end to end.
 - `INODE_ZONE_MAP` is keyed by inode number only, not `(dev, ino)`, so
   cross-filesystem inode collisions remain a known correctness risk.
 - `SyvaZonePolicy` status / finalizers / leader election are not implemented.
-- Kubernetes adapter-specific metrics are still a follow-up.
+- Kubernetes membership assignment is annotation-based and not yet proven by a
+  full Kubernetes end-to-end enforcement gate.
 
 ## Build, test, and verify
 

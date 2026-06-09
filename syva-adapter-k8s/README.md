@@ -8,12 +8,22 @@ Start:
 ```bash
 syva-k8s \
   --namespace syva-system \
-  --core-socket /run/syva/syva-core.sock
+  --core-socket /run/syva/syva-core.sock \
+  --node-name "$NODE_NAME" \
+  --host-proc /host/proc \
+  --host-cgroup /sys/fs/cgroup
 ```
 
 Notes:
 
 - The CRD is the source of truth for zone policy on the node.
 - The adapter reconciles zones and mutual communication pairs.
-- Automatic pod/container membership watching is not wired yet. Pods must be
-  attached through `syva.core.v1 AttachContainer` until that integration lands.
+- Pod membership uses the annotation `syva.false.systems/zone: <zone>`.
+- Only pods scheduled to `--node-name` are reconciled.
+- Running containers are attached only after the adapter resolves a real
+  container runtime ID and host cgroup-v2 inode from host `/proc` and
+  `/sys/fs/cgroup`.
+- If cgroup resolution fails, the pod is not attached; the adapter logs the
+  error and increments `syva_k8s_reconcile_errors_total`.
+- Metrics are exposed on `--metrics-listen` (default `0.0.0.0:9092`) at
+  `/metrics`.

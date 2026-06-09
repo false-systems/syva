@@ -1,10 +1,14 @@
 use crate::crd::SyvaZonePolicy;
 use crate::mapper::spec_to_core_register;
+use crate::membership::{apply_intents, MembershipReconciler, ResolverConfig};
+use crate::metrics::{spawn_metrics_server, Metrics};
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig, Event};
 use kube::{Api, Client as KubeClient};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use syva_core_client::syva_core::{
     AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RemoveZoneRequest,
@@ -14,28 +18,43 @@ use tracing::{info, warn};
 pub struct Config {
     pub namespace: String,
     pub core_socket: PathBuf,
+    pub node_name: String,
+    pub host_proc: PathBuf,
+    pub host_cgroup: PathBuf,
+    pub metrics_listen: SocketAddr,
 }
 
 pub async fn run(config: Config) -> Result<()> {
     let kube = KubeClient::try_default().await?;
     let crds: Api<SyvaZonePolicy> = Api::namespaced(kube.clone(), &config.namespace);
-    run_core_mode(config, crds).await
+    run_core_mode(config, kube, crds).await
 }
 
-async fn run_core_mode(config: Config, crds: Api<SyvaZonePolicy>) -> Result<()> {
+async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolicy>) -> Result<()> {
     let mut core =
         syva_core_client::connect_unix_socket_with_retry(config.core_socket.clone()).await;
+    let metrics = Metrics::default();
+    spawn_metrics_server(config.metrics_listen, metrics.clone()).await?;
 
     info!(
         namespace = %config.namespace,
+        node = %config.node_name,
         socket = %config.core_socket.display(),
+        metrics = %config.metrics_listen,
         "syva-k8s starting"
-    );
-    warn!(
-        "pod/container membership watcher is not wired in syva-k8s yet; SyvaZonePolicy CRDs are reconciled, but pods must be attached through syva.core.v1 AttachContainer"
     );
 
     initial_reconcile_core(&mut core, &crds).await?;
+    let pod_task = tokio::spawn(run_pod_membership_watcher(
+        config.core_socket.clone(),
+        Api::all(kube),
+        config.node_name.clone(),
+        ResolverConfig {
+            host_proc: config.host_proc.clone(),
+            host_cgroup: config.host_cgroup.clone(),
+        },
+        metrics.clone(),
+    ));
 
     let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
     while let Some(event) = stream.next().await {
@@ -59,6 +78,55 @@ async fn run_core_mode(config: Config, crds: Api<SyvaZonePolicy>) -> Result<()> 
         }
     }
 
+    pod_task.abort();
+    Ok(())
+}
+
+async fn run_pod_membership_watcher(
+    core_socket: PathBuf,
+    pods: Api<Pod>,
+    node_name: String,
+    resolver: ResolverConfig,
+    metrics: Metrics,
+) -> Result<()> {
+    let mut core = syva_core_client::connect_unix_socket_with_retry(core_socket).await;
+    let mut reconciler = MembershipReconciler::new(node_name.clone(), resolver, metrics.clone());
+    info!(
+        node = %node_name,
+        annotation = crate::membership::ZONE_ANNOTATION,
+        "syva-k8s pod membership watcher starting"
+    );
+
+    let initial = pods.list(&Default::default()).await?;
+    for pod in initial {
+        let (intents, errors) = reconciler.reconcile_pod_intents(&pod);
+        for error in errors {
+            warn!(?error, "pod membership reconcile error");
+        }
+        apply_intents(&mut core, &metrics, &pod, intents).await;
+    }
+
+    let mut stream = watcher(pods, WatcherConfig::default()).boxed();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Apply(pod)) | Ok(Event::InitApply(pod)) => {
+                let (intents, errors) = reconciler.reconcile_pod_intents(&pod);
+                for error in errors {
+                    warn!(?error, "pod membership reconcile error");
+                }
+                apply_intents(&mut core, &metrics, &pod, intents).await;
+            }
+            Ok(Event::Delete(pod)) => {
+                let intents = reconciler.delete_pod_intents(&pod);
+                apply_intents(&mut core, &metrics, &pod, intents).await;
+            }
+            Ok(Event::Init) | Ok(Event::InitDone) => {}
+            Err(error) => {
+                metrics.record_error("pod_watch");
+                warn!(%error, "pod watcher error");
+            }
+        }
+    }
     Ok(())
 }
 

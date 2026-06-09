@@ -87,8 +87,9 @@ processes — and is not workload-specific.
 
 ## What this does not prove
 
-- Kubernetes adapter integration (the file/k8s watchers feeding `AttachContainer`
-  are not exercised end to end).
+- Kubernetes adapter integration is not exercised end to end by this Lima
+  deployment proof. The k8s adapter has an annotation-based membership watcher,
+  but `verify-k8s-membership` is still a follow-up.
 - All six hooks end to end — only `file_open` is proven with a container.
 - cgroup-movement / zone-escape protection — out of v0.2 scope (not a BPF-LSM hook).
 - Production hardening or multi-node deployment.
