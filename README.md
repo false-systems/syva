@@ -7,8 +7,9 @@ a *zone*, keeps zone membership and policy in BPF maps, and uses kernel LSM hook
 to **deny cross-zone operations before they happen** — file opens, exec,
 executable `mmap`, `ptrace`, signals, and Unix-socket connects.
 
-Current release: **v0.2.1**. This is a patch release on the v0.2 kernel
-enforcement line; the canonical control API remains `syva.core.v1`.
+Current release: **v0.3.0** — the Kubernetes membership watcher release, on
+the v0.2 kernel-enforcement contract; the canonical control API remains
+`syva.core.v1`.
 
 No sidecar. No proxy. No remote control plane. Run `syva-core` per node, point an
 adapter at it, done.
