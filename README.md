@@ -202,6 +202,24 @@ workload membership yet.
   `verify-k8s-membership` gate proves it end to end only when run on a
   privileged Linux/Kubernetes node; it is not covered by macOS checks.
 
+## Container images
+
+`syva-core` and `syva-adapter-k8s` images are published to GHCR for
+`linux/amd64` and `linux/arm64` on each version tag (see
+`docs/deployment/kubernetes.md`):
+
+```text
+ghcr.io/false-systems/syva-core:<version>
+ghcr.io/false-systems/syva-adapter-k8s:<version>
+```
+
+Or build them yourself from the repo `Dockerfile`:
+
+```sh
+docker build --target syva-core        -t syva-core:dev .
+docker build --target syva-adapter-k8s -t syva-adapter-k8s:dev .
+```
+
 ## Build, test, and verify
 
 Fast host-safe checks (macOS-friendly):

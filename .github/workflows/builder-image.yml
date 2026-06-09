@@ -1,0 +1,69 @@
+# Builds and publishes the Syva toolchain image (docker/builder.Dockerfile) to
+# GHCR as ghcr.io/<owner>/syva-builder:<tag>. Run manually after changing the
+# builder Dockerfile, then bump the tag pin in the root Dockerfile and in
+# release-images.yml consumers if the tag changed.
+
+name: builder-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Builder image tag (e.g. v1)"
+        required: true
+        default: "v1"
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-arch:
+    name: build + push (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push syva-builder
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/builder.Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/syva-builder:${{ inputs.tag }}-${{ matrix.arch }}
+
+  manifest:
+    name: publish multi-arch manifest
+    needs: build-arch
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          docker buildx imagetools create \
+            -t "${REGISTRY}/syva-builder:${tag}" \
+            "${REGISTRY}/syva-builder:${tag}-amd64" \
+            "${REGISTRY}/syva-builder:${tag}-arm64"
+          docker buildx imagetools inspect "${REGISTRY}/syva-builder:${tag}"
