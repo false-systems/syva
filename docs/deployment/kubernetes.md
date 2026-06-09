@@ -70,9 +70,11 @@ syva_k8s_reconcile_errors_total{reason="cgroup_resolution"}
 ```
 
 The initial resolver is intentionally simple and targets runtimes whose host
-cgroup or mountinfo paths include the Kubernetes runtime container ID, including
-common containerd/CRI and Docker-style cgroup layouts. Runtime-specific
-resolvers for CRI-O or unusual distributions should be added behind the same
+cgroup-v2 process paths include the Kubernetes runtime container ID, including
+the k3s/containerd layout proven by `verify-k8s-membership`. It does not use
+mountinfo-only matches for PID selection because host mount tables can reference
+container rootfs paths from unrelated processes. Runtime-specific resolvers for
+CRI-O, Docker variants, or unusual distributions should be added behind the same
 resolver boundary.
 
 ## Metrics

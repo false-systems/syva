@@ -433,12 +433,7 @@ fn find_container_pid(container_id: &str, host_proc: &Path) -> Result<u32> {
             continue;
         };
         let cgroup = std::fs::read_to_string(entry.path().join("cgroup")).unwrap_or_default();
-        let mountinfo = std::fs::read_to_string(entry.path().join("mountinfo")).unwrap_or_default();
-        if cgroup.contains(container_id)
-            || cgroup.contains(short)
-            || mountinfo.contains(container_id)
-            || mountinfo.contains(short)
-        {
+        if cgroup.contains(container_id) || cgroup.contains(short) {
             return Ok(pid);
         }
     }
@@ -520,6 +515,32 @@ mod tests {
 
     fn reconciler(resolver: ResolverConfig) -> MembershipReconciler {
         MembershipReconciler::new("node-a".to_string(), resolver, Metrics::default())
+    }
+
+    #[test]
+    fn find_container_pid_ignores_mountinfo_only_matches() {
+        let temp = TempDir::new().unwrap();
+        let proc = temp.path().join("proc");
+        let noisy_pid = proc.join("1");
+        let real_pid = proc.join("7022");
+        let container_id = "abcdef1234567890";
+        fs::create_dir_all(&noisy_pid).unwrap();
+        fs::create_dir_all(&real_pid).unwrap();
+        fs::write(noisy_pid.join("cgroup"), "0::/init.scope\n").unwrap();
+        fs::write(
+            noisy_pid.join("mountinfo"),
+            format!("/run/containerd/{container_id}/rootfs\n"),
+        )
+        .unwrap();
+        fs::write(
+            real_pid.join("cgroup"),
+            format!("0::/kubepods.slice/cri-containerd-{container_id}.scope\n"),
+        )
+        .unwrap();
+
+        let pid = find_container_pid(container_id, &proc).unwrap();
+
+        assert_eq!(pid, 7022);
     }
 
     #[test]

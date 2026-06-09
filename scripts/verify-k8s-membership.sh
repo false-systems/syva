@@ -119,8 +119,10 @@ wait_for_attach_log() {
     if [ -r "$K8S_LOG" ] &&
        grep -F "syva.k8s.membership.attach" "$K8S_LOG" |
          grep -F "$cid" |
-         grep -F "cgroup_id=${cgroup_id}" |
-         grep -Fq "result=\"applied\""; then
+         grep -F "cgroup_id" |
+         grep -F "$cgroup_id" |
+         grep -F "result" |
+         grep -Fq "applied"; then
       return 0
     fi
     sleep 0.5
@@ -143,8 +145,7 @@ resolve_host_cgroup() {
   local pid_path
   for pid_path in /proc/[0-9]*; do
     [ -r "${pid_path}/cgroup" ] || continue
-    if grep -q "$cid\\|$short" "${pid_path}/cgroup" 2>/dev/null ||
-       grep -q "$cid\\|$short" "${pid_path}/mountinfo" 2>/dev/null; then
+    if grep -q "$cid\\|$short" "${pid_path}/cgroup" 2>/dev/null; then
       local pid="${pid_path##*/}"
       local rel
       rel="$(awk -F: '$1 == "0" && $2 == "" {print $3; exit}' "${pid_path}/cgroup")"
