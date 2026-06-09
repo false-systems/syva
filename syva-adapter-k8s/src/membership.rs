@@ -254,26 +254,24 @@ impl MembershipReconciler {
                     container_id,
                     generation,
                     ..
-                } if !outcome.ok => {
-                    if self
+                } if !outcome.ok
+                    && self
                         .applied
                         .get(container_id)
-                        .is_some_and(|current| current.generation == *generation)
-                    {
-                        self.applied.remove(container_id);
-                    }
+                        .is_some_and(|current| current.generation == *generation) =>
+                {
+                    self.applied.remove(container_id);
                 }
                 MembershipIntent::Detach {
                     container_id,
                     generation,
-                } if outcome.ok => {
-                    if self
+                } if outcome.ok
+                    && self
                         .pending_detaches
                         .get(container_id)
-                        .is_some_and(|pending| pending == generation)
-                    {
-                        self.pending_detaches.remove(container_id);
-                    }
+                        .is_some_and(|pending| pending == generation) =>
+                {
+                    self.pending_detaches.remove(container_id);
                 }
                 _ => {}
             }
