@@ -111,6 +111,8 @@ spec:
             - /host/proc
             - --host-cgroup
             - /sys/fs/cgroup
+            - --metrics-listen
+            - $(POD_IP):9092
           ports:
             - name: k8s-metrics
               containerPort: 9092
@@ -124,6 +126,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           resources:
             requests:
               cpu: "20m"

@@ -43,6 +43,21 @@ DetachContainer(container_id, source="syva-k8s", generation=N+1)
 
 Pods without the annotation are ignored.
 
+Reconciliation is generation-aware and outcome-checked:
+
+- Generations are seeded from the clock at adapter start, so a restarted
+  adapter keeps issuing generations above anything a previous instance sent and
+  the core's stale-generation fencing keeps working across restarts.
+- An attach the core did not confirm (RPC error, stale, or conflict) is rolled
+  back in the adapter and retried on the next pod event instead of being
+  treated as applied.
+- A detach the core did not confirm stays in a pending queue and is re-sent
+  with every subsequent event batch until the core acknowledges it.
+- The pod watch is scoped to the local node with a `spec.nodeName` field
+  selector. If the pod membership watcher itself fails, the adapter exits so
+  the DaemonSet restarts it; it never keeps running with membership
+  reconciliation silently disabled.
+
 ## Cgroup Resolution
 
 The adapter does not fake cgroup IDs. It attaches a container only when it can
@@ -73,9 +88,13 @@ The initial resolver is intentionally simple and targets runtimes whose host
 cgroup-v2 process paths include the Kubernetes runtime container ID, including
 the k3s/containerd layout proven by `verify-k8s-membership`. It does not use
 mountinfo-only matches for PID selection because host mount tables can reference
-container rootfs paths from unrelated processes. Runtime-specific resolvers for
-CRI-O, Docker variants, or unusual distributions should be added behind the same
-resolver boundary.
+container rootfs paths from unrelated processes. Container IDs shorter than 12
+characters are rejected before any `/proc` scan, and the resolved cgroup path is
+truncated at the path component naming the container scope, so a process the
+workload moved into a nested sub-cgroup still resolves to the container scope
+cgroup that enforcement keys on. Runtime-specific resolvers for CRI-O, Docker
+variants, or unusual distributions should be added behind the same resolver
+boundary.
 
 ## Metrics
 

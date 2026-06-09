@@ -45,7 +45,7 @@ async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolic
     );
 
     initial_reconcile_core(&mut core, &crds).await?;
-    let pod_task = tokio::spawn(run_pod_membership_watcher(
+    let mut pod_task = tokio::spawn(run_pod_membership_watcher(
         config.core_socket.clone(),
         Api::all(kube),
         config.node_name.clone(),
@@ -56,30 +56,46 @@ async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolic
         metrics.clone(),
     ));
 
-    let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(Event::Apply(crd)) => {
-                if let Err(error) = handle_apply_core(&mut core, &crd).await {
-                    warn!(name = ?crd.metadata.name, error = %error, "apply failed");
-                } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
-                    warn!(error = %error, "communication reconcile failed");
+    let crd_loop = async {
+        let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(Event::Apply(crd)) => {
+                    if let Err(error) = handle_apply_core(&mut core, &crd).await {
+                        warn!(name = ?crd.metadata.name, error = %error, "apply failed");
+                    } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
+                        warn!(error = %error, "communication reconcile failed");
+                    }
                 }
-            }
-            Ok(Event::Delete(crd)) => {
-                if let Err(error) = handle_delete_core(&mut core, &crd).await {
-                    warn!(name = ?crd.metadata.name, error = %error, "delete failed");
-                } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
-                    warn!(error = %error, "communication reconcile failed");
+                Ok(Event::Delete(crd)) => {
+                    if let Err(error) = handle_delete_core(&mut core, &crd).await {
+                        warn!(name = ?crd.metadata.name, error = %error, "delete failed");
+                    } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
+                        warn!(error = %error, "communication reconcile failed");
+                    }
                 }
+                Ok(Event::Init) | Ok(Event::InitDone) | Ok(Event::InitApply(_)) => {}
+                Err(error) => warn!("watcher error: {error}"),
             }
-            Ok(Event::Init) | Ok(Event::InitDone) | Ok(Event::InitApply(_)) => {}
-            Err(error) => warn!("watcher error: {error}"),
         }
-    }
+        anyhow::bail!("SyvaZonePolicy watch stream ended unexpectedly");
+    };
 
+    // Membership watching IS the enforcement feed. If that task dies, this
+    // adapter must die with it so the DaemonSet restarts both, instead of
+    // keeping a half-alive adapter that silently stops attaching pods.
+    let result = tokio::select! {
+        result = crd_loop => result,
+        joined = &mut pod_task => match joined {
+            Ok(Ok(())) => Err(anyhow::anyhow!("pod membership watcher exited unexpectedly")),
+            Ok(Err(error)) => Err(error.context("pod membership watcher failed")),
+            Err(join_error) => {
+                Err(anyhow::anyhow!(join_error).context("pod membership watcher panicked"))
+            }
+        },
+    };
     pod_task.abort();
-    Ok(())
+    result
 }
 
 async fn run_pod_membership_watcher(
@@ -97,28 +113,27 @@ async fn run_pod_membership_watcher(
         "syva-k8s pod membership watcher starting"
     );
 
-    let initial = pods.list(&Default::default()).await?;
-    for pod in initial {
-        let (intents, errors) = reconciler.reconcile_pod_intents(&pod);
-        for error in errors {
-            warn!(?error, "pod membership reconcile error");
-        }
-        apply_intents(&mut core, &metrics, &pod, intents).await;
-    }
-
-    let mut stream = watcher(pods, WatcherConfig::default()).boxed();
+    // The watcher's Init/InitApply replay covers the initial pod listing; the
+    // field selector keeps the watch node-local instead of cluster-wide.
+    let watch_config = WatcherConfig::default().fields(&format!("spec.nodeName={node_name}"));
+    let mut stream = watcher(pods, watch_config).boxed();
     while let Some(event) = stream.next().await {
         match event {
             Ok(Event::Apply(pod)) | Ok(Event::InitApply(pod)) => {
-                let (intents, errors) = reconciler.reconcile_pod_intents(&pod);
+                let mut intents = reconciler.pending_detach_intents();
+                let (new_intents, errors) = reconciler.reconcile_pod_intents(&pod);
+                intents.extend(new_intents);
                 for error in errors {
                     warn!(?error, "pod membership reconcile error");
                 }
-                apply_intents(&mut core, &metrics, &pod, intents).await;
+                let outcomes = apply_intents(&mut core, &metrics, &pod, intents).await;
+                reconciler.absorb_outcomes(&outcomes);
             }
             Ok(Event::Delete(pod)) => {
-                let intents = reconciler.delete_pod_intents(&pod);
-                apply_intents(&mut core, &metrics, &pod, intents).await;
+                let mut intents = reconciler.pending_detach_intents();
+                intents.extend(reconciler.delete_pod_intents(&pod));
+                let outcomes = apply_intents(&mut core, &metrics, &pod, intents).await;
+                reconciler.absorb_outcomes(&outcomes);
             }
             Ok(Event::Init) | Ok(Event::InitDone) => {}
             Err(error) => {
@@ -127,7 +142,7 @@ async fn run_pod_membership_watcher(
             }
         }
     }
-    Ok(())
+    anyhow::bail!("pod watch stream ended unexpectedly");
 }
 
 async fn initial_reconcile_core(

@@ -20,6 +20,14 @@ K8S_PID=""
 
 die() {
   echo "verify-k8s-membership: $*" >&2
+  if [ -n "${K8S_LOG:-}" ] && [ -r "$K8S_LOG" ]; then
+    echo "--- syva-k8s log tail ---" >&2
+    tail -n 40 "$K8S_LOG" >&2
+  fi
+  if [ -n "${CORE_LOG:-}" ] && [ -r "$CORE_LOG" ]; then
+    echo "--- syva-core log tail ---" >&2
+    tail -n 20 "$CORE_LOG" >&2
+  fi
   exit 1
 }
 
@@ -145,7 +153,7 @@ resolve_host_cgroup() {
   local pid_path
   for pid_path in /proc/[0-9]*; do
     [ -r "${pid_path}/cgroup" ] || continue
-    if grep -q "$cid\\|$short" "${pid_path}/cgroup" 2>/dev/null; then
+    if grep -Fq -e "$cid" -e "$short" "${pid_path}/cgroup" 2>/dev/null; then
       local pid="${pid_path##*/}"
       local rel
       rel="$(awk -F: '$1 == "0" && $2 == "" {print $3; exit}' "${pid_path}/cgroup")"
@@ -283,6 +291,21 @@ for bin in cargo kubectl python3 curl stat awk grep; do
 done
 kubectl version --client >/dev/null || die "kubectl is not functional"
 kubectl cluster-info >/dev/null || die "kubectl cannot reach a Kubernetes cluster"
+
+# kubectl may locate the cluster on its own (the k3s wrapper reads
+# /etc/rancher/k3s/k3s.yaml as root), but syva-k8s uses kube-rs client config
+# and needs an explicit kubeconfig. Resolve one or fail red here instead of
+# letting the adapter die before it serves metrics.
+if [ -z "${KUBECONFIG:-}" ]; then
+  for kubeconfig_candidate in /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"; do
+    if [ -r "$kubeconfig_candidate" ]; then
+      export KUBECONFIG="$kubeconfig_candidate"
+      break
+    fi
+  done
+fi
+[ -n "${KUBECONFIG:-}" ] && [ -r "$KUBECONFIG" ] ||
+  die "KUBECONFIG is not set and no readable kubeconfig was found for syva-k8s"
 
 if [ -z "$NODE_NAME" ]; then
   NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"

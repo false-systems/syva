@@ -59,24 +59,44 @@ pub(crate) enum PodReconcileError {
     },
 }
 
+/// Result of applying one intent against the core. `ok` is true only when the
+/// core confirmed the state change (or already held it); RPC errors, stale, and
+/// conflict responses are all `ok == false` so the reconciler retries them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentOutcome {
+    pub(crate) intent: MembershipIntent,
+    pub(crate) ok: bool,
+}
+
 pub(crate) struct MembershipReconciler {
     node_name: String,
     resolver: ResolverConfig,
     metrics: Metrics,
     applied: BTreeMap<String, AppliedMembership>,
     pod_containers: BTreeMap<String, BTreeSet<String>>,
+    pending_detaches: BTreeMap<String, u64>,
     next_generation: u64,
 }
 
 impl MembershipReconciler {
     pub(crate) fn new(node_name: String, resolver: ResolverConfig, metrics: Metrics) -> Self {
+        Self::with_start_generation(node_name, resolver, metrics, time_seeded_generation())
+    }
+
+    fn with_start_generation(
+        node_name: String,
+        resolver: ResolverConfig,
+        metrics: Metrics,
+        start_generation: u64,
+    ) -> Self {
         Self {
             node_name,
             resolver,
             metrics,
             applied: BTreeMap::new(),
             pod_containers: BTreeMap::new(),
-            next_generation: 1,
+            pending_detaches: BTreeMap::new(),
+            next_generation: start_generation.max(1),
         }
     }
 
@@ -203,10 +223,62 @@ impl MembershipReconciler {
     fn detach_intent(&mut self, container_id: &str) -> Option<MembershipIntent> {
         self.applied.remove(container_id)?;
         let generation = self.next_generation();
+        self.pending_detaches
+            .insert(container_id.to_string(), generation);
         Some(MembershipIntent::Detach {
             container_id: container_id.to_string(),
             generation,
         })
+    }
+
+    /// Detaches the core has not yet confirmed. Re-emit these with every event
+    /// batch until the core acknowledges them, so a failed detach RPC cannot
+    /// leave a membership enforced forever.
+    pub(crate) fn pending_detach_intents(&self) -> Vec<MembershipIntent> {
+        self.pending_detaches
+            .iter()
+            .map(|(container_id, generation)| MembershipIntent::Detach {
+                container_id: container_id.clone(),
+                generation: *generation,
+            })
+            .collect()
+    }
+
+    /// Feed apply results back into reconciler state. A failed attach is rolled
+    /// back so the next pod event regenerates it instead of being suppressed by
+    /// the idempotency check; a confirmed detach leaves the retry queue.
+    pub(crate) fn absorb_outcomes(&mut self, outcomes: &[IntentOutcome]) {
+        for outcome in outcomes {
+            match &outcome.intent {
+                MembershipIntent::Attach {
+                    container_id,
+                    generation,
+                    ..
+                } if !outcome.ok => {
+                    if self
+                        .applied
+                        .get(container_id)
+                        .is_some_and(|current| current.generation == *generation)
+                    {
+                        self.applied.remove(container_id);
+                    }
+                }
+                MembershipIntent::Detach {
+                    container_id,
+                    generation,
+                } if outcome.ok => {
+                    if self
+                        .pending_detaches
+                        .get(container_id)
+                        .is_some_and(|pending| pending == generation)
+                    {
+                        self.pending_detaches.remove(container_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.metrics.set_active_memberships(self.applied.len());
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -214,6 +286,17 @@ impl MembershipReconciler {
         self.next_generation = self.next_generation.saturating_add(1);
         generation
     }
+}
+
+/// The core refuses non-zero generations lower than the stored one, so the
+/// counter must stay monotonic across adapter restarts. Seeding from the clock
+/// (microseconds) keeps every new process ahead of any generation a previous
+/// instance could have issued.
+fn time_seeded_generation() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as u64)
+        .unwrap_or(1)
 }
 
 impl PodReconcileError {
@@ -229,9 +312,10 @@ pub(crate) async fn apply_intents(
     metrics: &Metrics,
     pod: &Pod,
     intents: Vec<MembershipIntent>,
-) {
+) -> Vec<IntentOutcome> {
+    let mut outcomes = Vec::with_capacity(intents.len());
     for intent in intents {
-        match intent {
+        let ok = match &intent {
             MembershipIntent::Attach {
                 container_id,
                 zone,
@@ -242,12 +326,12 @@ pub(crate) async fn apply_intents(
                     .attach_container(AttachContainerRequest {
                         container_id: container_id.clone(),
                         zone_name: zone.clone(),
-                        cgroup_id,
+                        cgroup_id: *cgroup_id,
                         pod_namespace: pod.namespace().unwrap_or_default(),
                         pod_name: pod.name_any(),
                         pod_uid: pod.uid().unwrap_or_default(),
                         source: "syva-k8s".to_string(),
-                        generation,
+                        generation: *generation,
                     })
                     .await;
                 match response {
@@ -265,12 +349,13 @@ pub(crate) async fn apply_intents(
                             event = "syva.k8s.membership.attach",
                             container_id = %container_id,
                             zone = %zone,
-                            cgroup_id,
-                            generation,
+                            cgroup_id = *cgroup_id,
+                            generation = *generation,
                             result,
                             reason = %body.message,
                             "pod container membership attach reconciled"
                         );
+                        body.ok
                     }
                     Err(error) => {
                         metrics.record_attach("error");
@@ -279,12 +364,13 @@ pub(crate) async fn apply_intents(
                             event = "syva.k8s.membership.attach",
                             container_id = %container_id,
                             zone = %zone,
-                            cgroup_id,
-                            generation,
+                            cgroup_id = *cgroup_id,
+                            generation = *generation,
                             result = "error",
                             %error,
                             "pod container membership attach failed"
                         );
+                        false
                     }
                 }
             }
@@ -296,7 +382,7 @@ pub(crate) async fn apply_intents(
                     .detach_container(DetachContainerRequest {
                         container_id: container_id.clone(),
                         source: "syva-k8s".to_string(),
-                        generation,
+                        generation: *generation,
                     })
                     .await;
                 match response {
@@ -313,11 +399,12 @@ pub(crate) async fn apply_intents(
                         tracing::info!(
                             event = "syva.k8s.membership.detach",
                             container_id = %container_id,
-                            generation,
+                            generation = *generation,
                             result,
                             reason = %body.message,
                             "pod container membership detach reconciled"
                         );
+                        body.ok
                     }
                     Err(error) => {
                         metrics.record_detach("error");
@@ -325,16 +412,19 @@ pub(crate) async fn apply_intents(
                         tracing::warn!(
                             event = "syva.k8s.membership.detach",
                             container_id = %container_id,
-                            generation,
+                            generation = *generation,
                             result = "error",
                             %error,
                             "pod container membership detach failed"
                         );
+                        false
                     }
                 }
             }
-        }
+        };
+        outcomes.push(IntentOutcome { intent, ok });
     }
+    outcomes
 }
 
 fn desired_membership(
@@ -386,6 +476,11 @@ fn pod_key(pod: &Pod) -> String {
         .unwrap_or_else(|| format!("{}/{}", pod.namespace().unwrap_or_default(), pod.name_any()))
 }
 
+/// Shortest container ID accepted by the resolver. Runtime IDs are 64 hex
+/// chars; anything shorter than the 12-char short form would substring-match
+/// unrelated cgroup paths during PID resolution.
+const MIN_CONTAINER_ID_LEN: usize = 12;
+
 fn normalize_container_id(raw: &str) -> Result<String, String> {
     let id = raw
         .rsplit_once("://")
@@ -394,6 +489,11 @@ fn normalize_container_id(raw: &str) -> Result<String, String> {
         .trim();
     if id.is_empty() {
         return Err("container_id is empty".to_string());
+    }
+    if id.len() < MIN_CONTAINER_ID_LEN {
+        return Err(format!(
+            "container_id is shorter than {MIN_CONTAINER_ID_LEN} chars"
+        ));
     }
     if id.len() > 128 {
         return Err("container_id exceeds 128 chars".to_string());
@@ -412,16 +512,32 @@ fn resolve_container_cgroup_id(container_id: &str, resolver: &ResolverConfig) ->
         .with_context(|| format!("could not find host pid for container '{container_id}'"))?;
     let cgroup_rel = read_cgroup_v2_path(pid, &resolver.host_proc)
         .with_context(|| format!("could not read cgroup v2 path for pid {pid}"))?;
-    let cgroup_path = resolver
-        .host_cgroup
-        .join(cgroup_rel.trim_start_matches('/'));
+    let scope_rel = scope_cgroup_rel(&cgroup_rel, container_id);
+    let cgroup_path = resolver.host_cgroup.join(scope_rel.trim_start_matches('/'));
     let metadata = std::fs::metadata(&cgroup_path)
         .with_context(|| format!("could not stat host cgroup {}", cgroup_path.display()))?;
     Ok(metadata.ino())
 }
 
+/// Truncate a cgroup-v2 path at the component naming the container scope. The
+/// matched PID may live in a sub-cgroup the workload created; enforcement is
+/// keyed by `bpf_get_current_cgroup_id()` of the container scope, so a nested
+/// path would attach the wrong cgroup and miss sibling processes.
+fn scope_cgroup_rel(cgroup_rel: &str, container_id: &str) -> String {
+    let short = &container_id[..usize::min(container_id.len(), MIN_CONTAINER_ID_LEN)];
+    let mut scope = String::new();
+    for component in cgroup_rel.split('/').filter(|part| !part.is_empty()) {
+        scope.push('/');
+        scope.push_str(component);
+        if component.contains(container_id) || component.contains(short) {
+            return scope;
+        }
+    }
+    cgroup_rel.to_string()
+}
+
 fn find_container_pid(container_id: &str, host_proc: &Path) -> Result<u32> {
-    let short = &container_id[..usize::min(container_id.len(), 12)];
+    let short = &container_id[..usize::min(container_id.len(), MIN_CONTAINER_ID_LEN)];
     for entry in std::fs::read_dir(host_proc)
         .with_context(|| format!("could not read {}", host_proc.display()))?
     {
@@ -514,7 +630,19 @@ mod tests {
     }
 
     fn reconciler(resolver: ResolverConfig) -> MembershipReconciler {
-        MembershipReconciler::new("node-a".to_string(), resolver, Metrics::default())
+        MembershipReconciler::with_start_generation(
+            "node-a".to_string(),
+            resolver,
+            Metrics::default(),
+            1,
+        )
+    }
+
+    fn intent_generation(intent: &MembershipIntent) -> u64 {
+        match intent {
+            MembershipIntent::Attach { generation, .. }
+            | MembershipIntent::Detach { generation, .. } => *generation,
+        }
     }
 
     #[test]
@@ -682,6 +810,141 @@ mod tests {
             [PodReconcileError::CgroupResolution { container_id, .. }]
                 if container_id == "abcdef123456"
         ));
+    }
+
+    #[test]
+    fn failed_attach_is_rolled_back_and_retried_on_next_event() {
+        let (_temp, resolver) = resolver_for("abcdef123456");
+        let mut r = reconciler(resolver);
+        let p = pod(
+            "node-a",
+            Some("zone-a"),
+            "Running",
+            Some("containerd://abcdef123456"),
+        );
+        let (intents, _) = r.reconcile_pod_intents(&p);
+        assert_eq!(intents.len(), 1);
+        let first_generation = intent_generation(&intents[0]);
+
+        r.absorb_outcomes(&[IntentOutcome {
+            intent: intents[0].clone(),
+            ok: false,
+        }]);
+
+        let (retried, errors) = r.reconcile_pod_intents(&p);
+        assert!(errors.is_empty());
+        assert!(matches!(
+            retried.as_slice(),
+            [MembershipIntent::Attach { container_id, generation, .. }]
+                if container_id == "abcdef123456" && *generation > first_generation
+        ));
+    }
+
+    #[test]
+    fn confirmed_attach_is_not_retried() {
+        let (_temp, resolver) = resolver_for("abcdef123456");
+        let mut r = reconciler(resolver);
+        let p = pod(
+            "node-a",
+            Some("zone-a"),
+            "Running",
+            Some("containerd://abcdef123456"),
+        );
+        let (intents, _) = r.reconcile_pod_intents(&p);
+        r.absorb_outcomes(&[IntentOutcome {
+            intent: intents[0].clone(),
+            ok: true,
+        }]);
+
+        let (retried, errors) = r.reconcile_pod_intents(&p);
+        assert!(retried.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn failed_detach_stays_pending_until_core_confirms() {
+        let (_temp, resolver) = resolver_for("abcdef123456");
+        let mut r = reconciler(resolver);
+        let p = pod(
+            "node-a",
+            Some("zone-a"),
+            "Running",
+            Some("containerd://abcdef123456"),
+        );
+        let _ = r.reconcile_pod_intents(&p);
+        let detach = r.delete_pod_intents(&p);
+        assert_eq!(detach.len(), 1);
+
+        r.absorb_outcomes(&[IntentOutcome {
+            intent: detach[0].clone(),
+            ok: false,
+        }]);
+        assert_eq!(r.pending_detach_intents(), detach);
+
+        r.absorb_outcomes(&[IntentOutcome {
+            intent: detach[0].clone(),
+            ok: true,
+        }]);
+        assert!(r.pending_detach_intents().is_empty());
+    }
+
+    #[test]
+    fn restarted_reconciler_issues_generations_above_prior_instance() {
+        let (_temp, resolver) = resolver_for("abcdef123456");
+        let p = pod(
+            "node-a",
+            Some("zone-a"),
+            "Running",
+            Some("containerd://abcdef123456"),
+        );
+
+        let mut first =
+            MembershipReconciler::new("node-a".to_string(), resolver.clone(), Metrics::default());
+        let (first_intents, _) = first.reconcile_pod_intents(&p);
+        let first_generation = intent_generation(&first_intents[0]);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let mut restarted =
+            MembershipReconciler::new("node-a".to_string(), resolver, Metrics::default());
+        let (restarted_intents, _) = restarted.reconcile_pod_intents(&p);
+        let restarted_generation = intent_generation(&restarted_intents[0]);
+
+        assert!(
+            restarted_generation > first_generation,
+            "restart must not rewind generations: {restarted_generation} <= {first_generation}"
+        );
+    }
+
+    #[test]
+    fn normalize_container_id_rejects_short_ids() {
+        assert!(normalize_container_id("containerd://abc").is_err());
+        assert!(normalize_container_id("abcdef123456").is_ok());
+    }
+
+    #[test]
+    fn nested_subcgroup_resolves_to_container_scope_inode() {
+        let temp = TempDir::new().unwrap();
+        let proc = temp.path().join("proc");
+        let cgroup_root = temp.path().join("cgroup");
+        let container_id = "abcdef1234567890";
+        let scope_rel = format!("kubepods.slice/cri-containerd-{container_id}.scope");
+        let nested_rel = format!("{scope_rel}/payload-workers");
+        let pid_dir = proc.join("4321");
+        fs::create_dir_all(&pid_dir).unwrap();
+        fs::create_dir_all(cgroup_root.join(&nested_rel)).unwrap();
+        fs::write(pid_dir.join("cgroup"), format!("0::/{nested_rel}\n")).unwrap();
+        let resolver = ResolverConfig {
+            host_proc: proc,
+            host_cgroup: cgroup_root.clone(),
+        };
+
+        let resolved = resolve_container_cgroup_id(container_id, &resolver).unwrap();
+
+        let scope_ino = fs::metadata(cgroup_root.join(&scope_rel)).unwrap().ino();
+        let nested_ino = fs::metadata(cgroup_root.join(&nested_rel)).unwrap().ino();
+        assert_eq!(resolved, scope_ino);
+        assert_ne!(resolved, nested_ino);
     }
 
     #[test]
