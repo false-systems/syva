@@ -27,3 +27,14 @@ Notes:
   error and increments `syva_k8s_reconcile_errors_total`.
 - Metrics are exposed on `--metrics-listen` (default `0.0.0.0:9092`) at
   `/metrics`.
+
+Privileged end-to-end proof:
+
+```bash
+sudo -E make verify-k8s-membership
+```
+
+The proof expects `kubectl` to target a single-node Kubernetes cluster on the
+same Linux host/VM. It creates an annotated pod, waits for `AttachContainer`,
+verifies `syva_k8s_memberships_active 1`, proves a zone-a read succeeds, proves
+a zone-b read fails with `EPERM`, and asserts `file_open deny_delta=1`.

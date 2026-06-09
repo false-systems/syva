@@ -50,6 +50,9 @@ enum Cli {
     /// Run the privileged BPF-LSM **container** integration test: a real
     /// container in zone-a is blocked from reading a zone-b file.
     VerifyContainerIntegration,
+    /// Run the privileged Kubernetes membership integration test: an annotated
+    /// pod is attached by syva-k8s and blocked by file_open enforcement.
+    VerifyK8sMembership,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -77,6 +80,7 @@ fn main() -> Result<()> {
         Cli::VerifyRuntime => verify_runtime(),
         Cli::VerifyIntegration => verify_integration(),
         Cli::VerifyContainerIntegration => verify_container_integration(),
+        Cli::VerifyK8sMembership => verify_k8s_membership(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -579,6 +583,23 @@ fn verify_container_integration() -> Result<()> {
             "--nocapture",
         ],
     )
+}
+
+/// Run the privileged Kubernetes membership integration test. This starts a
+/// local core and adapter, uses the current kubectl context, and requires the
+/// cluster node to share the host /proc and cgroup namespace with this process.
+fn verify_k8s_membership() -> Result<()> {
+    privileged_runtime_preflight("verify-k8s-membership")?;
+
+    if !has_command("kubectl") {
+        bail!("verify-k8s-membership requires kubectl configured for a single-node Kubernetes cluster on this host");
+    }
+    if !has_command("curl") {
+        bail!("verify-k8s-membership requires curl for adapter metrics checks");
+    }
+
+    build_ebpf(true)?;
+    run_root_command("bash", &["scripts/verify-k8s-membership.sh"])
 }
 
 /// Verify an ALREADY-DEPLOYED syva-core. Unlike verify-container-integration,

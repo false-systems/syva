@@ -169,5 +169,9 @@ file paths.
 - Cgroup movement / zone escape protection is out of scope for v0.2 because the
   removed cgroup-movement path is not a supported BPF-LSM hook on mainline
   kernels.
-- Kubernetes adapter metrics are not yet exposed separately. Adapter health
-  should be added when the Kubernetes end-to-end proof is implemented.
+- `syva-k8s` exposes membership metrics separately:
+  `syva_k8s_membership_attach_total{result}`,
+  `syva_k8s_membership_detach_total{result}`,
+  `syva_k8s_memberships_active`, and
+  `syva_k8s_reconcile_errors_total{reason}`. Adapter health should still be
+  added separately.

@@ -89,7 +89,7 @@ syva_k8s_reconcile_errors_total{reason}
 
 `result` is one of `applied`, `rejected`, `stale`, or `error`.
 
-## Current Proof Level
+## End-to-End Verification
 
 Implemented:
 
@@ -100,16 +100,49 @@ Implemented:
 - generation-aware AttachContainer/DetachContainer calls,
 - adapter membership metrics.
 
-Not yet proven by a full Kubernetes end-to-end gate:
+The privileged Kubernetes proof is:
+
+```sh
+sudo -E make verify-k8s-membership
+```
+
+The target expects an existing single-node Kubernetes cluster reachable by
+`kubectl` on the same Linux host or VM that runs the command. k3s is the
+preferred environment for the current proof because it is the simplest
+single-node Lima setup; kind or another local cluster can work only if the pod
+runtime's host cgroups are visible under the host `/proc` and `/sys/fs/cgroup`.
+
+At the beginning of the run, the target prints the declared contract:
+
+```text
+=== syva k8s membership integration contract ===
+PASS: annotated pod in zone-a can read its own zone-a file.
+BLOCK: annotated pod in zone-a cannot read protected zone-b file.
+ASSIGNMENT: syva.false.systems/zone=zone-a
+HOOK: file_open
+EXPECTED DENIAL: EPERM / Operation not permitted
+EXPECTED KERNEL EVIDENCE: file_open deny_delta=1
+```
+
+It then starts a local `syva-core`, starts `syva-k8s` against the current
+cluster, registers `syva-it-zone-a` and `syva-it-zone-b`, creates a uniquely
+named namespace and annotated pod, waits for the adapter to attach the pod's
+container, and proves:
 
 - deploying a Kubernetes pod annotated with a Syva zone,
 - proving that pod can read its own zone file,
 - proving it is blocked from another zone's file with `EPERM`,
 - asserting `file_open deny_delta=1` for that Kubernetes workload.
 
-Until `verify-k8s-membership` exists and passes in a privileged Kubernetes
-environment, Kubernetes adapter integration should be described as implemented
-but not release-proven end to end.
+The output includes the pod namespace/name, node, runtime container ID, resolved
+host cgroup-v2 path, resolved cgroup inode/id, `AttachContainer` result, allowed
+read result, blocked read result, adapter metrics, and detach result. The target
+is rerun-safe: it uses names derived from `syva-k8s-it-<pid>` and removes the
+pod, namespace, local processes, and `/tmp/syva-k8s-it-<pid>` on exit.
+
+The target fails red if the pod cannot be attached with a real cgroup id, if the
+forbidden read succeeds, if the error is not `EPERM` / `Operation not
+permitted`, or if `file_open deny_delta` is not exactly `1`.
 
 Still out of scope:
 
