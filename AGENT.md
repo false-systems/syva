@@ -57,6 +57,7 @@ Privileged release gates:
 sudo -E make verify-runtime
 sudo -E make verify-integration
 sudo -E make verify-container-integration
+sudo -E make verify-audit-mode
 ```
 
 The container gate also requires `docker`, `nerdctl`, `podman`, or

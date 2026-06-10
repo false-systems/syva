@@ -1,17 +1,12 @@
 use aya_ebpf::programs::LsmContext;
 
-use crate::{count_decision, emit_deny_event, lookup_caller_zone, lookup_task_zone, ZONE_POLICY};
+use crate::{emit_deny_event, finish_decision, lookup_caller_zone, lookup_task_zone, ZONE_POLICY};
 use syva_ebpf_common::{
     HOOK_PTRACE_CHECK, POLICY_FLAG_ALLOW_PTRACE, PROG_PTRACE_CHECK, ZONE_FLAG_GLOBAL, ZONE_ID_HOST,
 };
 
 pub fn ptrace_access_check(ctx: &LsmContext) -> i32 {
-    let (ret, is_error) = match try_ptrace_check(ctx) {
-        Ok(ret) => (ret, false),
-        Err(_) => (0, true),
-    };
-    count_decision(PROG_PTRACE_CHECK, ret == 0, is_error);
-    ret
+    finish_decision(PROG_PTRACE_CHECK, try_ptrace_check(ctx))
 }
 
 #[inline(always)]

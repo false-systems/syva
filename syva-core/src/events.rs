@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use aya::maps::{MapData, RingBuf};
-use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
+use syva_ebpf_common::{EnforcementEvent, DECISION_ALLOW, DECISION_DENY, DECISION_WOULD_DENY};
 use tokio_util::sync::CancellationToken;
 
 pub const HOOK_NAMES: [&str; 6] = [
@@ -14,6 +14,17 @@ pub const HOOK_NAMES: [&str; 6] = [
     "mmap_file",
     "unix_stream_connect",
 ];
+
+/// Human label for an EnforcementEvent decision byte. WOULD_DENY is emitted
+/// in audit mode: the violation was recorded but the operation proceeded.
+pub fn decision_label(decision: u8) -> &'static str {
+    match decision {
+        DECISION_DENY => "DENY",
+        DECISION_ALLOW => "ALLOW",
+        DECISION_WOULD_DENY => "WOULD_DENY",
+        _ => "UNKNOWN",
+    }
+}
 
 /// Maximum events to drain per tick. Prevents the blocking task from
 /// holding the thread for too long under high deny rates.
@@ -62,11 +73,7 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
 
                     for event in &events {
                         let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
-                        let decision = match event.decision {
-                            DECISION_DENY => "DENY",
-                            syva_ebpf_common::DECISION_ALLOW => "ALLOW",
-                            _ => "UNKNOWN",
-                        };
+                        let decision = decision_label(event.decision);
                         if event.caller_zone == 0 {
                             tracing::debug!(
                                 hook = hook,
@@ -106,5 +113,13 @@ mod tests {
         for name in &HOOK_NAMES {
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn decision_label_distinguishes_audit_would_deny_from_deny() {
+        assert_eq!(decision_label(DECISION_DENY), "DENY");
+        assert_eq!(decision_label(DECISION_ALLOW), "ALLOW");
+        assert_eq!(decision_label(DECISION_WOULD_DENY), "WOULD_DENY");
+        assert_eq!(decision_label(255), "UNKNOWN");
     }
 }

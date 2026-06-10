@@ -177,6 +177,10 @@ pub struct HealthState {
     pub degraded_message: Option<String>,
     pub degraded_until_unix: Option<u64>,
     pub membership_updates: MembershipMetrics,
+    /// Global enforcement mode: "enforce" (deny blocks) or "audit"
+    /// (would-deny recorded, operation proceeds). An operator choice,
+    /// not a degradation — it does not affect security_status().
+    pub enforcement_mode: &'static str,
 }
 
 impl HealthState {
@@ -199,11 +203,16 @@ impl HealthState {
             degraded_message: None,
             degraded_until_unix: None,
             membership_updates: MembershipMetrics::default(),
+            enforcement_mode: "enforce",
         }
     }
 
     pub fn mark_ebpf_loaded(&mut self) {
         self.ebpf_loaded = true;
+    }
+
+    pub fn set_enforcement_mode(&mut self, mode: &'static str) {
+        self.enforcement_mode = mode;
     }
 
     pub fn mark_attached(&mut self, attached_hooks: usize) {
@@ -398,6 +407,7 @@ fn health_json(health: &HealthState, uptime_secs: u64) -> serde_json::Value {
     serde_json::json!({
         "state": security_status.as_str(),
         "status": security_status.as_str(),
+        "enforcement_mode": health.enforcement_mode,
         "ebpf_loaded": health.ebpf_loaded,
         "expected_hooks": health.expected_hooks,
         "attached_hooks": health.attached_hooks,
@@ -483,6 +493,21 @@ pub fn render_metrics(health: &HealthState) -> String {
             "syva_ebpf_hook_attached{{hook=\"{}\"}} {}\n",
             hook,
             if health.attached && idx < health.attached_hooks {
+                1
+            } else {
+                0
+            }
+        ));
+    }
+
+    out.push_str(
+        "# HELP syva_enforcement_mode Global enforcement mode as labeled gauges (audit records would-deny without blocking).\n",
+    );
+    out.push_str("# TYPE syva_enforcement_mode gauge\n");
+    for mode in ["enforce", "audit"] {
+        out.push_str(&format!(
+            "syva_enforcement_mode{{mode=\"{mode}\"}} {}\n",
+            if mode == health.enforcement_mode {
                 1
             } else {
                 0
@@ -910,6 +935,33 @@ mod tests {
         let output = render_metrics(&state);
         assert!(output.contains("syva_hook_allow_total{hook=\"file_open\"} 0"));
         assert!(output.contains("syva_hook_deny_total{hook=\"unix_stream_connect\"} 0"));
+    }
+
+    #[test]
+    fn enforcement_mode_defaults_to_enforce_and_is_exposed() {
+        let state = make_state(true, 1, 1);
+        let output = render_metrics(&state);
+        assert!(output.contains("syva_enforcement_mode{mode=\"enforce\"} 1"));
+        assert!(output.contains("syva_enforcement_mode{mode=\"audit\"} 0"));
+
+        let body = health_json(&state, 1);
+        assert_eq!(body["enforcement_mode"], "enforce");
+    }
+
+    #[test]
+    fn audit_mode_is_exposed_without_degrading_health() {
+        let mut state = make_state(true, 1, 1);
+        let baseline_status = state.security_status();
+        state.set_enforcement_mode("audit");
+
+        let output = render_metrics(&state);
+        assert!(output.contains("syva_enforcement_mode{mode=\"audit\"} 1"));
+        assert!(output.contains("syva_enforcement_mode{mode=\"enforce\"} 0"));
+
+        let body = health_json(&state, 1);
+        assert_eq!(body["enforcement_mode"], "audit");
+        // Audit is an operator choice, not reduced enforcement confidence.
+        assert_eq!(state.security_status(), baseline_status);
     }
 
     #[test]

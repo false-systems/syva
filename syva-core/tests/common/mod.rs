@@ -15,16 +15,42 @@ impl Drop for CoreProcess {
     }
 }
 
+// Each integration-test binary compiles its own copy of this module, so any
+// helper unused by one binary would otherwise trip dead_code.
+#[allow(dead_code)]
 pub(crate) fn spawn_core(socket_path: &std::path::Path) -> anyhow::Result<CoreProcess> {
+    spawn_core_with_args(socket_path, &[])
+}
+
+#[allow(dead_code)]
+pub(crate) fn spawn_core_with_args(
+    socket_path: &std::path::Path,
+    extra_args: &[&str],
+) -> anyhow::Result<CoreProcess> {
     let bin = std::env::var("CARGO_BIN_EXE_syva-core")
         .unwrap_or_else(|_| "target/debug/syva-core".to_string());
-    let child = Command::new(bin)
-        .arg("--socket-path")
-        .arg(socket_path)
+    let mut command = Command::new(bin);
+    command.arg("--socket-path").arg(socket_path);
+    // Pin the eBPF object to THIS workspace's release build. Object discovery
+    // prefers system paths (/usr/lib/syva) first, so on a host with a deployed
+    // Syva the gates would otherwise test the installed object, not the tree.
+    if let Some(obj) = workspace_release_ebpf_object() {
+        command.arg("--ebpf-obj").arg(obj);
+    }
+    let child = command
+        .args(extra_args)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;
     Ok(CoreProcess { child })
+}
+
+fn workspace_release_ebpf_object() -> Option<std::path::PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let path = std::path::Path::new(&manifest_dir)
+        .parent()?
+        .join("syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf");
+    path.exists().then_some(path)
 }
 
 pub(crate) async fn connect(

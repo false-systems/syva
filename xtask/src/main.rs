@@ -53,6 +53,9 @@ enum Cli {
     /// Run the privileged Kubernetes membership integration test: an annotated
     /// pod is attached by syva-k8s and blocked by file_open enforcement.
     VerifyK8sMembership,
+    /// Run the privileged audit-mode integration test: a cross-zone read is
+    /// recorded as a would-deny decision but NOT blocked.
+    VerifyAuditMode,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -81,6 +84,7 @@ fn main() -> Result<()> {
         Cli::VerifyIntegration => verify_integration(),
         Cli::VerifyContainerIntegration => verify_container_integration(),
         Cli::VerifyK8sMembership => verify_k8s_membership(),
+        Cli::VerifyAuditMode => verify_audit_mode(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -544,6 +548,27 @@ fn verify_integration() -> Result<()> {
             "syva-core",
             "--test",
             "integration_file_open_enforcement",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged audit-mode integration test: same setup as
+/// verify-integration but with the core in --mode audit. The cross-zone read
+/// must SUCCEED while the deny counter records the would-deny decision.
+fn verify_audit_mode() -> Result<()> {
+    privileged_runtime_preflight("verify-audit-mode")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_audit_mode",
             "--",
             "--ignored",
             "--nocapture",

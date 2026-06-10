@@ -320,7 +320,10 @@ chmod -R a+rX "$WORKDIR"
 
 cargo build -p syva-core -p syva-adapter-k8s -p syvactl
 
-target/debug/syva-core --socket-path "$SOCKET" --health-port "$CORE_HEALTH_PORT" >"$CORE_LOG" 2>&1 &
+# Pin the eBPF object to this tree's release build: object discovery prefers
+# /usr/lib/syva first, which would test a deployed object instead of the tree.
+target/debug/syva-core --socket-path "$SOCKET" --health-port "$CORE_HEALTH_PORT" \
+  --ebpf-obj syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf >"$CORE_LOG" 2>&1 &
 CORE_PID="$!"
 wait_for_cmd 30 target/debug/syvactl --socket "$SOCKET" status
 

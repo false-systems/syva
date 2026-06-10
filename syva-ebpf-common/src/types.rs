@@ -132,6 +132,15 @@ pub const HOOK_UNIX_CONNECT: u8 = 5;
 /// Used in userspace display only — eBPF hooks never emit allow events.
 pub const DECISION_ALLOW: u8 = 0;
 pub const DECISION_DENY: u8 = 1;
+/// Audit mode converted a deny decision into an allowed-but-recorded
+/// operation. The per-hook `deny` counter still counts it as a deny decision.
+pub const DECISION_WOULD_DENY: u8 = 2;
+
+// ENFORCEMENT_MODE map values (single-entry array, index 0).
+/// Deny decisions return -1 (surfaced to userspace as EPERM).
+pub const MODE_ENFORCE: u32 = 0;
+/// Deny decisions are recorded (counter + event) but the operation proceeds.
+pub const MODE_AUDIT: u32 = 1;
 
 /// Enforcement event emitted from BPF hooks via ring buffer.
 ///

@@ -1,18 +1,13 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    count_decision, emit_deny_event, is_cross_zone_allowed, lookup_caller_zone, offsets,
+    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone, offsets,
     read_file_ino, read_kernel_u64, INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_BPRM_CHECK, PROG_BPRM_CHECK, ZONE_FLAG_GLOBAL};
 
 pub fn bprm_check_security(ctx: &LsmContext) -> i32 {
-    let (ret, is_error) = match try_bprm_check(ctx) {
-        Ok(ret) => (ret, false),
-        Err(_) => (0, true),
-    };
-    count_decision(PROG_BPRM_CHECK, ret == 0, is_error);
-    ret
+    finish_decision(PROG_BPRM_CHECK, try_bprm_check(ctx))
 }
 
 #[inline(always)]

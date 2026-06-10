@@ -62,6 +62,9 @@ asserts a real `file_open deny_delta=1`:
   (`docker` / `nerdctl` / `podman`).
 - `verify-k8s-membership` — an annotated Kubernetes pod is attached by
   `syva-k8s` and blocked from a zone-b file by `file_open` enforcement.
+- `verify-audit-mode` — with `--mode audit`, the same cross-zone read is
+  recorded as a would-deny decision but **not** blocked (observe-only rollout
+  path).
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -254,6 +257,7 @@ sudo -E make verify-runtime
 sudo -E make verify-integration
 sudo -E make verify-container-integration
 sudo -E make verify-k8s-membership
+sudo -E make verify-audit-mode
 ```
 
 ## Run it directly

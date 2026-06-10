@@ -55,6 +55,12 @@ States:
   load failure, fewer than six attached hooks, or failed/pending mandatory
   self-tests.
 
+`syva_enforcement_mode{mode="enforce|audit"}` reports the global mode as
+labeled gauges. In audit mode the per-hook `deny` counters and deny events
+record would-deny DECISIONS — the operations themselves proceed. Alert on
+`syva_enforcement_mode{mode="audit"} == 1` in any environment that is supposed
+to be enforcing.
+
 Fail-open hook errors are not healthy. They keep the node safer operationally,
 but they reduce enforcement confidence and should page or warn depending on
 policy.

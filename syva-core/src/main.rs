@@ -55,6 +55,31 @@ struct Cli {
     /// Log format: text or json.
     #[arg(long, default_value = "text", env = "SYVA_LOG_FORMAT")]
     log_format: LogFormat,
+
+    /// Enforcement mode. `enforce` blocks cross-zone operations with EPERM;
+    /// `audit` records would-deny decisions (counters + events) without
+    /// blocking, for observe-only rollouts.
+    #[arg(long, value_enum, default_value_t = EnforcementMode::Enforce, env = "SYVA_MODE")]
+    mode: EnforcementMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum EnforcementMode {
+    Enforce,
+    Audit,
+}
+
+impl EnforcementMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Audit => "audit",
+        }
+    }
+
+    fn is_audit(self) -> bool {
+        self == Self::Audit
+    }
 }
 
 #[derive(Subcommand)]
@@ -146,6 +171,22 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         error
     })?;
     health_state.write().await.mark_ebpf_loaded();
+
+    // Write the global enforcement mode BEFORE attaching hooks, so no hook
+    // ever runs with an ambiguous mode. Audit is an explicit operator choice;
+    // a missing map value means enforce.
+    mgr.set_enforcement_mode(config.mode.is_audit())?;
+    health_state
+        .write()
+        .await
+        .set_enforcement_mode(config.mode.as_str());
+    if config.mode.is_audit() {
+        tracing::warn!(
+            event = "syva.mode.audit",
+            component = "syva-core",
+            "AUDIT MODE: cross-zone violations are recorded as would-deny but NOT blocked"
+        );
+    }
 
     // Do not take the ENFORCEMENT_EVENTS ring buffer here — it is single-consumer
     // and the gRPC WatchEvents RPC needs to acquire it. Event logging for the core
@@ -636,12 +677,19 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
                     let decision = match event.decision {
                         syva_ebpf_common::DECISION_DENY => "deny",
                         syva_ebpf_common::DECISION_ALLOW => "allow",
+                        // Audit mode: the violation was recorded but the
+                        // operation proceeded — no EPERM was returned.
+                        syva_ebpf_common::DECISION_WOULD_DENY => "would_deny",
                         _ => "unknown",
                     };
 
                     if json_mode {
                         let json = serde_json::json!({
-                            "event": if decision == "deny" { "syva.enforcement.denied" } else { "syva.enforcement.observed" },
+                            "event": match decision {
+                                "deny" => "syva.enforcement.denied",
+                                "would_deny" => "syva.enforcement.would_deny",
+                                _ => "syva.enforcement.observed",
+                            },
                             "component": "syva-core",
                             "timestamp_ns": event.timestamp_ns,
                             "hook": hook,

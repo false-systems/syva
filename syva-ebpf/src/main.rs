@@ -8,8 +8,9 @@ use aya_ebpf::{
 };
 use syva_ebpf_common::{
     EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult,
-    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, ENFORCEMENT_COUNTER_ENTRIES,
-    MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
+    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
+    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
+    MODE_AUDIT,
 };
 
 mod exec_guard;
@@ -49,6 +50,12 @@ static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::with_max_entries(1, 0)
 #[map]
 static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
     PerCpuArray::with_max_entries(ENFORCEMENT_COUNTER_ENTRIES, 0);
+
+#[map]
+// Global enforcement mode (index 0): MODE_ENFORCE denies return -1;
+// MODE_AUDIT records the deny decision but lets the operation proceed.
+// Userspace writes it once at startup before the hooks attach.
+static ENFORCEMENT_MODE: Array<u32> = Array::with_max_entries(1, 0);
 
 #[map]
 static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0); // 4MB
@@ -182,16 +189,29 @@ fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
     unsafe { ZONE_ALLOWED_COMMS.get(&key).is_some() }
 }
 
+/// True when userspace has switched the global mode to audit (observe-only).
+/// Missing map entry means enforce — audit must always be an explicit choice.
+#[inline(always)]
+fn audit_mode_active() -> bool {
+    matches!(ENFORCEMENT_MODE.get(0), Some(&MODE_AUDIT))
+}
+
 #[inline(always)]
 fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
+    let decision = if audit_mode_active() {
+        DECISION_WOULD_DENY
+    } else {
+        DECISION_DENY
+    };
+
     let event = EnforcementEvent {
         timestamp_ns: ts,
         pid,
         hook,
-        decision: DECISION_DENY,
+        decision,
         _pad0: [0; 2],
         caller_zone,
         target_zone,
@@ -298,6 +318,27 @@ fn count_decision(prog_idx: u32, allow: bool, is_error: bool) {
         } else {
             c.deny += 1;
         }
+    }
+}
+
+/// Shared hook epilogue: count the decision, then translate a deny verdict
+/// through the global enforcement mode. The `deny` counter records the
+/// DECISION (incremented in both modes); only the return value differs —
+/// enforce mode blocks with -1 (EPERM), audit mode lets the operation
+/// proceed after the would-deny event has been emitted.
+#[inline(always)]
+fn finish_decision(prog_idx: u32, verdict: Result<i32, i64>) -> i32 {
+    let (ret, is_error) = match verdict {
+        Ok(ret) => (ret, false),
+        Err(_) => (0, true),
+    };
+    count_decision(prog_idx, ret == 0, is_error);
+    if ret == 0 {
+        0
+    } else if audit_mode_active() {
+        0
+    } else {
+        -1
     }
 }
 
