@@ -1,0 +1,104 @@
+# Builds and publishes the syva-core and syva-adapter-k8s container images to
+# GHCR. Runs on version tags and on manual dispatch (for republishing a tag
+# that predates this workflow, e.g. v0.3.0).
+#
+# Each architecture builds natively (no QEMU — Rust under emulation is too
+# slow), pushes :<version>-<arch> tags, and a final job stitches them into the
+# multi-arch :<version> manifest the DaemonSet references.
+
+name: release-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version tag without the leading v (e.g. 0.3.0)"
+        required: true
+      ref:
+        description: "Git ref to build (tag, branch, or SHA); defaults to the dispatched ref"
+        required: false
+        default: ""
+  push:
+    tags: ["v[0-9]*"]
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-arch:
+    name: build + push (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push syva-core
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: syva-core
+          push: true
+          tags: ${{ env.REGISTRY }}/syva-core:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+      - name: Build and push syva-adapter-k8s
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: syva-adapter-k8s
+          push: true
+          tags: ${{ env.REGISTRY }}/syva-adapter-k8s:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+
+  manifest:
+    name: publish multi-arch manifests
+    needs: build-arch
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Resolve version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch tags
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          for image in syva-core syva-adapter-k8s; do
+            docker buildx imagetools create \
+              -t "${REGISTRY}/${image}:${version}" \
+              "${REGISTRY}/${image}:${version}-amd64" \
+              "${REGISTRY}/${image}:${version}-arm64"
+            docker buildx imagetools inspect "${REGISTRY}/${image}:${version}"
+          done

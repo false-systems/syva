@@ -51,7 +51,7 @@ spec:
         - name: syva-core
           image: ghcr.io/false-systems/syva-core:0.3.0
           args:
-            - --core-socket
+            - --socket-path
             - /run/syva/syva-core.sock
           ports:
             - name: health

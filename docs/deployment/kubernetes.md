@@ -4,6 +4,40 @@ Syva's Kubernetes path is node-local. The DaemonSet runs `syva-core` and
 `syva-k8s` on each node; the adapter talks to the local Unix socket and does not
 introduce a remote control plane.
 
+## Container Images
+
+Released images are published to GHCR for `linux/amd64` and `linux/arm64` by
+the `release-images` workflow (`.github/workflows/release-images.yml`), which
+runs on version tags and on manual dispatch:
+
+```text
+ghcr.io/false-systems/syva-core:<version>
+ghcr.io/false-systems/syva-adapter-k8s:<version>
+```
+
+The `syva-core` image bundles the release eBPF object at
+`/usr/lib/syva/syva-ebpf` (the first path object discovery checks) plus
+`syvactl`; the adapter image contains `syva-k8s`.
+
+Builds are two-step: the root `Dockerfile` compiles inside the published
+toolchain image `ghcr.io/false-systems/syva-builder` (stable Rust, nightly +
+`rust-src`, `bpf-linker`, `protoc`; defined in `docker/builder.Dockerfile`,
+published by the `builder-image` workflow) and copies the artifacts into slim
+runtime images. To build locally:
+
+```sh
+docker build --target syva-core        -t syva-core:dev .
+docker build --target syva-adapter-k8s -t syva-adapter-k8s:dev .
+```
+
+To rebuild against a locally built toolchain image instead of the published
+one, pass `--build-arg BUILDER_IMAGE=<your-builder-ref>`.
+
+Node prerequisites are unchanged by the packaging: a BPF-LSM-enabled kernel
+(`bpf` in `/sys/kernel/security/lsm`), cgroup v2, BTF at
+`/sys/kernel/btf/vmlinux`, and a containerd-style runtime layout. Images do not
+relax any of the privileged requirements in the DaemonSet.
+
 ## Zone Policy
 
 `syva-k8s` watches `SyvaZonePolicy` CRDs and reconciles them into the local

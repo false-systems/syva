@@ -1,0 +1,11 @@
+.git/
+target/
+syva-ebpf/target/
+eval/
+docs/
+deploy/
+lima/
+scripts/
+.github/
+Dockerfile
+*.md
