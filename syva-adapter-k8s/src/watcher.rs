@@ -313,6 +313,7 @@ mod tests {
                         .iter()
                         .map(|zone| (*zone).to_string())
                         .collect(),
+                    mode: None,
                 }),
                 process: None,
                 selector: None,

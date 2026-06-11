@@ -271,6 +271,9 @@ fn core_register_request(
                 CoreZoneType::Privileged => 1,
                 CoreZoneType::Standard | CoreZoneType::Isolated => 0,
             },
+            // The partial REST surface does not expose the network mode; zones
+            // registered through it default to ISOLATED (network-locked).
+            network_mode: 0,
         }),
     })
 }

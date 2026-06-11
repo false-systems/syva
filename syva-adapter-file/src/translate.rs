@@ -1,5 +1,8 @@
 use crate::policy::FilePolicy;
-use syva_core_client::syva_core::{RegisterZoneRequest, ZonePolicy};
+use crate::types::NetworkMode;
+use syva_core_client::syva_core::{
+    NetworkMode as ProtoNetworkMode, RegisterZoneRequest, ZonePolicy,
+};
 
 /// Translate a TOML policy into the node-local core API.
 ///
@@ -29,7 +32,16 @@ pub fn policy_to_core_register(name: &str, policy: &FilePolicy) -> RegisterZoneR
             } else {
                 0
             },
+            network_mode: network_mode_to_proto(policy.policy.network.mode) as i32,
         }),
+    }
+}
+
+fn network_mode_to_proto(mode: NetworkMode) -> ProtoNetworkMode {
+    match mode {
+        NetworkMode::Isolated => ProtoNetworkMode::Isolated,
+        NetworkMode::Bridged => ProtoNetworkMode::Bridged,
+        NetworkMode::Host => ProtoNetworkMode::Host,
     }
 }
 

@@ -5,8 +5,8 @@
 Syvä is a node-local Linux/eBPF LSM enforcement engine. It puts each workload in
 a *zone*, keeps zone membership and policy in BPF maps, and uses kernel LSM hooks
 to **deny cross-zone operations before they happen** — file opens, exec,
-executable `mmap`, `ptrace`, signals, Unix-socket connects, and outbound
-network connections (egress lock).
+executable `mmap`, `ptrace`, signals, Unix-socket connects, and network access
+(an Isolated zone is locked to loopback only).
 
 Current release: **v0.3.0** — the Kubernetes membership watcher release, on
 the v0.2 kernel-enforcement contract; the canonical control API remains
@@ -55,7 +55,7 @@ Syvä ships with reproducible **kernel-level enforcement evidence**, not just un
 tests. Each gate prints a declared PASS/BLOCK contract *before* it runs and
 asserts a real `file_open deny_delta=1`:
 
-- `verify-runtime` — loads the release eBPF object, attaches all seven BPF-LSM
+- `verify-runtime` — loads the release eBPF object, attaches all nine BPF-LSM
   hooks, and passes the cgroup / inode / unix self-tests.
 - `verify-integration` — a zoned process reads its own zone's file (allowed) but
   is blocked from another zone's file with `EPERM`.
@@ -66,9 +66,9 @@ asserts a real `file_open deny_delta=1`:
 - `verify-audit-mode` — with `--mode audit`, the same cross-zone read is
   recorded as a would-deny decision but **not** blocked (observe-only rollout
   path).
-- `verify-socket-egress` — an Isolated-network zone is blocked from a
-  non-loopback outbound connect with `EPERM` (`socket_connect`), while loopback
-  is allowed.
+- `verify-network-lock` — an Isolated zone is denied non-loopback
+  `connect`/`sendmsg`/`bind` with `EPERM` (loopback only), while a Bridged zone
+  is allowed out (the per-zone lock/open switch).
 - `verify-cgroup-escape` — a zoned task migrating out of its cgroup is
   **detected** (counter + degraded health). Detection only — BPF-LSM cannot
   block cgroup movement on supported kernels.
@@ -80,9 +80,10 @@ single-node cluster); they are `#[ignore]`d in normal `cargo test`. See
 
 ## Features
 
-- **Seven kernel-enforced hooks** — file open, exec, executable `mmap`,
-  `ptrace`, signals, Unix-socket connect, and outbound network connect (egress
-  lock for Isolated zones), all via BPF-LSM.
+- **Nine kernel-enforced hooks** — file open, exec, executable `mmap`,
+  `ptrace`, signals, Unix-socket connect, and the network lock (outbound
+  `connect`/`sendmsg` + `bind`) that makes an Isolated zone loopback-only, all
+  via BPF-LSM.
 - **Node-local by design** — one `syva-core` per node behind the `syva.core.v1`
   Unix socket; no control plane. Scale with the Kubernetes primitives you
   already run.
@@ -266,7 +267,7 @@ sudo -E make verify-integration
 sudo -E make verify-container-integration
 sudo -E make verify-k8s-membership
 sudo -E make verify-audit-mode
-sudo -E make verify-socket-egress
+sudo -E make verify-network-lock
 sudo -E make verify-cgroup-escape
 ```
 

@@ -13,6 +13,7 @@ pub(crate) struct CoreZonePolicyInput {
     pub allowed_zones: Vec<String>,
     pub allow_ptrace: bool,
     pub zone_type: ZoneType,
+    pub network_mode: crate::types::NetworkMode,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,7 @@ pub(crate) async fn register_zone_local(
         }
         internal_policy.filesystem.host_paths = policy.host_paths.clone();
         internal_policy.network.allowed_zones = policy.allowed_zones;
+        internal_policy.network.mode = policy.network_mode;
 
         {
             let mut ebpf = ebpf.lock().await;

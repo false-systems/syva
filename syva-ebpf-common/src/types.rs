@@ -70,12 +70,13 @@ pub const POLICY_FLAG_ALLOW_PTRACE: u32 = 1 << 0;
 /// reserved: set by userspace for NetworkMode::Host but not checked by
 /// any eBPF hook. No network namespace enforcement exists yet.
 pub const POLICY_FLAG_ALLOW_HOST_NET: u32 = 1 << 1;
-/// Allow outbound (egress) network connections. Set by userspace for any
-/// network mode other than Isolated. The `socket_connect` hook denies
-/// non-loopback AF_INET/AF_INET6 connects from a zoned caller without it.
-pub const POLICY_FLAG_ALLOW_EGRESS: u32 = 1 << 2;
+/// Allow network access for the zone. Set by userspace for any network mode
+/// other than Isolated. Without it, a zoned caller is network-isolated:
+/// `socket_connect`, `socket_sendmsg`, and `socket_bind` deny non-loopback
+/// AF_INET/AF_INET6 operations (loopback is always allowed).
+pub const POLICY_FLAG_ALLOW_NETWORK: u32 = 1 << 2;
 
-/// Address families relevant to the socket_connect egress hook.
+/// Address families relevant to the network hooks.
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
 
@@ -126,6 +127,8 @@ pub const PROG_TASK_KILL: u32 = 3;
 pub const PROG_MMAP_FILE: u32 = 4;
 pub const PROG_UNIX_CONNECT: u32 = 5;
 pub const PROG_SOCKET_CONNECT: u32 = 6;
+pub const PROG_SOCKET_SENDMSG: u32 = 7;
+pub const PROG_SOCKET_BIND: u32 = 8;
 /// Sized to 16 for headroom — avoids pin-breaking changes when adding hooks.
 pub const ENFORCEMENT_COUNTER_ENTRIES: u32 = 16;
 
@@ -137,6 +140,8 @@ pub const HOOK_TASK_KILL: u8 = 3;
 pub const HOOK_MMAP_FILE: u8 = 4;
 pub const HOOK_UNIX_CONNECT: u8 = 5;
 pub const HOOK_SOCKET_CONNECT: u8 = 6;
+pub const HOOK_SOCKET_SENDMSG: u8 = 7;
+pub const HOOK_SOCKET_BIND: u8 = 8;
 
 // Decision constants for EnforcementEvent.
 /// Used in userspace display only — eBPF hooks never emit allow events.
@@ -151,7 +156,7 @@ pub const DECISION_WOULD_DENY: u8 = 2;
 pub const DECISION_ESCAPE: u8 = 3;
 
 /// Sentinel `hook` value for cgroup-escape events. Intentionally outside the
-/// seven LSM hook indices so escape detection never inflates the hook set.
+/// nine LSM hook indices so escape detection never inflates the hook set.
 pub const HOOK_CGROUP_ESCAPE: u8 = 0xFF;
 
 // ENFORCEMENT_MODE map values (single-entry array, index 0).
@@ -271,7 +276,7 @@ mod cap_convert {
             caps: &[impl AsRef<str>],
             allow_ptrace: bool,
             allow_host_net: bool,
-            allow_egress: bool,
+            allow_network: bool,
         ) -> Self {
             let mut flags = 0u32;
             if allow_ptrace {
@@ -280,8 +285,8 @@ mod cap_convert {
             if allow_host_net {
                 flags |= super::POLICY_FLAG_ALLOW_HOST_NET;
             }
-            if allow_egress {
-                flags |= super::POLICY_FLAG_ALLOW_EGRESS;
+            if allow_network {
+                flags |= super::POLICY_FLAG_ALLOW_NETWORK;
             }
             Self {
                 caps_mask: caps_to_mask(caps),
@@ -406,15 +411,15 @@ mod tests {
 
     #[test]
     #[cfg(feature = "userspace")]
-    fn from_caps_sets_egress_flag_only_when_allowed() {
+    fn from_caps_sets_network_flag_only_when_allowed() {
         let none: &[&str] = &[];
-        let no_egress = ZonePolicyKernel::from_caps(none, false, false, false);
-        assert_eq!(no_egress.flags & super::POLICY_FLAG_ALLOW_EGRESS, 0);
+        let locked = ZonePolicyKernel::from_caps(none, false, false, false);
+        assert_eq!(locked.flags & super::POLICY_FLAG_ALLOW_NETWORK, 0);
 
-        let egress = ZonePolicyKernel::from_caps(none, false, false, true);
-        assert_ne!(egress.flags & super::POLICY_FLAG_ALLOW_EGRESS, 0);
-        // Egress is an independent bit — it must not disturb the others.
-        assert_eq!(egress.flags & super::POLICY_FLAG_ALLOW_PTRACE, 0);
-        assert_eq!(egress.flags & super::POLICY_FLAG_ALLOW_HOST_NET, 0);
+        let open = ZonePolicyKernel::from_caps(none, false, false, true);
+        assert_ne!(open.flags & super::POLICY_FLAG_ALLOW_NETWORK, 0);
+        // Network is an independent bit — it must not disturb the others.
+        assert_eq!(open.flags & super::POLICY_FLAG_ALLOW_PTRACE, 0);
+        assert_eq!(open.flags & super::POLICY_FLAG_ALLOW_HOST_NET, 0);
     }
 }

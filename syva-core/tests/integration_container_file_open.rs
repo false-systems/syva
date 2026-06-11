@@ -60,6 +60,7 @@ fn empty_policy() -> ZonePolicy {
         allowed_zones: Vec::new(),
         allow_ptrace: false,
         zone_type: 0, // NonGlobal — enforced.
+        network_mode: 0,
     }
 }
 

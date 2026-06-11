@@ -58,7 +58,7 @@ sudo -E make verify-runtime
 sudo -E make verify-integration
 sudo -E make verify-container-integration
 sudo -E make verify-audit-mode
-sudo -E make verify-socket-egress
+sudo -E make verify-network-lock
 sudo -E make verify-cgroup-escape
 ```
 

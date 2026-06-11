@@ -50,7 +50,8 @@ fn empty_policy() -> ZonePolicy {
         host_paths: Vec::new(),
         allowed_zones: Vec::new(),
         allow_ptrace: false,
-        zone_type: 0, // NonGlobal — enforced.
+        zone_type: 0,    // NonGlobal — enforced.
+        network_mode: 0, // Isolated (network-locked)
     }
 }
 

@@ -5,9 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use syva_core_client::syva_core::{
-    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RegisterHostPathRequest,
-    RegisterZoneRequest, RemoveZoneRequest, StatusRequest, WatchEventsRequest, ZonePolicy,
-    ZoneType,
+    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, NetworkMode,
+    RegisterHostPathRequest, RegisterZoneRequest, RemoveZoneRequest, StatusRequest,
+    WatchEventsRequest, ZonePolicy, ZoneType,
 };
 use tonic::Code;
 
@@ -59,6 +59,35 @@ impl ZoneTypeArg {
     }
 }
 
+/// The per-zone network lock/open switch.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum NetworkArg {
+    /// Network-locked: the zone reaches loopback only (default).
+    Locked,
+    /// Network-open: outbound and inbound network access permitted.
+    Open,
+    /// Network-open plus the host network namespace.
+    Host,
+}
+
+impl NetworkArg {
+    fn proto_value(self) -> i32 {
+        match self {
+            Self::Locked => NetworkMode::Isolated as i32,
+            Self::Open => NetworkMode::Bridged as i32,
+            Self::Host => NetworkMode::Host as i32,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Open => "open",
+            Self::Host => "host",
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Show syva-core status via gRPC Status.
@@ -97,6 +126,9 @@ enum ZonesCommand {
         /// Zone type to send to syva-core.
         #[arg(long = "type", default_value = "standard")]
         zone_type: ZoneTypeArg,
+        /// Network mode: `locked` (loopback only, default), `open`, or `host`.
+        #[arg(long = "network", default_value = "locked")]
+        network: NetworkArg,
     },
     /// Remove a local zone if the server accepts the transition.
     Remove {
@@ -198,7 +230,12 @@ Run `syvactl events --follow`."
             print_zones(cli.format, &zones.zones);
         }
         Command::Zones {
-            command: ZonesCommand::Register { zone_id, zone_type },
+            command:
+                ZonesCommand::Register {
+                    zone_id,
+                    zone_type,
+                    network,
+                },
         } => {
             let request = RegisterZoneRequest {
                 zone_name: zone_id.clone(),
@@ -207,6 +244,7 @@ Run `syvactl events --follow`."
                     allowed_zones: Vec::new(),
                     allow_ptrace: false,
                     zone_type: zone_type.proto_value(),
+                    network_mode: network.proto_value(),
                 }),
             };
             let response = match client.register_zone(request).await {
@@ -219,6 +257,7 @@ Run `syvactl events --follow`."
                         &[
                             ("zone_id", serde_json::json!(zone_id)),
                             ("zone_type", serde_json::json!(zone_type.as_str())),
+                            ("network", serde_json::json!(network.as_str())),
                         ],
                     )
                 }
@@ -228,6 +267,7 @@ Run `syvactl events --follow`."
                 WriteResult::success(operation, "applied")
                     .field("zone_id", zone_id)
                     .field("zone_type", zone_type.as_str())
+                    .field("network", network.as_str())
                     .field("numeric_zone_id", response.zone_id),
             );
         }
