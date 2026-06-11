@@ -6,13 +6,14 @@ use aya::maps::{MapData, RingBuf};
 use syva_ebpf_common::{EnforcementEvent, DECISION_ALLOW, DECISION_DENY, DECISION_WOULD_DENY};
 use tokio_util::sync::CancellationToken;
 
-pub const HOOK_NAMES: [&str; 6] = [
+pub const HOOK_NAMES: [&str; 7] = [
     "file_open",
     "bprm_check_security",
     "ptrace_access_check",
     "task_kill",
     "mmap_file",
     "unix_stream_connect",
+    "socket_connect",
 ];
 
 /// Human label for an EnforcementEvent decision byte. WOULD_DENY is emitted
@@ -103,8 +104,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_names_count_is_six() {
-        assert_eq!(HOOK_NAMES.len(), 6);
+    fn hook_names_count_is_seven() {
+        assert_eq!(HOOK_NAMES.len(), 7);
+        assert!(HOOK_NAMES.contains(&"socket_connect"));
         assert!(!HOOK_NAMES.contains(&"cgroup_attach_task"));
     }
 

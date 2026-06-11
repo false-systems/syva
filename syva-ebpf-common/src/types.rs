@@ -70,6 +70,14 @@ pub const POLICY_FLAG_ALLOW_PTRACE: u32 = 1 << 0;
 /// reserved: set by userspace for NetworkMode::Host but not checked by
 /// any eBPF hook. No network namespace enforcement exists yet.
 pub const POLICY_FLAG_ALLOW_HOST_NET: u32 = 1 << 1;
+/// Allow outbound (egress) network connections. Set by userspace for any
+/// network mode other than Isolated. The `socket_connect` hook denies
+/// non-loopback AF_INET/AF_INET6 connects from a zoned caller without it.
+pub const POLICY_FLAG_ALLOW_EGRESS: u32 = 1 << 2;
+
+/// Address families relevant to the socket_connect egress hook.
+pub const AF_INET: u16 = 2;
+pub const AF_INET6: u16 = 10;
 
 /// Result of the startup self-test that validates kernel struct offsets.
 #[repr(C)]
@@ -117,6 +125,7 @@ pub const PROG_PTRACE_CHECK: u32 = 2;
 pub const PROG_TASK_KILL: u32 = 3;
 pub const PROG_MMAP_FILE: u32 = 4;
 pub const PROG_UNIX_CONNECT: u32 = 5;
+pub const PROG_SOCKET_CONNECT: u32 = 6;
 /// Sized to 16 for headroom — avoids pin-breaking changes when adding hooks.
 pub const ENFORCEMENT_COUNTER_ENTRIES: u32 = 16;
 
@@ -127,6 +136,7 @@ pub const HOOK_PTRACE_CHECK: u8 = 2;
 pub const HOOK_TASK_KILL: u8 = 3;
 pub const HOOK_MMAP_FILE: u8 = 4;
 pub const HOOK_UNIX_CONNECT: u8 = 5;
+pub const HOOK_SOCKET_CONNECT: u8 = 6;
 
 // Decision constants for EnforcementEvent.
 /// Used in userspace display only — eBPF hooks never emit allow events.
@@ -253,6 +263,7 @@ mod cap_convert {
             caps: &[impl AsRef<str>],
             allow_ptrace: bool,
             allow_host_net: bool,
+            allow_egress: bool,
         ) -> Self {
             let mut flags = 0u32;
             if allow_ptrace {
@@ -260,6 +271,9 @@ mod cap_convert {
             }
             if allow_host_net {
                 flags |= super::POLICY_FLAG_ALLOW_HOST_NET;
+            }
+            if allow_egress {
+                flags |= super::POLICY_FLAG_ALLOW_EGRESS;
             }
             Self {
                 caps_mask: caps_to_mask(caps),
@@ -380,5 +394,19 @@ mod tests {
     fn caps_to_mask_validated_clean_input() {
         let (_, unknown) = caps_to_mask_validated(&["CAP_KILL", "NET_ADMIN"]);
         assert!(unknown.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "userspace")]
+    fn from_caps_sets_egress_flag_only_when_allowed() {
+        let none: &[&str] = &[];
+        let no_egress = ZonePolicyKernel::from_caps(none, false, false, false);
+        assert_eq!(no_egress.flags & super::POLICY_FLAG_ALLOW_EGRESS, 0);
+
+        let egress = ZonePolicyKernel::from_caps(none, false, false, true);
+        assert_ne!(egress.flags & super::POLICY_FLAG_ALLOW_EGRESS, 0);
+        // Egress is an independent bit — it must not disturb the others.
+        assert_eq!(egress.flags & super::POLICY_FLAG_ALLOW_PTRACE, 0);
+        assert_eq!(egress.flags & super::POLICY_FLAG_ALLOW_HOST_NET, 0);
     }
 }

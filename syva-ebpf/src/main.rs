@@ -18,6 +18,7 @@ mod file_guard;
 mod mmap_guard;
 mod ptrace_guard;
 mod signal_guard;
+mod socket_guard;
 mod unix_guard;
 
 #[map]
@@ -69,6 +70,18 @@ fn lookup_caller_zone(_ctx: &LsmContext) -> Option<ZoneInfoKernel> {
 #[inline(always)]
 unsafe fn read_kernel_u64(base: u64, offset: usize) -> Result<u64, i64> {
     let addr = (base + offset as u64) as *const u64;
+    aya_ebpf::helpers::bpf_probe_read_kernel(addr).map_err(|e| e as i64)
+}
+
+#[inline(always)]
+unsafe fn read_kernel_u32(base: u64, offset: usize) -> Result<u32, i64> {
+    let addr = (base + offset as u64) as *const u32;
+    aya_ebpf::helpers::bpf_probe_read_kernel(addr).map_err(|e| e as i64)
+}
+
+#[inline(always)]
+unsafe fn read_kernel_u16(base: u64, offset: usize) -> Result<u16, i64> {
+    let addr = (base + offset as u64) as *const u16;
     aya_ebpf::helpers::bpf_probe_read_kernel(addr).map_err(|e| e as i64)
 }
 
@@ -372,6 +385,11 @@ pub fn syva_mmap_file(ctx: LsmContext) -> i32 {
 #[lsm(hook = "unix_stream_connect")]
 pub fn syva_unix_connect(ctx: LsmContext) -> i32 {
     unix_guard::unix_stream_connect(&ctx)
+}
+
+#[lsm(hook = "socket_connect")]
+pub fn syva_socket_connect(ctx: LsmContext) -> i32 {
+    socket_guard::socket_connect(&ctx)
 }
 
 #[panic_handler]

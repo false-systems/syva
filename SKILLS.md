@@ -14,7 +14,7 @@ This is the line. A v0.3 control-plane experiment (`syva-cp`) crossed it and was
 
 ```
 TOML files ─────► syva-file ──┐
-SyvaZonePolicy CRDs ─► syva-k8s ─┤── Unix socket (syva.core.v1) ──► syva-core ──► 6 LSM hooks
+SyvaZonePolicy CRDs ─► syva-k8s ─┤── Unix socket (syva.core.v1) ──► syva-core ──► 7 LSM hooks
 HTTP requests ─► syva-api ────┘                                       │
                                                                        └─► BPF maps
 ```
@@ -22,7 +22,7 @@ HTTP requests ─► syva-api ────┘                                   
 - `syva-core` runs per-node, owns the eBPF programs and BPF maps, exposes `syva.core.v1` gRPC on a local Unix socket.
 - Adapters connect to the local core. Each adapter translates its domain (TOML files / k8s CRDs / REST) into core RPCs.
 - No remote control plane. Scale is achieved by composing with k8s primitives (RBAC, namespaces, audit logs, GitOps tooling like Argo/Flux).
-- **v0.2 attaches six BPF-LSM hooks:** `file_open`, `bprm_check_security`, `ptrace_access_check`, `task_kill`, `mmap_file`, `unix_stream_connect`. cgroup-movement / zone-escape protection is **out of v0.2 scope** — `cgroup_attach_task` is not a BPF-LSM hook on mainline kernels; do not reintroduce it.
+- **Syva attaches seven BPF-LSM hooks:** `file_open`, `bprm_check_security`, `ptrace_access_check`, `task_kill`, `mmap_file`, `unix_stream_connect`, `socket_connect`. cgroup-movement / zone-escape protection is still **not BPF-LSM enforceable** — `cgroup_attach_task` is not a BPF-LSM hook on mainline kernels; do not reintroduce it (see the cgroup-escape detection mechanism instead).
 
 ## Hard rules — breaking these breaks the security model
 
@@ -38,7 +38,7 @@ HTTP requests ─► syva-api ────┘                                   
 - **No `.unwrap()` in production paths.** Use `?` or `.ok_or_else()`. `unwrap` signals "I didn't think about this path"; not acceptable in kernel enforcement code.
 - **Comments explain *why*, not *what*.** Kernel constraints, verifier quirks, intentional design choices, known limitations. "// increment counter" is noise. "// fail-open: verifier cannot prove read safety here, count and allow" is signal.
 - **No wrapper types without invariants.** `ZoneId(u32)` is fine because zone 0 is reserved and the type encodes that. `pub struct Foo(Bar)` with no methods is a rename, not an abstraction.
-- **No trait objects where enums suffice.** The hook set is fixed (six hooks in v0.2); policy types are known at compile time. Use enums. `dyn Trait` on a hot path pays a vtable cost for flexibility you don't need.
+- **No trait objects where enums suffice.** The hook set is fixed (seven hooks); policy types are known at compile time. Use enums. `dyn Trait` on a hot path pays a vtable cost for flexibility you don't need.
 - **No async where sync is fine.** Ring-buffer drain is `block_in_place` on a 100ms timer. Map operations are sync. Async is for the gRPC server, the containerd watcher, and the health endpoint.
 - **No dead feature flags.** If a flag exists but no eBPF program checks it, document it as reserved or remove it.
 - **No backwards-compatibility hacks.** No renamed `_unused`, no `// removed: see issue X` comments. Delete it.

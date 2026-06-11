@@ -804,8 +804,8 @@ mod tests {
         let output = render_metrics(&state);
         assert!(output.contains("syva_up 1\n"));
         assert!(output.contains("syva_core_up 1\n"));
-        assert!(output.contains("syva_ebpf_expected_hooks 6\n"));
-        assert!(output.contains("syva_ebpf_attached_hooks 6\n"));
+        assert!(output.contains("syva_ebpf_expected_hooks 7\n"));
+        assert!(output.contains("syva_ebpf_attached_hooks 7\n"));
         assert!(output.contains("syva_zones_loaded 4\n"));
         assert!(output.contains("syva_containers_active 9\n"));
         assert!(output.contains("syva_security_status{status=\"healthy\"} 1"));
@@ -820,8 +820,8 @@ mod tests {
 
         assert_eq!(body["state"], "healthy");
         assert_eq!(body["ebpf_loaded"], true);
-        assert_eq!(body["expected_hooks"], 6);
-        assert_eq!(body["attached_hooks"], 6);
+        assert_eq!(body["expected_hooks"], 7);
+        assert_eq!(body["attached_hooks"], 7);
         assert_eq!(body["selftests"]["cgroup"], "passed");
         assert_eq!(body["selftests"]["inode"], "passed");
         assert_eq!(body["selftests"]["unix"], "passed");
@@ -965,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn render_metrics_represents_exactly_six_supported_hooks() {
+    fn render_metrics_represents_exactly_seven_supported_hooks() {
         let state = make_state(true, 0, 0);
         let output = render_metrics(&state);
 
@@ -973,7 +973,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("syva_ebpf_hook_attached{hook="))
             .count();
-        assert_eq!(hook_attached_series, 6);
+        assert_eq!(hook_attached_series, 7);
         for hook in crate::events::HOOK_NAMES {
             assert!(output.contains(&format!("syva_ebpf_hook_attached{{hook=\"{hook}\"}} 1")));
         }

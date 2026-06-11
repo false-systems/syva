@@ -56,6 +56,9 @@ enum Cli {
     /// Run the privileged audit-mode integration test: a cross-zone read is
     /// recorded as a would-deny decision but NOT blocked.
     VerifyAuditMode,
+    /// Run the privileged socket_connect egress test: an Isolated zone is
+    /// blocked from a non-loopback outbound connect but allowed loopback.
+    VerifySocketEgress,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -85,6 +88,7 @@ fn main() -> Result<()> {
         Cli::VerifyContainerIntegration => verify_container_integration(),
         Cli::VerifyK8sMembership => verify_k8s_membership(),
         Cli::VerifyAuditMode => verify_audit_mode(),
+        Cli::VerifySocketEgress => verify_socket_egress(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -363,10 +367,16 @@ fn check_release_docs() -> Result<()> {
             if in_fence {
                 continue;
             }
-            if lower.contains("7 hooks")
-                || lower.contains("7 lsm")
-                || lower.contains("seven hooks")
-                || lower.contains("seven lsm")
+            // v0.4 grew the hook set from six to seven (added socket_connect).
+            // Reject any stale count that is not seven.
+            if lower.contains("6 hooks")
+                || lower.contains("6 lsm")
+                || lower.contains("six hooks")
+                || lower.contains("six lsm")
+                || lower.contains("8 hooks")
+                || lower.contains("8 lsm")
+                || lower.contains("eight hooks")
+                || lower.contains("eight lsm")
             {
                 failures.push(format!("{file}:{} stale hook-count claim: {line}", idx + 1));
             }
@@ -603,6 +613,27 @@ fn verify_container_integration() -> Result<()> {
             "syva-core",
             "--test",
             "integration_container_file_open",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged socket_connect egress integration test: an Isolated zone
+/// workload is denied a non-loopback outbound connect (EPERM, deny_delta=1)
+/// while loopback is allowed.
+fn verify_socket_egress() -> Result<()> {
+    privileged_runtime_preflight("verify-socket-egress")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_socket_egress",
             "--",
             "--ignored",
             "--nocapture",
