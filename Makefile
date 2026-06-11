@@ -5,7 +5,7 @@ REPO_DIR := $(shell pwd)
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-socket-egress verify-cgroup-escape verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-cgroup-escape verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -86,11 +86,11 @@ verify-container-integration:
 verify-cgroup-escape:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-cgroup-escape
 
-# Privileged Linux / BPF-LSM only: proves an Isolated zone is blocked from a
-# non-loopback outbound connect (EPERM) while loopback is allowed.
-# Run as: sudo -E make verify-socket-egress
-verify-socket-egress:
-	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-socket-egress
+# Privileged Linux / BPF-LSM only: proves an Isolated zone is network-locked
+# (connect/sendmsg/bind to non-loopback denied) while a Bridged zone is open.
+# Run as: sudo -E make verify-network-lock
+verify-network-lock:
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-network-lock
 
 # Privileged Linux / BPF-LSM only: proves audit mode records a cross-zone
 # would-deny decision WITHOUT blocking the operation.

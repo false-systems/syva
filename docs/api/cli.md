@@ -55,10 +55,14 @@ Calls gRPC `RegisterZone`.
 ```sh
 syvactl zones register zone-a
 syvactl zones register zone-a --type privileged --format json
+syvactl zones register zone-a --network open
 ```
 
 Supported `--type` values are `standard`, `privileged`, and `isolated`. The
 server remains responsible for accepting or rejecting the requested type.
+
+`--network` is the per-zone lock/open switch: `locked` (default — loopback
+only), `open` (network allowed), or `host` (network plus host netns).
 
 ### syvactl zones remove
 

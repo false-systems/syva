@@ -71,7 +71,7 @@ container gate also needs a container runtime). All are `#[ignore]`d in normal
 `cargo test`:
 
 ```bash
-sudo -E make verify-runtime              # load + attach 7 hooks + self-tests
+sudo -E make verify-runtime              # load + attach 9 hooks + self-tests
 sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
 sudo -E make verify-container-integration # same denial against a real container
 sudo -E make verify-audit-mode           # audit mode records would-deny without blocking
@@ -93,7 +93,7 @@ the v0.2 contract. It scans tracked `*.md`/`*.rs`/`*.proto`/`*.toml`/`*.yaml`
 fences, rejects:
 
 ```text
-- stale hook counts: "6 hooks" / "six hooks" / "8 hooks"   (v0.4 has seven)
+- stale hook counts: "7 hooks" / "seven hooks" / "8 hooks"  (v0.4 has nine)
 - "syva_cgroup_attach"
 - "cgroup_attach_task" UNLESS nearby text marks it a known gap
   ("not a bpf-lsm hook", "out of v0.2 scope", "do not reintroduce", assert!)
@@ -133,7 +133,7 @@ thin local gRPC client. Keep `cargo run -p xtask -- check-api-docs` and
 
 ## Enforcement Model
 
-`syva-core` populates BPF maps; seven eBPF LSM programs (`syva-ebpf/src/`) read
+`syva-core` populates BPF maps; nine eBPF LSM programs (`syva-ebpf/src/`) read
 them on every relevant syscall and allow or deny:
 
 | Hook (LSM) | File | Blocks cross-zone |
@@ -144,7 +144,9 @@ them on every relevant syscall and allow or deny:
 | `ptrace_access_check` | `ptrace_guard.rs` | ptrace |
 | `task_kill` | `signal_guard.rs` | signals |
 | `unix_stream_connect` | `unix_guard.rs` | Unix socket connect |
-| `socket_connect` | `socket_guard.rs` | outbound TCP/UDP (egress lock) |
+| `socket_connect` | `socket_guard.rs` | outbound TCP / connected UDP |
+| `socket_sendmsg` | `socket_guard.rs` | outbound UDP datagrams (sendto) |
+| `socket_bind` | `socket_guard.rs` | binding a non-loopback listener |
 
 Every hook follows one decision shape: resolve the caller's zone from
 `bpf_get_current_cgroup_id()` → `ZONE_MEMBERSHIP`; resolve the target's zone
@@ -155,13 +157,15 @@ target not in any zone is invisible to enforcement (allowed). On a
 `bpf_probe_read` failure the hook **fails open** and increments an error
 counter.
 
-`socket_connect` is the one hook with no target zone: it is an **egress lock**.
-A non-global zoned caller may not initiate outbound non-loopback
-AF_INET/AF_INET6 connects unless its zone policy carries
-`POLICY_FLAG_ALLOW_EGRESS` (set for every `NetworkMode` except `Isolated`).
-Loopback is always allowed; AF_UNIX is left to `unix_stream_connect`. Because
-`Isolated` is the default network mode, default zones deny egress — roll this
-out behind `--mode audit` first.
+`socket_connect` / `socket_sendmsg` / `socket_bind` are the **network lock** —
+the three hooks with no target zone. A non-global zoned caller whose zone lacks
+`POLICY_FLAG_ALLOW_NETWORK` (set for every `NetworkMode` except `Isolated`) is
+network-isolated: non-loopback AF_INET/AF_INET6 connect, datagram send, and
+bind are denied, so the zone reaches loopback only. AF_UNIX stays with
+`unix_stream_connect`. Because `Isolated` is the default network mode, default
+zones are network-locked; the lock/open switch is the zone's `network_mode`
+(proto `NetworkMode`, CRD `network.mode`, `syvactl zones register --network`).
+Roll it out behind `--mode audit` first.
 
 `syva-core --mode audit` switches the global `ENFORCEMENT_MODE` map to
 observe-only: deny decisions are still counted (per-hook `deny` counter) and
@@ -176,7 +180,7 @@ Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
 (ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps
 used only to validate offset chains at startup.
 
-Separate from the seven LSM hooks, a best-effort fentry program
+Separate from the nine LSM hooks, a best-effort fentry program
 (`escape_guard.rs`, attached to `cgroup_attach_task`) detects cgroup-zone
 escapes. It is not an LSM hook, does not count toward `expected_hooks`, and
 cannot block — detection only. Kernel struct offsets are resolved from BTF at startup (`btf.rs`) and
@@ -237,12 +241,12 @@ The health server (`:9091`, configurable via `--health-port`) serves
 `docs/operations/monitoring.md` for scrape, alert, and dashboard details.
 Security status is:
 
-- `healthy`: eBPF loaded, all seven supported hooks attached, mandatory self-tests
+- `healthy`: eBPF loaded, all nine supported hooks attached, mandatory self-tests
   passed, BPF counter reads are succeeding, and no active degradation is known.
 - `degraded`: Syva is running, but BPF map errors, hook error/lost deltas,
   failed counter reads, or membership reconciliation problems reduce
   enforcement confidence.
-- `unsafe`: eBPF is not loaded, fewer than seven hooks are attached, or mandatory
+- `unsafe`: eBPF is not loaded, fewer than nine hooks are attached, or mandatory
   startup self-tests failed.
 
 Fail-open hook errors are degraded security, not harmless warnings.
@@ -252,7 +256,7 @@ Fail-open hook errors are degraded security, not harmless warnings.
 - Full BPF load/attach/runtime verification requires a privileged Linux host.
 - Lima covers Linux build/test/eBPF object compilation from macOS, not guaranteed
   runtime attachment.
-- Syva supports seven BPF-LSM hooks. Cgroup movement / zone escape cannot be
+- Syva supports nine BPF-LSM hooks. Cgroup movement / zone escape cannot be
   **prevented** through BPF-LSM because `cgroup_attach_task` is not a BPF-LSM
   hook on supported kernels. It is instead **detected**: a best-effort fentry on
   `cgroup_attach_task` reads a migrating task's source cgroup (before the move)

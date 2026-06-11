@@ -226,10 +226,21 @@ message ZonePolicy {
 
     // Zone type
     ZoneType zone_type = 4;
+
+    // Network mode — the per-zone lock/open switch. ISOLATED (default) is
+    // network-locked: the zone reaches loopback only (socket connect/sendmsg/
+    // bind to non-loopback are denied). BRIDGED / HOST open network access.
+    NetworkMode network_mode = 5;
 }
 
 enum ZoneType {
     ZONE_TYPE_STANDARD   = 0;
     ZONE_TYPE_PRIVILEGED = 1;
     ZONE_TYPE_ISOLATED   = 2;
+}
+
+enum NetworkMode {
+    NETWORK_MODE_ISOLATED = 0; // locked: loopback only
+    NETWORK_MODE_BRIDGED  = 1; // open: network allowed
+    NETWORK_MODE_HOST     = 2; // open + host network namespace
 }

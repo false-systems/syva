@@ -783,6 +783,7 @@ fn proto_policy_to_core_input(
         allowed_zones: proto_policy.allowed_zones,
         allow_ptrace: proto_policy.allow_ptrace,
         zone_type: parse_proto_zone_type(proto_policy.zone_type)?,
+        network_mode: parse_proto_network_mode(proto_policy.network_mode)?,
     })
 }
 
@@ -793,6 +794,19 @@ fn parse_proto_zone_type(value: i32) -> Result<ZoneType, Status> {
         1 => Ok(ZoneType::Privileged),
         other => Err(Status::invalid_argument(format!(
             "unsupported zone_type: {other}"
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_proto_network_mode(value: i32) -> Result<crate::types::NetworkMode, Status> {
+    use crate::types::NetworkMode;
+    match value {
+        0 => Ok(NetworkMode::Isolated), // default: network-locked
+        1 => Ok(NetworkMode::Bridged),
+        2 => Ok(NetworkMode::Host),
+        other => Err(Status::invalid_argument(format!(
+            "unsupported network_mode: {other}"
         ))),
     }
 }

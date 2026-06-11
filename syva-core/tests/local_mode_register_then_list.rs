@@ -26,6 +26,7 @@ async fn local_mode_register_then_list() -> anyhow::Result<()> {
                 allowed_zones: Vec::new(),
                 allow_ptrace: false,
                 zone_type: 0,
+                network_mode: 0,
             }),
         })
         .await?;

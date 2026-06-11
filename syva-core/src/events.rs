@@ -6,7 +6,7 @@ use aya::maps::{MapData, RingBuf};
 use syva_ebpf_common::{EnforcementEvent, DECISION_ALLOW, DECISION_DENY, DECISION_WOULD_DENY};
 use tokio_util::sync::CancellationToken;
 
-pub const HOOK_NAMES: [&str; 7] = [
+pub const HOOK_NAMES: [&str; 9] = [
     "file_open",
     "bprm_check_security",
     "ptrace_access_check",
@@ -14,6 +14,8 @@ pub const HOOK_NAMES: [&str; 7] = [
     "mmap_file",
     "unix_stream_connect",
     "socket_connect",
+    "socket_sendmsg",
+    "socket_bind",
 ];
 
 /// Human label for an EnforcementEvent decision byte. WOULD_DENY is emitted
@@ -30,7 +32,7 @@ pub fn decision_label(decision: u8) -> &'static str {
 }
 
 /// Human label for an EnforcementEvent hook byte, including the cgroup-escape
-/// sentinel that intentionally sits outside the seven LSM hook indices.
+/// sentinel that intentionally sits outside the nine LSM hook indices.
 pub fn hook_label(hook: u8) -> &'static str {
     if hook == syva_ebpf_common::HOOK_CGROUP_ESCAPE {
         return "cgroup_escape";
@@ -115,9 +117,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_names_count_is_seven() {
-        assert_eq!(HOOK_NAMES.len(), 7);
+    fn hook_names_count_is_nine() {
+        assert_eq!(HOOK_NAMES.len(), 9);
         assert!(HOOK_NAMES.contains(&"socket_connect"));
+        assert!(HOOK_NAMES.contains(&"socket_sendmsg"));
+        assert!(HOOK_NAMES.contains(&"socket_bind"));
         assert!(!HOOK_NAMES.contains(&"cgroup_attach_task"));
     }
 

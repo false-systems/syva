@@ -1,5 +1,5 @@
 use crate::crd::{SyvaZonePolicy, ZoneTypeSpec};
-use syva_core_client::syva_core::{RegisterZoneRequest, ZonePolicy};
+use syva_core_client::syva_core::{NetworkMode, RegisterZoneRequest, ZonePolicy};
 
 /// Translate a SyvaZonePolicy CRD into the node-local core API.
 ///
@@ -31,8 +31,23 @@ pub fn spec_to_core_register(name: &str, crd: &SyvaZonePolicy) -> RegisterZoneRe
                 ZoneTypeSpec::Privileged => 1,
                 ZoneTypeSpec::Standard | ZoneTypeSpec::Isolated => 0,
             },
+            network_mode: network_mode_from_spec(spec) as i32,
         }),
     }
+}
+
+/// Resolve the proto network mode from the CRD. An explicit `network.mode`
+/// wins; otherwise a `ZoneTypeSpec::Isolated` zone is network-locked, and the
+/// default is Isolated (locked) — opening network access is always explicit.
+fn network_mode_from_spec(spec: &crate::crd::SyvaZonePolicySpec) -> NetworkMode {
+    if let Some(mode) = spec.network.as_ref().and_then(|n| n.mode.as_deref()) {
+        return match mode.to_ascii_lowercase().as_str() {
+            "bridged" => NetworkMode::Bridged,
+            "host" => NetworkMode::Host,
+            _ => NetworkMode::Isolated,
+        };
+    }
+    NetworkMode::Isolated
 }
 
 #[cfg(test)]
@@ -55,6 +70,7 @@ mod tests {
             }),
             network: Some(NetworkSpec {
                 allowed_zones: vec!["db".into()],
+                mode: None,
             }),
             process: Some(ProcessSpec { allow_ptrace: true }),
             selector: Some(SelectorSpec {

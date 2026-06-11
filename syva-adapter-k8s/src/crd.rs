@@ -38,6 +38,10 @@ pub struct FilesystemSpec {
 pub struct NetworkSpec {
     #[serde(default)]
     pub allowed_zones: Vec<String>,
+    /// Per-zone network lock/open switch: "isolated" (default, loopback only),
+    /// "bridged" (network allowed), or "host" (network + host netns).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

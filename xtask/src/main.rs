@@ -56,9 +56,10 @@ enum Cli {
     /// Run the privileged audit-mode integration test: a cross-zone read is
     /// recorded as a would-deny decision but NOT blocked.
     VerifyAuditMode,
-    /// Run the privileged socket_connect egress test: an Isolated zone is
-    /// blocked from a non-loopback outbound connect but allowed loopback.
-    VerifySocketEgress,
+    /// Run the privileged network-lock test: an Isolated zone is denied
+    /// non-loopback connect/sendmsg/bind (loopback only) while a Bridged zone
+    /// is allowed out.
+    VerifyNetworkLock,
     /// Run the privileged cgroup-escape detection test: a zoned task migrating
     /// out of its zone is detected (counter + degraded health), not prevented.
     VerifyCgroupEscape,
@@ -91,7 +92,7 @@ fn main() -> Result<()> {
         Cli::VerifyContainerIntegration => verify_container_integration(),
         Cli::VerifyK8sMembership => verify_k8s_membership(),
         Cli::VerifyAuditMode => verify_audit_mode(),
-        Cli::VerifySocketEgress => verify_socket_egress(),
+        Cli::VerifyNetworkLock => verify_network_lock(),
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
@@ -371,16 +372,18 @@ fn check_release_docs() -> Result<()> {
             if in_fence {
                 continue;
             }
-            // v0.4 grew the hook set from six to seven (added socket_connect).
-            // Reject any stale count that is not seven.
-            if lower.contains("6 hooks")
-                || lower.contains("6 lsm")
-                || lower.contains("six hooks")
-                || lower.contains("six lsm")
+            // v0.4 grew the hook set to nine (added socket connect/sendmsg/bind).
+            // Reject any stale count that is not nine.
+            if lower.contains("7 hooks")
+                || lower.contains("7 lsm")
+                || lower.contains("seven hooks")
+                || lower.contains("seven lsm")
                 || lower.contains("8 hooks")
                 || lower.contains("8 lsm")
                 || lower.contains("eight hooks")
                 || lower.contains("eight lsm")
+                || lower.contains("10 hooks")
+                || lower.contains("ten hooks")
             {
                 failures.push(format!("{file}:{} stale hook-count claim: {line}", idx + 1));
             }
@@ -634,11 +637,11 @@ fn verify_container_integration() -> Result<()> {
     )
 }
 
-/// Run the privileged socket_connect egress integration test: an Isolated zone
-/// workload is denied a non-loopback outbound connect (EPERM, deny_delta=1)
-/// while loopback is allowed.
-fn verify_socket_egress() -> Result<()> {
-    privileged_runtime_preflight("verify-socket-egress")?;
+/// Run the privileged network-lock integration test: an Isolated zone is denied
+/// non-loopback connect/sendmsg/bind (EPERM, per-hook deny_delta=1) while a
+/// Bridged zone is allowed out.
+fn verify_network_lock() -> Result<()> {
+    privileged_runtime_preflight("verify-network-lock")?;
     build_ebpf(true)?;
     run_root_command(
         "cargo",
@@ -647,7 +650,7 @@ fn verify_socket_egress() -> Result<()> {
             "-p",
             "syva-core",
             "--test",
-            "integration_socket_egress",
+            "integration_network_lock",
             "--",
             "--ignored",
             "--nocapture",

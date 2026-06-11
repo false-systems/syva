@@ -57,6 +57,14 @@ const LSM_PROGRAMS: &[LsmProgram] = &[
         program_name: "syva_socket_connect",
         hook_name: "socket_connect",
     },
+    LsmProgram {
+        program_name: "syva_socket_sendmsg",
+        hook_name: "socket_sendmsg",
+    },
+    LsmProgram {
+        program_name: "syva_socket_bind",
+        hook_name: "socket_bind",
+    },
 ];
 
 const MAP_NAMES: &[&str] = &[
@@ -349,14 +357,15 @@ impl EnforceEbpf {
             u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
         });
         let allow_host_net = policy.network.mode == NetworkMode::Host;
-        // Egress is permitted for any mode other than Isolated. Isolated zones
-        // (the default) deny outbound non-loopback connects via socket_connect.
-        let allow_egress = policy.network.mode != NetworkMode::Isolated;
+        // Network is permitted for any mode other than Isolated. An Isolated
+        // zone (the default) is network-isolated: socket_connect / sendmsg /
+        // bind deny its non-loopback operations (loopback only).
+        let allow_network = policy.network.mode != NetworkMode::Isolated;
         let kernel_policy = ZonePolicyKernel::from_caps(
             &policy.capabilities.allowed,
             allow_ptrace,
             allow_host_net,
-            allow_egress,
+            allow_network,
         );
 
         let mut map = Array::<_, ZonePolicyKernel>::try_from(
@@ -998,11 +1007,14 @@ mod tests {
     }
 
     #[test]
-    fn supported_lsm_hook_count_is_seven() {
-        assert_eq!(LSM_PROGRAMS.len(), 7);
+    fn supported_lsm_hook_count_is_nine() {
+        assert_eq!(LSM_PROGRAMS.len(), 9);
         assert!(LSM_PROGRAMS
             .iter()
-            .any(|program| program.hook_name == "socket_connect"));
+            .any(|program| program.hook_name == "socket_sendmsg"));
+        assert!(LSM_PROGRAMS
+            .iter()
+            .any(|program| program.hook_name == "socket_bind"));
         assert!(!LSM_PROGRAMS
             .iter()
             .any(|program| program.hook_name == "cgroup_attach_task"));

@@ -47,6 +47,11 @@ Request:
 - `policy.allow_ptrace`: sets ptrace policy capability.
 - `policy.zone_type`: standard or privileged. Isolated currently maps to the
   standard local enforcement type.
+- `policy.network_mode`: the per-zone network lock/open switch (`NetworkMode`).
+  `NETWORK_MODE_ISOLATED` (default, `0`) is network-locked — the zone reaches
+  loopback only (`socket_connect`/`socket_sendmsg`/`socket_bind` deny
+  non-loopback). `NETWORK_MODE_BRIDGED` / `NETWORK_MODE_HOST` open network
+  access.
 
 Response:
 

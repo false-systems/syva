@@ -37,6 +37,7 @@ fn empty_policy() -> ZonePolicy {
         allowed_zones: Vec::new(),
         allow_ptrace: false,
         zone_type: 0,
+        network_mode: 0,
     }
 }
 

@@ -439,6 +439,16 @@ pub fn syva_socket_connect(ctx: LsmContext) -> i32 {
     socket_guard::socket_connect(&ctx)
 }
 
+#[lsm(hook = "socket_sendmsg")]
+pub fn syva_socket_sendmsg(ctx: LsmContext) -> i32 {
+    socket_guard::socket_sendmsg(&ctx)
+}
+
+#[lsm(hook = "socket_bind")]
+pub fn syva_socket_bind(ctx: LsmContext) -> i32 {
+    socket_guard::socket_bind(&ctx)
+}
+
 // Detection only: cgroup_attach_task is not a BPF-LSM hook on supported
 // kernels, so this fentry cannot block the migration — it runs at function
 // entry (before the task migrates, source cgroup still readable), records the
