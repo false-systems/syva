@@ -45,14 +45,14 @@ The health response is JSON:
 
 States:
 
-- `healthy`: eBPF loaded, all six supported hooks attached, mandatory
+- `healthy`: eBPF loaded, all seven supported hooks attached, mandatory
   self-tests passed, BPF counter reads are succeeding, and no active degraded
   reasons are known.
 - `degraded`: `syva-core` is running but enforcement confidence is reduced.
   Examples include BPF map read/update/delete errors, hook error/lost deltas,
   stale/conflicting membership updates, or failed counter reads.
 - `unsafe`: Syva cannot claim enforcement is active. Examples include eBPF
-  load failure, fewer than six attached hooks, or failed/pending mandatory
+  load failure, fewer than seven attached hooks, or failed/pending mandatory
   self-tests.
 
 `syva_enforcement_mode{mode="enforce|audit"}` reports the global mode as

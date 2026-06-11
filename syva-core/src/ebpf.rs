@@ -53,6 +53,10 @@ const LSM_PROGRAMS: &[LsmProgram] = &[
         program_name: "syva_unix_connect",
         hook_name: "unix_stream_connect",
     },
+    LsmProgram {
+        program_name: "syva_socket_connect",
+        hook_name: "socket_connect",
+    },
 ];
 
 const MAP_NAMES: &[&str] = &[
@@ -281,8 +285,15 @@ impl EnforceEbpf {
             u == "CAP_SYS_PTRACE" || u == "SYS_PTRACE"
         });
         let allow_host_net = policy.network.mode == NetworkMode::Host;
-        let kernel_policy =
-            ZonePolicyKernel::from_caps(&policy.capabilities.allowed, allow_ptrace, allow_host_net);
+        // Egress is permitted for any mode other than Isolated. Isolated zones
+        // (the default) deny outbound non-loopback connects via socket_connect.
+        let allow_egress = policy.network.mode != NetworkMode::Isolated;
+        let kernel_policy = ZonePolicyKernel::from_caps(
+            &policy.capabilities.allowed,
+            allow_ptrace,
+            allow_host_net,
+            allow_egress,
+        );
 
         let mut map = Array::<_, ZonePolicyKernel>::try_from(
             self.bpf
@@ -912,8 +923,11 @@ mod tests {
     }
 
     #[test]
-    fn supported_v02_lsm_hook_count_is_six() {
-        assert_eq!(LSM_PROGRAMS.len(), 6);
+    fn supported_lsm_hook_count_is_seven() {
+        assert_eq!(LSM_PROGRAMS.len(), 7);
+        assert!(LSM_PROGRAMS
+            .iter()
+            .any(|program| program.hook_name == "socket_connect"));
         assert!(!LSM_PROGRAMS
             .iter()
             .any(|program| program.hook_name == "cgroup_attach_task"));

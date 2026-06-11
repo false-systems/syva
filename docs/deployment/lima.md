@@ -59,7 +59,7 @@ core PID, health JSON, attached hook count (6), and self-test results.
 ## What this proves
 
 - Syvä can be **deployed as a node-local agent** (build → install → start → healthy).
-- The release eBPF object loads and the **six BPF-LSM hooks attach**
+- The release eBPF object loads and the **seven BPF-LSM hooks attach**
   (`file_open`, `bprm_check_security`, `ptrace_access_check`, `task_kill`,
   `mmap_file`, `unix_stream_connect`).
 - The cgroup, inode, and Unix **self-tests pass**.
@@ -90,7 +90,7 @@ processes — and is not workload-specific.
 - Kubernetes adapter integration is not exercised end to end by this Lima
   deployment proof. Use `sudo -E make verify-k8s-membership` in a privileged
   Linux/Kubernetes node to prove annotated pod membership and enforcement.
-- All six hooks end to end — only `file_open` is proven with a container.
+- All seven hooks end to end — only `file_open` is proven with a container.
 - cgroup-movement / zone-escape protection — out of v0.2 scope (not a BPF-LSM hook).
 - Production hardening or multi-node deployment.
 
