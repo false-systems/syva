@@ -173,8 +173,13 @@ the `verify-audit-mode` gate.
 Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
-(ring buffer), plus `SELF_TEST*` maps used only to validate offset chains at
-startup. Kernel struct offsets are resolved from BTF at startup (`btf.rs`) and
+(ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps
+used only to validate offset chains at startup.
+
+Separate from the seven LSM hooks, a best-effort fentry program
+(`escape_guard.rs`, attached to `cgroup_attach_task`) detects cgroup-zone
+escapes. It is not an LSM hook, does not count toward `expected_hooks`, and
+cannot block — detection only. Kernel struct offsets are resolved from BTF at startup (`btf.rs`) and
 patched into eBPF globals — no offsets are hardcoded.
 
 ## Key Files
@@ -247,10 +252,14 @@ Fail-open hook errors are degraded security, not harmless warnings.
 - Full BPF load/attach/runtime verification requires a privileged Linux host.
 - Lima covers Linux build/test/eBPF object compilation from macOS, not guaranteed
   runtime attachment.
-- Syva supports seven BPF-LSM hooks. Cgroup movement / zone escape
-  protection is not enforced through BPF-LSM because `cgroup_attach_task` is not
-  a BPF-LSM hook on supported kernels; implement that follow-up with a valid
-  cgroup BPF mechanism or another kernel-supported hook.
+- Syva supports seven BPF-LSM hooks. Cgroup movement / zone escape cannot be
+  **prevented** through BPF-LSM because `cgroup_attach_task` is not a BPF-LSM
+  hook on supported kernels. It is instead **detected**: a best-effort fentry on
+  `cgroup_attach_task` reads a migrating task's source cgroup (before the move)
+  and records an escape when a zoned task leaves for an unzoned/other-zone
+  cgroup (`syva_cgroup_escape_detected_total`, `WOULD`-style `ESCAPE` event,
+  degraded health). The migration itself is not blocked. Proven by
+  `verify-cgroup-escape`.
 - `/proc` and `/sys` coverage remains incomplete.
 - `INODE_ZONE_MAP` is keyed by inode only; `(dev, ino)` is still needed.
 - Kubernetes adapter status/finalizers/leader election are not implemented.

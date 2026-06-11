@@ -59,6 +59,9 @@ enum Cli {
     /// Run the privileged socket_connect egress test: an Isolated zone is
     /// blocked from a non-loopback outbound connect but allowed loopback.
     VerifySocketEgress,
+    /// Run the privileged cgroup-escape detection test: a zoned task migrating
+    /// out of its zone is detected (counter + degraded health), not prevented.
+    VerifyCgroupEscape,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -89,6 +92,7 @@ fn main() -> Result<()> {
         Cli::VerifyK8sMembership => verify_k8s_membership(),
         Cli::VerifyAuditMode => verify_audit_mode(),
         Cli::VerifySocketEgress => verify_socket_egress(),
+        Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -398,6 +402,16 @@ fn check_release_docs() -> Result<()> {
                     "does not attach",
                     "do not reintroduce",
                     "assert!",
+                    // The v0.4 escape detector references the function by name.
+                    // These framings all assert detection, never prevention —
+                    // the honest form of the known gap.
+                    "detection only",
+                    "detector",
+                    "detected",
+                    "not prevented",
+                    "cannot prevent",
+                    "cannot block",
+                    "best-effort",
                 ]
                 .iter()
                 .any(|phrase| window.contains(phrase));
@@ -634,6 +648,27 @@ fn verify_socket_egress() -> Result<()> {
             "syva-core",
             "--test",
             "integration_socket_egress",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged cgroup-escape detection test: a zoned workload moved out
+/// of its cgroup is detected (counter + degraded health). Detection only — the
+/// migration is not prevented (no BPF-LSM hook can block it).
+fn verify_cgroup_escape() -> Result<()> {
+    privileged_runtime_preflight("verify-cgroup-escape")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_cgroup_escape",
             "--",
             "--ignored",
             "--nocapture",

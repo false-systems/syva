@@ -145,6 +145,14 @@ pub const DECISION_DENY: u8 = 1;
 /// Audit mode converted a deny decision into an allowed-but-recorded
 /// operation. The per-hook `deny` counter still counts it as a deny decision.
 pub const DECISION_WOULD_DENY: u8 = 2;
+/// A zoned task migrated out of its cgroup zone. Detection only — BPF-LSM
+/// cannot prevent cgroup migration on supported kernels, so this is recorded
+/// (event + counter + degraded health) but the move is not blocked.
+pub const DECISION_ESCAPE: u8 = 3;
+
+/// Sentinel `hook` value for cgroup-escape events. Intentionally outside the
+/// seven LSM hook indices so escape detection never inflates the hook set.
+pub const HOOK_CGROUP_ESCAPE: u8 = 0xFF;
 
 // ENFORCEMENT_MODE map values (single-entry array, index 0).
 /// Deny decisions return -1 (surfaced to userspace as EPERM).

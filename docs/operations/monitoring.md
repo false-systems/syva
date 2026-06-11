@@ -172,9 +172,13 @@ file paths.
 - v0.2 proves `file_open` end to end with process and container workloads. The
   other supported hooks load, attach, and self-test, but are not all
   workload-proven yet.
-- Cgroup movement / zone escape protection is out of scope for v0.2 because the
-  removed cgroup-movement path is not a supported BPF-LSM hook on mainline
-  kernels.
+- Cgroup movement / zone escape cannot be **prevented** because there is no
+  BPF-LSM hook for it on mainline kernels. It is **detected** by a best-effort
+  fentry on `cgroup_attach_task`: `syva_cgroup_escape_detected_total` counts
+  zoned tasks observed leaving their zone, `syva_escape_detector_attached`
+  reports whether detection is active, and a detected escape degrades security
+  status. Alert on `syva_cgroup_escape_detected_total > 0` and on
+  `syva_escape_detector_attached == 0` where detection is expected.
 - `syva-k8s` exposes membership metrics separately:
   `syva_k8s_membership_attach_total{result}`,
   `syva_k8s_membership_detach_total{result}`,

@@ -69,6 +69,9 @@ asserts a real `file_open deny_delta=1`:
 - `verify-socket-egress` — an Isolated-network zone is blocked from a
   non-loopback outbound connect with `EPERM` (`socket_connect`), while loopback
   is allowed.
+- `verify-cgroup-escape` — a zoned task migrating out of its cgroup is
+  **detected** (counter + degraded health). Detection only — BPF-LSM cannot
+  block cgroup movement on supported kernels.
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -264,6 +267,7 @@ sudo -E make verify-container-integration
 sudo -E make verify-k8s-membership
 sudo -E make verify-audit-mode
 sudo -E make verify-socket-egress
+sudo -E make verify-cgroup-escape
 ```
 
 ## Run it directly

@@ -17,14 +17,25 @@ pub const HOOK_NAMES: [&str; 7] = [
 ];
 
 /// Human label for an EnforcementEvent decision byte. WOULD_DENY is emitted
-/// in audit mode: the violation was recorded but the operation proceeded.
+/// in audit mode (violation recorded, operation proceeded); ESCAPE is emitted
+/// by the cgroup-escape detector (a zoned task left its zone, not prevented).
 pub fn decision_label(decision: u8) -> &'static str {
     match decision {
         DECISION_DENY => "DENY",
         DECISION_ALLOW => "ALLOW",
         DECISION_WOULD_DENY => "WOULD_DENY",
+        syva_ebpf_common::DECISION_ESCAPE => "ESCAPE",
         _ => "UNKNOWN",
     }
+}
+
+/// Human label for an EnforcementEvent hook byte, including the cgroup-escape
+/// sentinel that intentionally sits outside the seven LSM hook indices.
+pub fn hook_label(hook: u8) -> &'static str {
+    if hook == syva_ebpf_common::HOOK_CGROUP_ESCAPE {
+        return "cgroup_escape";
+    }
+    HOOK_NAMES.get(hook as usize).copied().unwrap_or("unknown")
 }
 
 /// Maximum events to drain per tick. Prevents the blocking task from
@@ -73,7 +84,7 @@ pub fn spawn_event_reader(ring_buf: RingBuf<MapData>, cancel: CancellationToken)
                     }
 
                     for event in &events {
-                        let hook = HOOK_NAMES.get(event.hook as usize).unwrap_or(&"unknown");
+                        let hook = hook_label(event.hook);
                         let decision = decision_label(event.decision);
                         if event.caller_zone == 0 {
                             tracing::debug!(
@@ -122,6 +133,18 @@ mod tests {
         assert_eq!(decision_label(DECISION_DENY), "DENY");
         assert_eq!(decision_label(DECISION_ALLOW), "ALLOW");
         assert_eq!(decision_label(DECISION_WOULD_DENY), "WOULD_DENY");
-        assert_eq!(decision_label(255), "UNKNOWN");
+        assert_eq!(decision_label(syva_ebpf_common::DECISION_ESCAPE), "ESCAPE");
+        assert_eq!(decision_label(254), "UNKNOWN");
+    }
+
+    #[test]
+    fn hook_label_maps_escape_sentinel_outside_the_seven_hooks() {
+        assert_eq!(hook_label(0), "file_open");
+        assert_eq!(hook_label(6), "socket_connect");
+        assert_eq!(
+            hook_label(syva_ebpf_common::HOOK_CGROUP_ESCAPE),
+            "cgroup_escape"
+        );
+        assert_eq!(hook_label(50), "unknown");
     }
 }

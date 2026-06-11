@@ -205,6 +205,29 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     })?;
     health_state.write().await.mark_attached(attached_hooks);
 
+    // Best-effort: attach the cgroup-escape detector. Detection only — failure
+    // never blocks enforcement; it just leaves escape detection off.
+    match mgr.attach_escape_detector() {
+        Ok(true) => health_state.write().await.set_escape_detector(true),
+        Ok(false) => {
+            health_state.write().await.set_escape_detector(false);
+            tracing::warn!(
+                event = "syva.escape.unavailable",
+                component = "syva-core",
+                "cgroup-escape detection is OFF (fentry unavailable); enforcement unaffected"
+            );
+        }
+        Err(error) => {
+            health_state.write().await.set_escape_detector(false);
+            tracing::warn!(
+                event = "syva.escape.attach_failed",
+                component = "syva-core",
+                %error,
+                "cgroup-escape detector failed to attach; detection OFF, enforcement unaffected"
+            );
+        }
+    }
+
     // Validate kernel struct offsets via self-tests.
     if let Err(error) = mgr.verify_self_test().await {
         health_state
@@ -341,6 +364,12 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
                                 });
                             }
                             monitor_health.write().await.update_hook_counters(hook_snapshot);
+
+                            // Snapshot detected cgroup escapes alongside hook
+                            // counters. A rising count marks active degradation.
+                            if let Ok(escapes) = ebpf.read_escape_count() {
+                                monitor_health.write().await.set_cgroup_escapes(escapes);
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -673,13 +702,16 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
                     out
                 });
                 for event in &drained {
-                    let hook = events::HOOK_NAMES.get(event.hook as usize).copied().unwrap_or("unknown");
+                    let hook = events::hook_label(event.hook);
                     let decision = match event.decision {
                         syva_ebpf_common::DECISION_DENY => "deny",
                         syva_ebpf_common::DECISION_ALLOW => "allow",
                         // Audit mode: the violation was recorded but the
                         // operation proceeded — no EPERM was returned.
                         syva_ebpf_common::DECISION_WOULD_DENY => "would_deny",
+                        // Detection only: a zoned task left its zone; the
+                        // migration was observed, not prevented.
+                        syva_ebpf_common::DECISION_ESCAPE => "escape",
                         _ => "unknown",
                     };
 
@@ -688,6 +720,7 @@ async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
                             "event": match decision {
                                 "deny" => "syva.enforcement.denied",
                                 "would_deny" => "syva.enforcement.would_deny",
+                                "escape" => "syva.cgroup.escape",
                                 _ => "syva.enforcement.observed",
                             },
                             "component": "syva-core",
