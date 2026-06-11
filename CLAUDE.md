@@ -74,9 +74,10 @@ container gate also needs a container runtime). All are `#[ignore]`d in normal
 sudo -E make verify-runtime              # load + attach 6 hooks + self-tests
 sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
 sudo -E make verify-container-integration # same denial against a real container
+sudo -E make verify-audit-mode           # audit mode records would-deny without blocking
 ```
 
-The three gates above each start their own core. To verify a core that is
+The gates above each start their own core. To verify a core that is
 already running, use `make verify-deployment` (needs `SYVA_SOCKET`, default
 `/run/syva/syva-core.sock`, plus a container runtime). The single-node Lima
 deployment lifecycle is `make lima-bootstrap` → `lima-deploy` →
@@ -153,7 +154,15 @@ target not in any zone is invisible to enforcement (allowed). On a
 `bpf_probe_read` failure the hook **fails open** and increments an error
 counter.
 
+`syva-core --mode audit` switches the global `ENFORCEMENT_MODE` map to
+observe-only: deny decisions are still counted (per-hook `deny` counter) and
+emitted as `WOULD_DENY` events, but the hooks return 0 so the operation
+proceeds. The default is enforce; audit is exposed via `/healthz`
+(`enforcement_mode`) and the `syva_enforcement_mode` metric and is proven by
+the `verify-audit-mode` gate.
+
 Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
+`ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
 (ring buffer), plus `SELF_TEST*` maps used only to validate offset chains at
 startup. Kernel struct offsets are resolved from BTF at startup (`btf.rs`) and

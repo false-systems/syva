@@ -256,6 +256,22 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Write the global enforcement mode into the ENFORCEMENT_MODE map.
+    /// Called once at startup, before the hooks attach. In audit mode the
+    /// hooks record would-deny decisions (counter + event) without blocking.
+    pub fn set_enforcement_mode(&mut self, audit: bool) -> anyhow::Result<()> {
+        use aya::maps::Array;
+        use syva_ebpf_common::{MODE_AUDIT, MODE_ENFORCE};
+
+        let mut map = Array::<_, u32>::try_from(
+            self.bpf
+                .map_mut("ENFORCEMENT_MODE")
+                .ok_or_else(|| anyhow::anyhow!("ENFORCEMENT_MODE map not found"))?,
+        )?;
+        map.set(0, if audit { MODE_AUDIT } else { MODE_ENFORCE }, 0)?;
+        Ok(())
+    }
+
     /// Set enforcement policy for a zone.
     pub fn set_zone_policy(&mut self, zone_id: u32, policy: &ZonePolicy) -> anyhow::Result<()> {
         use aya::maps::Array;

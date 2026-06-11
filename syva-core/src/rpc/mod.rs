@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use syva_ebpf_common::{EnforcementEvent, DECISION_DENY};
+use syva_ebpf_common::{EnforcementEvent, DECISION_DENY, DECISION_WOULD_DENY};
 use syva_proto::syva_core::syva_core_server::SyvaCore;
 use syva_proto::syva_core::{
     AllowCommRequest, AllowCommResponse, AttachContainerRequest, AttachContainerResponse, CommPair,
@@ -739,7 +739,11 @@ impl SyvaCore for SyvaCoreService {
 
                 let had_events = !events.is_empty();
                 for event in events {
-                    if event.decision != DECISION_DENY {
+                    // Audit-mode would-deny events are deny DECISIONS and
+                    // must reach watchers; the operation itself proceeded.
+                    // A per-event decision label on DenyEvent is part of the
+                    // structured-reason proto follow-up (issue #67).
+                    if !matches!(event.decision, DECISION_DENY | DECISION_WOULD_DENY) {
                         continue;
                     }
                     let deny_event = DenyEvent {

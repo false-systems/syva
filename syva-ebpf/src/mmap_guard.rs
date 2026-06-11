@@ -1,7 +1,7 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    count_decision, emit_deny_event, is_cross_zone_allowed, lookup_caller_zone, read_file_ino,
+    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone, read_file_ino,
     INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_MMAP_FILE, PROG_MMAP_FILE, ZONE_FLAG_GLOBAL};
@@ -10,12 +10,7 @@ use syva_ebpf_common::{HOOK_MMAP_FILE, PROG_MMAP_FILE, ZONE_FLAG_GLOBAL};
 const PROT_EXEC: u64 = 0x4;
 
 pub fn mmap_file(ctx: &LsmContext) -> i32 {
-    let (ret, is_error) = match try_mmap_file(ctx) {
-        Ok(ret) => (ret, false),
-        Err(_) => (0, true),
-    };
-    count_decision(PROG_MMAP_FILE, ret == 0, is_error);
-    ret
+    finish_decision(PROG_MMAP_FILE, try_mmap_file(ctx))
 }
 
 /// LSM hook: security_mmap_file(struct file *file, unsigned long reqprot,

@@ -1,20 +1,14 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    count_decision, emit_deny_event, is_cross_zone_allowed, lookup_caller_zone,
+    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone,
     maybe_run_self_test, read_file_ino, INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_FILE_OPEN, PROG_FILE_OPEN, ZONE_FLAG_GLOBAL};
 
 pub fn file_open(ctx: &LsmContext) -> i32 {
     unsafe { maybe_run_self_test(ctx) };
-
-    let (ret, is_error) = match try_file_open(ctx) {
-        Ok(ret) => (ret, false),
-        Err(_) => (0, true),
-    };
-    count_decision(PROG_FILE_OPEN, ret == 0, is_error);
-    ret
+    finish_decision(PROG_FILE_OPEN, try_file_open(ctx))
 }
 
 #[inline(always)]

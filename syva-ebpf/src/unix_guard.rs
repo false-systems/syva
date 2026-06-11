@@ -1,7 +1,7 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    count_decision, emit_deny_event, is_cross_zone_allowed, lookup_caller_zone,
+    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone,
     read_sock_cgroup_id, SELF_TEST_UNIX, ZONE_MEMBERSHIP,
 };
 use syva_ebpf_common::{
@@ -9,12 +9,7 @@ use syva_ebpf_common::{
 };
 
 pub fn unix_stream_connect(ctx: &LsmContext) -> i32 {
-    let (ret, is_error) = match try_unix_connect(ctx) {
-        Ok(ret) => (ret, false),
-        Err(_) => (0, true),
-    };
-    count_decision(PROG_UNIX_CONNECT, ret == 0, is_error);
-    ret
+    finish_decision(PROG_UNIX_CONNECT, try_unix_connect(ctx))
 }
 
 /// LSM hook: security_unix_stream_connect(struct sock *sock,
