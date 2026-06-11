@@ -181,6 +181,11 @@ pub struct HealthState {
     /// (would-deny recorded, operation proceeds). An operator choice,
     /// not a degradation — it does not affect security_status().
     pub enforcement_mode: &'static str,
+    /// Whether the best-effort cgroup-escape fentry detector is attached.
+    /// Detection only; its absence does not affect security_status().
+    pub escape_detector_attached: bool,
+    /// Count of detected cgroup-zone escapes (latest snapshot).
+    pub cgroup_escapes_detected: u64,
 }
 
 impl HealthState {
@@ -204,6 +209,8 @@ impl HealthState {
             degraded_until_unix: None,
             membership_updates: MembershipMetrics::default(),
             enforcement_mode: "enforce",
+            escape_detector_attached: false,
+            cgroup_escapes_detected: 0,
         }
     }
 
@@ -213,6 +220,23 @@ impl HealthState {
 
     pub fn set_enforcement_mode(&mut self, mode: &'static str) {
         self.enforcement_mode = mode;
+    }
+
+    pub fn set_escape_detector(&mut self, attached: bool) {
+        self.escape_detector_attached = attached;
+    }
+
+    /// Update the detected-escape count. A non-zero count marks active
+    /// degradation: a zoned task left its zone (detection, not prevention).
+    pub fn set_cgroup_escapes(&mut self, total: u64) {
+        let previous = self.cgroup_escapes_detected;
+        self.cgroup_escapes_detected = total;
+        if total > previous {
+            self.mark_active_degradation(format!(
+                "cgroup escape detected: {total} zoned task migration(s) out of zone \
+                 (detection only — not prevented)"
+            ));
+        }
     }
 
     pub fn mark_attached(&mut self, attached_hooks: usize) {
@@ -408,6 +432,8 @@ fn health_json(health: &HealthState, uptime_secs: u64) -> serde_json::Value {
         "state": security_status.as_str(),
         "status": security_status.as_str(),
         "enforcement_mode": health.enforcement_mode,
+        "escape_detector_attached": health.escape_detector_attached,
+        "cgroup_escapes_detected": health.cgroup_escapes_detected,
         "ebpf_loaded": health.ebpf_loaded,
         "expected_hooks": health.expected_hooks,
         "attached_hooks": health.attached_hooks,
@@ -475,6 +501,28 @@ pub fn render_metrics(health: &HealthState) -> String {
     out.push_str(&format!(
         "syva_ebpf_expected_hooks {}\n",
         health.expected_hooks
+    ));
+
+    out.push_str(
+        "# HELP syva_escape_detector_attached Whether the cgroup-escape fentry detector is attached (detection only).\n",
+    );
+    out.push_str("# TYPE syva_escape_detector_attached gauge\n");
+    out.push_str(&format!(
+        "syva_escape_detector_attached {}\n",
+        if health.escape_detector_attached {
+            1
+        } else {
+            0
+        }
+    ));
+
+    out.push_str(
+        "# HELP syva_cgroup_escape_detected_total Zoned tasks observed migrating out of their zone (detection, not prevention).\n",
+    );
+    out.push_str("# TYPE syva_cgroup_escape_detected_total counter\n");
+    out.push_str(&format!(
+        "syva_cgroup_escape_detected_total {}\n",
+        health.cgroup_escapes_detected
     ));
 
     out.push_str("# HELP syva_ebpf_attached_hooks Attached BPF-LSM hook count.\n");

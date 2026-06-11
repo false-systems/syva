@@ -2,9 +2,9 @@
 #![no_main]
 
 use aya_ebpf::{
-    macros::{lsm, map},
+    macros::{fentry, lsm, map},
     maps::{ring_buf::RingBuf, Array, HashMap, PerCpuArray},
-    programs::LsmContext,
+    programs::{FEntryContext, LsmContext},
 };
 use syva_ebpf_common::{
     EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult,
@@ -13,6 +13,7 @@ use syva_ebpf_common::{
     MODE_AUDIT,
 };
 
+mod escape_guard;
 mod exec_guard;
 mod file_guard;
 mod mmap_guard;
@@ -57,6 +58,11 @@ static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
 // MODE_AUDIT records the deny decision but lets the operation proceed.
 // Userspace writes it once at startup before the hooks attach.
 static ENFORCEMENT_MODE: Array<u32> = Array::with_max_entries(1, 0);
+
+#[map]
+// Count of detected cgroup-zone escapes (index 0). The fentry detector bumps
+// it; userspace reads it for the syva_cgroup_escape_detected_total metric.
+static CGROUP_ESCAPE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
 static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0); // 4MB
@@ -163,6 +169,19 @@ unsafe fn lookup_task_zone(task_ptr: u64) -> Option<ZoneInfoKernel> {
     ZONE_MEMBERSHIP.get(&cgroup_id).copied()
 }
 
+/// Resolve a `struct cgroup *` pointer to its cgroup_id (kn → id).
+#[inline(always)]
+unsafe fn read_cgrp_id(cgrp_ptr: u64) -> Result<u64, i64> {
+    if cgrp_ptr == 0 {
+        return Err(-1);
+    }
+    let kn_ptr = read_kernel_u64(cgrp_ptr, offsets::cgroup_kn())?;
+    if kn_ptr == 0 {
+        return Err(-1);
+    }
+    read_kernel_u64(kn_ptr, offsets::kernfs_node_id())
+}
+
 /// Resolve a sock pointer to its owning cgroup_id.
 /// Chain: sock → sk_cgrp_data.cgroup → kn → id (reuses existing cgroup offsets).
 #[inline(always)]
@@ -238,6 +257,34 @@ fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
     } else {
         // Ring buffer full — increment lost counter for this hook.
         count_lost(hook);
+    }
+}
+
+/// Emit a cgroup-escape event and bump the escape counter. Detection only:
+/// the migration is observed (fentry cannot block), recorded, and surfaced.
+#[inline(always)]
+fn record_escape(src_zone: u32, dst_cgroup_id: u64) {
+    if let Some(counter) = CGROUP_ESCAPE_COUNT.get_ptr_mut(0) {
+        unsafe { *counter += 1 };
+    }
+
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    let event = EnforcementEvent {
+        timestamp_ns: ts,
+        pid,
+        hook: syva_ebpf_common::HOOK_CGROUP_ESCAPE,
+        decision: syva_ebpf_common::DECISION_ESCAPE,
+        _pad0: [0; 2],
+        caller_zone: src_zone,
+        target_zone: syva_ebpf_common::ZONE_ID_HOST,
+        // context = the cgroup the task escaped TO (caller_zone is the zone it left).
+        context: dst_cgroup_id,
+        _reserved: [0; 2],
+    };
+    if let Some(mut entry) = ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) {
+        entry.write(event);
+        entry.submit(0);
     }
 }
 
@@ -390,6 +437,17 @@ pub fn syva_unix_connect(ctx: LsmContext) -> i32 {
 #[lsm(hook = "socket_connect")]
 pub fn syva_socket_connect(ctx: LsmContext) -> i32 {
     socket_guard::socket_connect(&ctx)
+}
+
+// Detection only: cgroup_attach_task is not a BPF-LSM hook on supported
+// kernels, so this fentry cannot block the migration — it runs at function
+// entry (before the task migrates, source cgroup still readable), records the
+// escape, and lets userspace re-reconcile. Do not reintroduce it as an LSM
+// deny hook.
+#[fentry(function = "cgroup_attach_task")]
+pub fn syva_cgroup_escape(ctx: FEntryContext) -> u32 {
+    escape_guard::detect_escape(&ctx);
+    0
 }
 
 #[panic_handler]

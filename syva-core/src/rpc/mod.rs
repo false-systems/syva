@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use syva_ebpf_common::{EnforcementEvent, DECISION_DENY, DECISION_WOULD_DENY};
+use syva_ebpf_common::{EnforcementEvent, DECISION_DENY, DECISION_ESCAPE, DECISION_WOULD_DENY};
 use syva_proto::syva_core::syva_core_server::SyvaCore;
 use syva_proto::syva_core::{
     AllowCommRequest, AllowCommResponse, AttachContainerRequest, AttachContainerResponse, CommPair,
@@ -739,20 +739,18 @@ impl SyvaCore for SyvaCoreService {
 
                 let had_events = !events.is_empty();
                 for event in events {
-                    // Audit-mode would-deny events are deny DECISIONS and
-                    // must reach watchers; the operation itself proceeded.
-                    // A per-event decision label on DenyEvent is part of the
-                    // structured-reason proto follow-up (issue #67).
-                    if !matches!(event.decision, DECISION_DENY | DECISION_WOULD_DENY) {
+                    // Deny, audit would-deny, and cgroup-escape events all reach
+                    // watchers. A per-event decision label on DenyEvent is part
+                    // of the structured-reason proto follow-up (issue #67).
+                    if !matches!(
+                        event.decision,
+                        DECISION_DENY | DECISION_WOULD_DENY | DECISION_ESCAPE
+                    ) {
                         continue;
                     }
                     let deny_event = DenyEvent {
                         timestamp_ns: event.timestamp_ns,
-                        hook: HOOK_NAMES
-                            .get(event.hook as usize)
-                            .copied()
-                            .unwrap_or("unknown")
-                            .to_string(),
+                        hook: crate::events::hook_label(event.hook).to_string(),
                         zone_id: event.caller_zone,
                         target_zone_id: event.target_zone,
                         pid: event.pid,

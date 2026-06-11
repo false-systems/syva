@@ -70,12 +70,23 @@ const MAP_NAMES: &[&str] = &[
     "SELF_TEST_UNIX",
     "ENFORCEMENT_COUNTERS",
     "ENFORCEMENT_EVENTS",
+    "ENFORCEMENT_MODE",
+    "CGROUP_ESCAPE_COUNT",
 ];
+
+/// fentry program name for the cgroup-escape detector (best-effort).
+const ESCAPE_PROGRAM: &str = "syva_cgroup_escape";
+/// Kernel function the escape detector attaches to.
+const ESCAPE_ATTACH_FN: &str = "cgroup_attach_task";
 
 /// eBPF manager for the standalone enforce agent.
 pub struct EnforceEbpf {
     bpf: Ebpf,
     pin_path: PathBuf,
+    /// True once the cgroup-escape fentry program has loaded. Detection is
+    /// best-effort: a kernel without fentry support leaves this false and the
+    /// LSM enforcement path is unaffected.
+    escape_detector_loaded: bool,
 }
 
 impl EnforceEbpf {
@@ -163,7 +174,60 @@ impl EnforceEbpf {
             "eBPF programs loaded (not yet attached)"
         );
 
-        Ok(Self { bpf, pin_path })
+        // Best-effort: load the cgroup-escape fentry detector. A kernel without
+        // fentry/BTF support for the target leaves detection off but never
+        // blocks LSM enforcement from coming up.
+        let escape_detector_loaded = match load_escape_detector(&mut bpf, &btf) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    event = "syva.escape.unavailable",
+                    component = "syva-core",
+                    %error,
+                    "cgroup-escape detector unavailable; LSM enforcement unaffected"
+                );
+                false
+            }
+        };
+
+        Ok(Self {
+            bpf,
+            pin_path,
+            escape_detector_loaded,
+        })
+    }
+
+    /// Attach the cgroup-escape fentry detector. Best-effort and idempotent:
+    /// returns Ok(false) when the detector did not load.
+    pub fn attach_escape_detector(&mut self) -> anyhow::Result<bool> {
+        if !self.escape_detector_loaded {
+            return Ok(false);
+        }
+        let prog: &mut aya::programs::FEntry = self
+            .bpf
+            .program_mut(ESCAPE_PROGRAM)
+            .ok_or_else(|| anyhow::anyhow!("escape program '{ESCAPE_PROGRAM}' not found"))?
+            .try_into()?;
+        prog.attach()?;
+        tracing::info!(
+            event = "syva.escape.attached",
+            component = "syva-core",
+            function = ESCAPE_ATTACH_FN,
+            "cgroup-escape detector attached (detection only)"
+        );
+        Ok(true)
+    }
+
+    /// Read the total count of detected cgroup escapes (summed across CPUs).
+    pub fn read_escape_count(&self) -> anyhow::Result<u64> {
+        use aya::maps::PerCpuArray;
+        let map = PerCpuArray::<_, u64>::try_from(
+            self.bpf
+                .map("CGROUP_ESCAPE_COUNT")
+                .ok_or_else(|| anyhow::anyhow!("CGROUP_ESCAPE_COUNT map not found"))?,
+        )?;
+        let per_cpu = map.get(&0, 0)?;
+        Ok(per_cpu.iter().copied().sum())
     }
 
     /// Attach all loaded LSM programs. Call this AFTER zone membership is
@@ -820,6 +884,17 @@ impl Drop for EnforceEbpf {
         }
         tracing::info!("syva: BPF pins cleaned up");
     }
+}
+
+/// Load (verify) the cgroup-escape fentry program. Separate from the LSM load
+/// loop because it is a different program type and a non-fatal best-effort.
+fn load_escape_detector(bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
+    let prog: &mut aya::programs::FEntry = bpf
+        .program_mut(ESCAPE_PROGRAM)
+        .ok_or_else(|| anyhow::anyhow!("escape program '{ESCAPE_PROGRAM}' not found"))?
+        .try_into()?;
+    prog.load(ESCAPE_ATTACH_FN, btf)?;
+    Ok(())
 }
 
 fn find_ebpf_object() -> anyhow::Result<PathBuf> {
