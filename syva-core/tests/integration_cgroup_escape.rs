@@ -147,7 +147,8 @@ async fn zoned_task_leaving_its_cgroup_is_detected() -> anyhow::Result<()> {
     assert!(attach.ok, "AttachContainer failed: {}", attach.message);
 
     // 4. ESCAPE: move the zoned workload to the unzoned dst cgroup. This fires
-    //    cgroup_attach_task; the fentry reads src (zoned) and dst (unzoned).
+    //    cgroup_attach_task; the fentry (detection only) reads src (zoned) and
+    //    dst (unzoned) — the move itself is not prevented.
     fs::write(dst.join("cgroup.procs"), child_pid.to_string())?;
 
     // 5. The detector must record exactly the escape and degrade health. The

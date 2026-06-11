@@ -3,11 +3,11 @@ use aya_ebpf::programs::FEntryContext;
 use crate::{read_cgrp_id, read_task_cgroup_id, record_escape, ZONE_MEMBERSHIP};
 use syva_ebpf_common::ZONE_FLAG_GLOBAL;
 
-/// fentry on `cgroup_attach_task(struct cgroup *dst_cgrp,
+/// Detection only: fentry on `cgroup_attach_task(struct cgroup *dst_cgrp,
 ///     struct task_struct *leader, bool threadgroup)`.
 ///
 /// Runs at function entry, before the task migrates, so the leader's *source*
-/// cgroup is still readable. Detection only — fentry cannot deny the move.
+/// cgroup is still readable. fentry cannot deny the move — detection only.
 pub fn detect_escape(ctx: &FEntryContext) {
     let _ = try_detect(ctx);
 }
