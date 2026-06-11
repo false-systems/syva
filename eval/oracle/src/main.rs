@@ -483,6 +483,7 @@ fn empty_policy() -> ZonePolicy {
         allowed_zones: vec![],
         allow_ptrace: false,
         zone_type: ZoneType::Standard.into(),
+        network_mode: 0, // Isolated (network-locked)
     }
 }
 
