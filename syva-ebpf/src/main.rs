@@ -3,14 +3,14 @@
 
 use aya_ebpf::{
     macros::{fentry, lsm, map},
-    maps::{ring_buf::RingBuf, Array, HashMap, PerCpuArray},
+    maps::{lpm_trie::Key, ring_buf::RingBuf, Array, HashMap, LpmTrie, PerCpuArray},
     programs::{FEntryContext, LsmContext},
 };
 use syva_ebpf_common::{
-    EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult,
-    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
-    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
-    MODE_AUDIT,
+    EgressCidrKey, EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult,
+    SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY,
+    DECISION_WOULD_DENY, ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_EGRESS_CIDRS, MAX_INODES,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
 };
 
 mod escape_guard;
@@ -36,6 +36,11 @@ static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES,
 #[map]
 static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
     HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
+
+#[map]
+// Per-zone egress CIDR allowlist. A network-locked zone may still reach an
+// IPv4 destination whose (zone_id, addr) is covered by an inserted prefix.
+static EGRESS_CIDR_MAP: LpmTrie<EgressCidrKey, u8> = LpmTrie::with_max_entries(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
 
 #[map]
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
@@ -219,6 +224,15 @@ fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
     }
     let key = ZoneCommKey { src_zone, dst_zone };
     unsafe { ZONE_ALLOWED_COMMS.get(&key).is_some() }
+}
+
+/// True when `zone_id` has an egress-CIDR allowlist entry covering the IPv4
+/// destination `addr` (raw network-order `sin_addr`). Looked up with a full
+/// 64-bit prefix; the LPM trie returns the longest inserted match.
+#[inline(always)]
+pub(crate) fn egress_cidr_allows(zone_id: u32, addr: u32) -> bool {
+    let key = Key::new(64, EgressCidrKey { zone_id, addr });
+    EGRESS_CIDR_MAP.get(&key).is_some()
 }
 
 /// True when userspace has switched the global mode to audit (observe-only).

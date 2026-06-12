@@ -274,6 +274,7 @@ fn core_register_request(
             // The partial REST surface does not expose the network mode; zones
             // registered through it default to ISOLATED (network-locked).
             network_mode: 0,
+            allowed_egress_cidrs: Vec::new(),
         }),
     })
 }

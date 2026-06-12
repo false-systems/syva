@@ -167,6 +167,15 @@ zones are network-locked; the lock/open switch is the zone's `network_mode`
 (proto `NetworkMode`, CRD `network.mode`, `syvactl zones register --network`).
 Roll it out behind `--mode audit` first.
 
+A locked zone can still be granted specific egress destinations via a per-zone
+**CIDR allowlist** (`EGRESS_CIDR_MAP`, a BPF LPM trie keyed by
+`(zone_id, ipv4)`): connect/sendmsg to a covered IPv4 destination is allowed,
+everything else stays denied. `bind` ignores the allowlist (it governs local
+listeners, not egress). Sourced from `network.allowed_egress` (proto
+`allowed_egress_cidrs`, CRD `network.allowedEgress`, file TOML). v1 is IPv4
+CIDR only — IPv6 and port granularity are follow-ups; non-IPv4 entries are
+skipped. Proven by `verify-egress-cidr`.
+
 `syva-core --mode audit` switches the global `ENFORCEMENT_MODE` map to
 observe-only: deny decisions are still counted (per-hook `deny` counter) and
 emitted as `WOULD_DENY` events, but the hooks return 0 so the operation
@@ -175,6 +184,7 @@ proceeds. The default is enforce; audit is exposed via `/healthz`
 the `verify-audit-mode` gate.
 
 Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
+`EGRESS_CIDR_MAP` (per-zone egress CIDR LPM trie),
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
 (ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps

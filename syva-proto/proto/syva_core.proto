@@ -231,6 +231,12 @@ message ZonePolicy {
     // network-locked: the zone reaches loopback only (socket connect/sendmsg/
     // bind to non-loopback are denied). BRIDGED / HOST open network access.
     NetworkMode network_mode = 5;
+
+    // Egress CIDR allowlist for a network-locked zone. Each entry is an IPv4
+    // CIDR ("10.0.0.0/8") or bare address (treated as /32); a locked zone may
+    // still reach destinations these prefixes cover. IPv6 and port granularity
+    // are not yet supported (non-IPv4 entries are skipped).
+    repeated string allowed_egress_cidrs = 6;
 }
 
 enum ZoneType {
