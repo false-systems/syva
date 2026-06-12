@@ -1,7 +1,7 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone, read_file_ino,
+    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone, read_file_key,
     INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_MMAP_FILE, PROG_MMAP_FILE, ZONE_FLAG_GLOBAL};
@@ -40,9 +40,9 @@ fn try_mmap_file(ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0); // Anonymous mapping — no file to check.
     }
 
-    let ino = unsafe { read_file_ino(file_ptr)? };
+    let key = unsafe { read_file_key(file_ptr)? };
 
-    let file_zone_id = match unsafe { INODE_ZONE_MAP.get(&ino) } {
+    let file_zone_id = match unsafe { INODE_ZONE_MAP.get(&key) } {
         Some(&zone_id) => zone_id,
         None => return Ok(0),
     };
@@ -55,6 +55,6 @@ fn try_mmap_file(ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
 
-    emit_deny_event(HOOK_MMAP_FILE, caller.zone_id, file_zone_id, ino);
+    emit_deny_event(HOOK_MMAP_FILE, caller.zone_id, file_zone_id, key.ino);
     Ok(-1)
 }

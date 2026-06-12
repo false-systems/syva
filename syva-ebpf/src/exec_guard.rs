@@ -2,7 +2,7 @@ use aya_ebpf::programs::LsmContext;
 
 use crate::{
     emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone, offsets,
-    read_file_ino, read_kernel_u64, INODE_ZONE_MAP,
+    read_file_key, read_kernel_u64, INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_BPRM_CHECK, PROG_BPRM_CHECK, ZONE_FLAG_GLOBAL};
 
@@ -27,9 +27,9 @@ fn try_bprm_check(ctx: &LsmContext) -> Result<i32, i64> {
     }
 
     let file_ptr = unsafe { read_kernel_u64(bprm_ptr, offsets::bprm_file())? };
-    let ino = unsafe { read_file_ino(file_ptr)? };
+    let key = unsafe { read_file_key(file_ptr)? };
 
-    let file_zone_id = match unsafe { INODE_ZONE_MAP.get(&ino) } {
+    let file_zone_id = match unsafe { INODE_ZONE_MAP.get(&key) } {
         Some(&zone_id) => zone_id,
         None => return Ok(0),
     };
@@ -42,6 +42,6 @@ fn try_bprm_check(ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
 
-    emit_deny_event(HOOK_BPRM_CHECK, caller.zone_id, file_zone_id, ino);
+    emit_deny_event(HOOK_BPRM_CHECK, caller.zone_id, file_zone_id, key.ino);
     Ok(-1)
 }

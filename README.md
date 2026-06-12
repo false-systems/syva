@@ -72,6 +72,10 @@ asserts a real `file_open deny_delta=1`:
 - `verify-cgroup-escape` — a zoned task migrating out of its cgroup is
   **detected** (counter + degraded health). Detection only — BPF-LSM cannot
   block cgroup movement on supported kernels.
+- `verify-inode-identity` — a cross-filesystem inode-number collision is not
+  zone-confused: the unzoned same-ino file on another filesystem stays
+  readable while the genuinely zoned file is still denied (composite
+  `(dev, ino)` file identity).
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -155,7 +159,7 @@ Maps on the hot path:
 
 - `ZONE_MEMBERSHIP` — cgroup → zone
 - `ZONE_POLICY` — zone policy flags
-- `INODE_ZONE_MAP` — protected inode → zone
+- `INODE_ZONE_MAP` — protected file `(dev, ino)` → zone
 - `ZONE_ALLOWED_COMMS` — explicitly allowed cross-zone pairs
 - `ENFORCEMENT_COUNTERS` / `ENFORCEMENT_EVENTS` — observability
 
@@ -207,8 +211,11 @@ workload membership yet.
   v0.2. `cgroup_attach_task` is not a BPF-LSM hook on supported mainline kernels;
   this needs a follow-up using a valid cgroup BPF mechanism or another
   kernel-supported hook.
-- `INODE_ZONE_MAP` is keyed by inode number only, not `(dev, ino)`, so
-  cross-filesystem inode collisions remain a known correctness risk.
+- `INODE_ZONE_MAP` is keyed by composite `(dev, ino)` (the kernel superblock
+  `s_dev` plus `i_ino`), so cross-filesystem inode collisions are
+  disambiguated — proven by `verify-inode-identity`. Residual: all subvolumes
+  of one btrfs filesystem share a superblock, so same-ino files in *sibling
+  subvolumes of the same filesystem* still alias.
 - `SyvaZonePolicy` status / finalizers / leader election are not implemented.
 - Kubernetes membership assignment is annotation-based. The
   `verify-k8s-membership` gate proves it end to end only when run on a
@@ -269,6 +276,7 @@ sudo -E make verify-k8s-membership
 sudo -E make verify-audit-mode
 sudo -E make verify-network-lock
 sudo -E make verify-cgroup-escape
+sudo -E make verify-inode-identity
 ```
 
 ## Run it directly
@@ -290,6 +298,6 @@ RUST_LOG=syva_file=debug cargo run --bin syva-file -- \
 
 ## Roadmap
 
-Next: broaden Kubernetes runtime resolver coverage, add `(dev, ino)` file
-identity, expand privileged runtime blackbox coverage, and move privileged
-runtime verification into a self-hosted or otherwise suitable Linux CI path.
+Next: broaden Kubernetes runtime resolver coverage, expand privileged runtime
+blackbox coverage, and move privileged runtime verification into a self-hosted
+or otherwise suitable Linux CI path.

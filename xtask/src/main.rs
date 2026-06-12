@@ -63,6 +63,9 @@ enum Cli {
     /// Run the privileged cgroup-escape detection test: a zoned task migrating
     /// out of its zone is detected (counter + degraded health), not prevented.
     VerifyCgroupEscape,
+    /// Run the privileged (dev, ino) identity test: an inode-number collision
+    /// across two filesystems must not cause cross-zone confusion.
+    VerifyInodeIdentity,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -94,6 +97,7 @@ fn main() -> Result<()> {
         Cli::VerifyAuditMode => verify_audit_mode(),
         Cli::VerifyNetworkLock => verify_network_lock(),
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
+        Cli::VerifyInodeIdentity => verify_inode_identity(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -672,6 +676,27 @@ fn verify_cgroup_escape() -> Result<()> {
             "syva-core",
             "--test",
             "integration_cgroup_escape",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged (dev, ino) identity test: a cross-filesystem inode
+/// collision is not zone-confused (allowed, deny_delta=0) while the genuinely
+/// zoned file is still denied with EPERM.
+fn verify_inode_identity() -> Result<()> {
+    privileged_runtime_preflight("verify-inode-identity")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_inode_identity",
             "--",
             "--ignored",
             "--nocapture",

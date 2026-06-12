@@ -7,10 +7,10 @@ use aya_ebpf::{
     programs::{FEntryContext, LsmContext},
 };
 use syva_ebpf_common::{
-    EnforcementCounters, EnforcementEvent, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult,
-    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
-    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES, MAX_ZONES, MAX_ZONE_COMM_PAIRS,
-    MODE_AUDIT,
+    EnforcementCounters, EnforcementEvent, InodeProbeRequest, InodeProbeResult, InodeZoneKey,
+    SelfTestResult, SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel,
+    DECISION_DENY, DECISION_WOULD_DENY, ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
 };
 
 mod escape_guard;
@@ -29,9 +29,11 @@ static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::with_max_entries
 static ZONE_POLICY: Array<ZonePolicyKernel> = Array::with_max_entries(MAX_ZONES, 0);
 
 #[map]
-// Known limitation: this key is i_ino only, not (dev, ino), so distinct
-// filesystems can collide. Userspace docs track the required map-key upgrade.
-static INODE_ZONE_MAP: HashMap<u64, u32> = HashMap::with_max_entries(MAX_INODES, 1); // BPF_F_NO_PREALLOC
+// Composite (dev, ino) file identity: dev is the kernel-internal s_dev
+// (MKDEV encoding) read from the superblock, so inode numbers from distinct
+// filesystems can no longer collide. Subvolumes sharing one superblock
+// (btrfs) still share a dev — see the userspace docs.
+static INODE_ZONE_MAP: HashMap<InodeZoneKey, u32> = HashMap::with_max_entries(MAX_INODES, 1); // BPF_F_NO_PREALLOC
 
 #[map]
 static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
@@ -41,10 +43,16 @@ static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
 
 #[map]
-static SELF_TEST_INODE: Array<SelfTestInodeResult> = Array::with_max_entries(1, 0);
+// Inode probe request (index 0). Userspace arms it with {target ino, its own
+// tgid} and opens the file; only the probing process's own open can match,
+// so a concurrent same-ino open elsewhere never pollutes the result. Serves
+// the startup offset self-test AND kernel-dev resolution at host-path
+// registration time. ino == 0 means disarmed.
+static INODE_PROBE_REQUEST: Array<InodeProbeRequest> = Array::with_max_entries(1, 0);
 
 #[map]
-static SELF_TEST_INODE_TARGET: Array<u64> = Array::with_max_entries(1, 0);
+// Inode probe result (index 0), written by file_open when the request matches.
+static INODE_PROBE_RESULT: Array<InodeProbeResult> = Array::with_max_entries(1, 0);
 
 #[map]
 static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::with_max_entries(1, 0);
@@ -104,6 +112,10 @@ static FILE_F_INODE_OFFSET: u64 = 32;
 #[no_mangle]
 static INODE_I_INO_OFFSET: u64 = 64;
 #[no_mangle]
+static INODE_I_SB_OFFSET: u64 = 40;
+#[no_mangle]
+static SUPER_BLOCK_S_DEV_OFFSET: u64 = 16;
+#[no_mangle]
 static BPRM_FILE_OFFSET: u64 = 168;
 #[no_mangle]
 static SOCK_CGRP_DATA_CGROUP_OFFSET: u64 = 696;
@@ -132,6 +144,14 @@ mod offsets {
     #[inline(always)]
     pub fn inode_i_ino() -> usize {
         unsafe { core::ptr::read_volatile(&super::INODE_I_INO_OFFSET) as usize }
+    }
+    #[inline(always)]
+    pub fn inode_i_sb() -> usize {
+        unsafe { core::ptr::read_volatile(&super::INODE_I_SB_OFFSET) as usize }
+    }
+    #[inline(always)]
+    pub fn super_block_s_dev() -> usize {
+        unsafe { core::ptr::read_volatile(&super::SUPER_BLOCK_S_DEV_OFFSET) as usize }
     }
     #[inline(always)]
     pub fn bprm_file() -> usize {
@@ -200,8 +220,12 @@ unsafe fn read_sock_cgroup_id(sock_ptr: u64) -> Result<u64, i64> {
     read_kernel_u64(kn_ptr, offsets::kernfs_node_id())
 }
 
+/// Derive the composite (dev, ino) identity of a `struct file *`.
+/// Chain: file -> f_inode -> { i_ino, i_sb -> s_dev }. Any probe-read failure
+/// fails open (the caller propagates the error to `finish_decision`, which
+/// counts it and allows the operation).
 #[inline(always)]
-unsafe fn read_file_ino(file_ptr: u64) -> Result<u64, i64> {
+unsafe fn read_file_key(file_ptr: u64) -> Result<InodeZoneKey, i64> {
     if file_ptr == 0 {
         return Err(-1);
     }
@@ -209,7 +233,13 @@ unsafe fn read_file_ino(file_ptr: u64) -> Result<u64, i64> {
     if inode_ptr == 0 {
         return Err(-1);
     }
-    read_kernel_u64(inode_ptr, offsets::inode_i_ino())
+    let ino = read_kernel_u64(inode_ptr, offsets::inode_i_ino())?;
+    let sb_ptr = read_kernel_u64(inode_ptr, offsets::inode_i_sb())?;
+    if sb_ptr == 0 {
+        return Err(-1);
+    }
+    let dev = read_kernel_u32(sb_ptr, offsets::super_block_s_dev())?;
+    Ok(InodeZoneKey::new(ino, dev))
 }
 
 #[inline(always)]
@@ -353,15 +383,29 @@ unsafe fn maybe_run_self_test(ctx: &LsmContext) {
         }
     }
 
-    // Inode offset self-test: derive inode via file->f_inode->i_ino chain.
-    // Userspace will compare this against stat() of the same file.
+    // Inode probe: when armed and the opened file's ino AND the opener's tgid
+    // both match the request, record the offset-chain-derived (ino, dev).
+    // The tgid match restricts answers to the probing process's own open, so
+    // a concurrent same-ino open on another filesystem cannot pollute the
+    // result. Runs in audit mode too (mode only affects hook return values).
+    let request = match INODE_PROBE_REQUEST.get(0) {
+        Some(req) if req.ino != 0 => *req,
+        _ => return,
+    };
+    let tgid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    if tgid != request.tgid {
+        return;
+    }
     let file_ptr: u64 = ctx.arg(0);
-    if let Ok(ino) = read_file_ino(file_ptr) {
-        let target_ino = SELF_TEST_INODE_TARGET.get(0).copied().unwrap_or(0);
-        if target_ino == 0 || ino == target_ino {
-            let inode_result = SelfTestInodeResult { offset_ino: ino };
-            if let Some(slot) = SELF_TEST_INODE.get_ptr_mut(0) {
-                *slot = inode_result;
+    if let Ok(key) = read_file_key(file_ptr) {
+        if key.ino == request.ino {
+            let result = InodeProbeResult {
+                ino: key.ino,
+                dev: key.dev,
+                _pad: 0,
+            };
+            if let Some(slot) = INODE_PROBE_RESULT.get_ptr_mut(0) {
+                *slot = result;
             }
         }
     }

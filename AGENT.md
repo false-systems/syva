@@ -92,7 +92,6 @@ RUST_LOG=aya=debug cargo run --bin syva-core 2>&1 | grep -A 20 verifier
 
 - Wire file/k8s pod/container watchers into `AttachContainer` and
   `DetachContainer`.
-- Change file identity from inode-only to `(dev, ino)`.
 - Add privileged Linux runtime load/attach blackbox verification.
 - Implement cgroup movement / zone escape protection through a valid kernel
   mechanism; `cgroup_attach_task` is not a BPF-LSM hook on supported kernels.

@@ -5,7 +5,7 @@ REPO_DIR := $(shell pwd)
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-cgroup-escape verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-cgroup-escape verify-inode-identity verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -91,6 +91,12 @@ verify-cgroup-escape:
 # Run as: sudo -E make verify-network-lock
 verify-network-lock:
 	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-network-lock
+
+# Privileged Linux / BPF-LSM only: proves composite (dev, ino) file identity —
+# a cross-filesystem inode-number collision is not zone-confused.
+# Run as: sudo -E make verify-inode-identity
+verify-inode-identity:
+	env PATH="$$PATH:$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/local/cargo/bin" cargo run -p xtask -- verify-inode-identity
 
 # Privileged Linux / BPF-LSM only: proves audit mode records a cross-zone
 # would-deny decision WITHOUT blocking the operation.

@@ -236,6 +236,8 @@ mod tests {
             ("kernfs_node", "id"),
             ("file", "f_inode"),
             ("inode", "i_ino"),
+            ("inode", "i_sb"),
+            ("super_block", "s_dev"),
             ("linux_binprm", "file"),
         ];
 
