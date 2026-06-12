@@ -14,8 +14,9 @@ use aya::maps::RingBuf;
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
 use syva_ebpf_common::{
-    EnforcementCounters, SelfTestInodeResult, SelfTestResult, SelfTestUnixResult, ZoneCommKey,
-    ZoneInfoKernel, ZonePolicyKernel, ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
+    st_dev_to_kernel_dev, EnforcementCounters, InodeProbeRequest, InodeProbeResult, InodeZoneKey,
+    SelfTestResult, SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel,
+    ZONE_FLAG_GLOBAL, ZONE_FLAG_PRIVILEGED,
 };
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
@@ -74,8 +75,8 @@ const MAP_NAMES: &[&str] = &[
     "INODE_ZONE_MAP",
     "ZONE_ALLOWED_COMMS",
     "SELF_TEST",
-    "SELF_TEST_INODE",
-    "SELF_TEST_INODE_TARGET",
+    "INODE_PROBE_REQUEST",
+    "INODE_PROBE_RESULT",
     "SELF_TEST_UNIX",
     "ENFORCEMENT_COUNTERS",
     "ENFORCEMENT_EVENTS",
@@ -98,6 +99,10 @@ pub struct EnforceEbpf {
     /// best-effort: a kernel without fentry support leaves this false and the
     /// LSM enforcement path is unaffected.
     escape_detector_loaded: bool,
+    /// Cache of raw userspace st_dev → kernel s_dev, filled by the inode
+    /// probe. One probe per filesystem (per btrfs subvolume) is enough; the
+    /// kernel value cannot change for a mounted superblock.
+    dev_cache: std::collections::HashMap<u64, u32>,
 }
 
 impl EnforceEbpf {
@@ -118,7 +123,9 @@ impl EnforceEbpf {
         let pin_path = PathBuf::from(BPF_PIN_PATH);
 
         // Check for mutual exclusion — if maps are already pinned, another
-        // syva instance may be running.
+        // syva instance may be running. This also covers upgrades across map
+        // layout changes (e.g. the 8→16-byte INODE_ZONE_MAP key): stale pins
+        // from a crashed older core are refused here, before any reuse.
         if pin_path.exists() {
             let has_maps = fs::read_dir(&pin_path)
                 .map(|entries| entries.count() > 0)
@@ -205,6 +212,7 @@ impl EnforceEbpf {
             bpf,
             pin_path,
             escape_detector_loaded,
+            dev_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -469,13 +477,17 @@ impl EnforceEbpf {
         anyhow::bail!("self-test timed out after 1s — file_open hook may not be attached")
     }
 
-    /// Verify that FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET are correct.
+    /// Verify the file → inode → superblock offset chain end to end.
     ///
-    /// The file_open self-test writes the inode number derived via the offset
-    /// chain. We compare it against the inode from stat() on the same file.
+    /// Probes a freshly created temp file through the inode probe: the
+    /// file_open hook derives (ino, dev) via FILE_F_INODE_OFFSET /
+    /// INODE_I_INO_OFFSET / INODE_I_SB_OFFSET / SUPER_BLOCK_S_DEV_OFFSET, and
+    /// we compare against stat() — ino directly, dev through the
+    /// st_dev→kernel-dev conversion (valid on the temp filesystem, where
+    /// st_dev faithfully encodes s_dev; this also cross-checks the conversion
+    /// itself). An offset or encoding mistake fails core startup here instead
+    /// of silently breaking enforcement.
     pub async fn verify_inode_self_test(&mut self) -> anyhow::Result<()> {
-        use std::time::Duration;
-
         let self_test_path = std::env::temp_dir().join(format!(
             "syva-inode-self-test-{}-{}",
             std::process::id(),
@@ -490,74 +502,46 @@ impl EnforceEbpf {
                 self_test_path.display()
             )
         })?;
-        let expected_ino = std::fs::metadata(&self_test_path)
-            .map(|m| m.ino())
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to stat inode self-test file {}: {e}",
-                    self_test_path.display()
-                )
-            })?;
-
-        tokio::task::block_in_place(|| {
-            use aya::maps::Array;
-            let mut target = Array::<_, u64>::try_from(
-                self.bpf
-                    .map_mut("SELF_TEST_INODE_TARGET")
-                    .ok_or_else(|| anyhow::anyhow!("SELF_TEST_INODE_TARGET map not found"))?,
-            )?;
-            target.set(0, expected_ino, 0)?;
-            anyhow::Ok(())
-        })?;
-
-        let _file = std::fs::File::open(&self_test_path).map_err(|e| {
+        let meta = std::fs::metadata(&self_test_path).map_err(|e| {
             anyhow::anyhow!(
-                "failed to open inode self-test file {}: {e}",
+                "failed to stat inode self-test file {}: {e}",
                 self_test_path.display()
             )
         })?;
+        let expected_ino = meta.ino();
+        let expected_dev = st_dev_to_kernel_dev(meta.dev());
+
+        let probed =
+            tokio::task::block_in_place(|| self.probe_kernel_dev(&self_test_path, expected_ino));
         let _ = std::fs::remove_file(&self_test_path);
 
-        for attempt in 0..20 {
-            let result = tokio::task::block_in_place(|| {
-                use aya::maps::Array;
-                let map = Array::<_, SelfTestInodeResult>::try_from(
-                    self.bpf
-                        .map("SELF_TEST_INODE")
-                        .ok_or_else(|| anyhow::anyhow!("SELF_TEST_INODE map not found"))?,
-                )?;
-                anyhow::Ok(map.get(&0, 0)?)
-            })?;
+        let derived_dev = probed.map_err(|e| {
+            anyhow::anyhow!(
+                "inode offset self-test FAILED ({e}) — FILE_F_INODE_OFFSET or \
+                 INODE_I_INO_OFFSET is wrong for this kernel, or the file_open \
+                 hook is not attached. Install pahole and restart."
+            )
+        })?;
 
-            if result.offset_ino != 0 {
-                if result.offset_ino == expected_ino {
-                    tracing::info!(
-                        event = "syva.selftest.passed",
-                        component = "syva-core",
-                        test = "inode",
-                        result = "ok",
-                        inode = result.offset_ino,
-                        "inode self-test passed: FILE_F_INODE_OFFSET and INODE_I_INO_OFFSET verified"
-                    );
-                    return Ok(());
-                } else {
-                    anyhow::bail!(
-                        "inode offset self-test FAILED: expected inode {} but eBPF \
-                         derived {} — FILE_F_INODE_OFFSET or INODE_I_INO_OFFSET is wrong \
-                         for this kernel. Install pahole and restart.",
-                        expected_ino,
-                        result.offset_ino,
-                    );
-                }
-            }
-            if attempt < 19 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+        if derived_dev != expected_dev {
+            anyhow::bail!(
+                "inode dev self-test FAILED: expected kernel dev {expected_dev:#x} \
+                 but eBPF derived {derived_dev:#x} — INODE_I_SB_OFFSET / \
+                 SUPER_BLOCK_S_DEV_OFFSET is wrong for this kernel, or the \
+                 st_dev→kernel-dev conversion is broken."
+            );
         }
 
-        anyhow::bail!(
-            "inode self-test timed out — file_open hook may not be writing SELF_TEST_INODE"
-        )
+        tracing::info!(
+            event = "syva.selftest.passed",
+            component = "syva-core",
+            test = "inode",
+            result = "ok",
+            inode = expected_ino,
+            kernel_dev = derived_dev,
+            "inode self-test passed: file→inode→superblock offset chain verified"
+        );
+        Ok(())
     }
 
     /// Verify that SOCK_CGRP_DATA_CGROUP_OFFSET is correct.
@@ -885,8 +869,8 @@ impl EnforceEbpf {
 
     /// Remove all INODE_ZONE_MAP entries for a given zone.
     pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
-        let keys_to_remove: Vec<u64> = {
-            let map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+        let keys_to_remove: Vec<InodeZoneKey> = {
+            let map: AyaHashMap<_, InodeZoneKey, u32> = AyaHashMap::try_from(
                 self.bpf
                     .map_mut("INODE_ZONE_MAP")
                     .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
@@ -899,7 +883,7 @@ impl EnforceEbpf {
                 .collect()
         };
 
-        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+        let mut map: AyaHashMap<_, InodeZoneKey, u32> = AyaHashMap::try_from(
             self.bpf
                 .map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
@@ -911,42 +895,136 @@ impl EnforceEbpf {
         Ok(())
     }
 
-    /// Register a single path's inode in INODE_ZONE_MAP (non-recursive).
-    ///
-    /// Limitation: the current BPF map key is inode number only, not `(dev,
-    /// ino)`. This can collide across filesystems and must be fixed with the
-    /// kernel-side map definition.
+    /// Attempts per file before the inode probe fails a registration.
+    const DEV_PROBE_ATTEMPTS: usize = 3;
+
+    /// Resolve the kernel-internal `s_dev` of the filesystem holding `path`,
+    /// cached per raw userspace st_dev (one probe per superblock / subvolume;
+    /// the kernel value cannot change for a mounted superblock).
+    fn kernel_dev_for(&mut self, path: &Path, meta: &fs::Metadata) -> anyhow::Result<u32> {
+        if let Some(&dev) = self.dev_cache.get(&meta.dev()) {
+            return Ok(dev);
+        }
+        let dev = self.probe_kernel_dev(path, meta.ino())?;
+        self.dev_cache.insert(meta.dev(), dev);
+        Ok(dev)
+    }
+
+    /// Learn the kernel `s_dev` for `path` from the kernel itself: arm
+    /// INODE_PROBE_REQUEST with (ino, our tgid), open the file so the
+    /// file_open hook fires on our own open, and read back the (ino, dev)
+    /// the offset chain derived. Converting `stat`'s st_dev cannot replace
+    /// this — filesystems like btrfs synthesize per-subvolume st_dev values
+    /// that never match the superblock's s_dev.
+    fn probe_kernel_dev(&mut self, path: &Path, expected_ino: u64) -> anyhow::Result<u32> {
+        use aya::maps::Array;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let set_request = |bpf: &mut Ebpf, req: InodeProbeRequest| -> anyhow::Result<()> {
+            let mut map = Array::<_, InodeProbeRequest>::try_from(
+                bpf.map_mut("INODE_PROBE_REQUEST")
+                    .ok_or_else(|| anyhow::anyhow!("INODE_PROBE_REQUEST map not found"))?,
+            )?;
+            map.set(0, req, 0)?;
+            Ok(())
+        };
+
+        for attempt in 1..=Self::DEV_PROBE_ATTEMPTS {
+            // Clear any stale result, then arm the request for our tgid.
+            {
+                let mut result = Array::<_, InodeProbeResult>::try_from(
+                    self.bpf
+                        .map_mut("INODE_PROBE_RESULT")
+                        .ok_or_else(|| anyhow::anyhow!("INODE_PROBE_RESULT map not found"))?,
+                )?;
+                result.set(
+                    0,
+                    InodeProbeResult {
+                        ino: 0,
+                        dev: 0,
+                        _pad: 0,
+                    },
+                    0,
+                )?;
+            }
+            set_request(
+                &mut self.bpf,
+                InodeProbeRequest::new(expected_ino, std::process::id()),
+            )?;
+
+            // The file_open LSM hook runs synchronously inside this open(2),
+            // so the result is ready once open returns. O_NONBLOCK keeps
+            // FIFO / device-node host paths from hanging the probe.
+            let opened = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(path);
+            if let Err(e) = opened {
+                let _ = set_request(&mut self.bpf, InodeProbeRequest::new(0, 0));
+                return Err(anyhow::anyhow!(
+                    "inode probe failed to open '{}': {e}",
+                    path.display()
+                ));
+            }
+
+            let result = {
+                let map = Array::<_, InodeProbeResult>::try_from(
+                    self.bpf
+                        .map("INODE_PROBE_RESULT")
+                        .ok_or_else(|| anyhow::anyhow!("INODE_PROBE_RESULT map not found"))?,
+                )?;
+                map.get(&0, 0)?
+            };
+            set_request(&mut self.bpf, InodeProbeRequest::new(0, 0))?;
+
+            if result.ino == expected_ino {
+                return Ok(result.dev);
+            }
+            tracing::warn!(
+                attempt,
+                path = %path.display(),
+                expected_ino,
+                got_ino = result.ino,
+                "inode probe missed — retrying"
+            );
+        }
+        anyhow::bail!(
+            "inode probe for '{}' failed after {} attempts — the file_open hook \
+             may not be attached yet (registration requires attached hooks)",
+            path.display(),
+            Self::DEV_PROBE_ATTEMPTS
+        )
+    }
+
+    /// Register a single path's inode in INODE_ZONE_MAP (non-recursive),
+    /// keyed by the composite (dev, ino) file identity.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_single_inode(&mut self, zone_id: u32, path: &str) -> anyhow::Result<usize> {
         let canon = fs::canonicalize(path)
             .map_err(|e| anyhow::anyhow!("failed to canonicalize '{}': {e}", path))?;
         let meta = fs::metadata(&canon)
             .map_err(|e| anyhow::anyhow!("failed to stat '{}': {e}", canon.display()))?;
-        let ino = meta.ino();
+        let key = InodeZoneKey::new(meta.ino(), self.kernel_dev_for(&canon, &meta)?);
 
-        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
+        let mut map: AyaHashMap<_, InodeZoneKey, u32> = AyaHashMap::try_from(
             self.bpf
                 .map_mut("INODE_ZONE_MAP")
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
-        map.insert(ino, zone_id, 0)?;
+        map.insert(key, zone_id, 0)?;
         Ok(1)
     }
 
     /// Register file inodes as belonging to a zone.
     ///
     /// Scans the given filesystem paths and registers every inode found
-    /// in the INODE_ZONE_MAP BPF map. This enables the file_open and
-    /// bprm_check hooks to detect cross-zone file access.
+    /// in the INODE_ZONE_MAP BPF map, keyed by the composite (dev, ino)
+    /// identity. This enables the file_open and bprm_check hooks to detect
+    /// cross-zone file access.
     ///
     /// Assumption: the paths are host-visible (e.g. container rootfs mounts
     /// or host paths listed in the zone's writable_paths policy). Inodes
     /// must be on the same filesystem visible to the kernel LSM hooks.
-    ///
-    /// Limitation: INODE_ZONE_MAP is keyed by inode number alone. Inode numbers
-    /// are only unique within a filesystem — different filesystems can share the
-    /// same i_ino. This matches the kernel-side eBPF map definition. Changing to
-    /// (dev, ino) would require updating the BPF map type and all kernel hooks.
     /// Maximum recursion depth for directory scanning.
     const INODE_SCAN_MAX_DEPTH: usize = 16;
 
@@ -959,16 +1037,14 @@ impl EnforceEbpf {
         zone_id: u32,
         paths: &[String],
     ) -> anyhow::Result<usize> {
-        use std::collections::{HashSet, VecDeque};
+        use std::collections::{HashMap, HashSet, VecDeque};
 
-        let mut map: AyaHashMap<_, u64, u32> = AyaHashMap::try_from(
-            self.bpf
-                .map_mut("INODE_ZONE_MAP")
-                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
-        )?;
-
-        let mut count = 0usize;
-        let mut visited = HashSet::new();
+        // Phase 1: walk the paths and collect (raw st_dev, ino) entries plus
+        // one probeable representative per filesystem. The walk cannot hold
+        // the BPF map handle because the dev probe needs `self.bpf` too.
+        let mut entries: Vec<(u64, u64)> = Vec::new();
+        let mut probe_reps: HashMap<u64, (PathBuf, fs::Metadata)> = HashMap::new();
+        let mut visited: HashSet<(u64, u64)> = HashSet::new();
 
         for path_str in paths {
             // H6: Canonicalize to resolve symlinks and ../  traversal.
@@ -985,7 +1061,7 @@ impl EnforceEbpf {
             work.push_back((canonical, 0));
 
             while let Some((path, depth)) = work.pop_front() {
-                if count >= Self::INODE_SCAN_MAX_PER_ZONE {
+                if entries.len() >= Self::INODE_SCAN_MAX_PER_ZONE {
                     tracing::warn!(
                         zone_id,
                         max = Self::INODE_SCAN_MAX_PER_ZONE,
@@ -995,22 +1071,59 @@ impl EnforceEbpf {
                 }
 
                 if let Ok(meta) = fs::symlink_metadata(&path) {
-                    let ino = meta.ino();
-                    if !visited.insert(ino) {
-                        continue; // Cycle detection.
+                    if !visited.insert((meta.dev(), meta.ino())) {
+                        continue; // Cycle detection, per (dev, ino).
                     }
-                    map.insert(ino, zone_id, 0)?;
-                    count += 1;
+                    entries.push((meta.dev(), meta.ino()));
+
+                    // A probe must open the path itself, so the representative
+                    // has to be a directory or regular file: opening a symlink
+                    // would follow it (possibly onto another filesystem), and
+                    // FIFOs / device nodes are not reliably openable.
+                    if (meta.is_dir() || meta.is_file()) && !probe_reps.contains_key(&meta.dev()) {
+                        probe_reps.insert(meta.dev(), (path.clone(), meta.clone()));
+                    }
 
                     if meta.is_dir() && depth < Self::INODE_SCAN_MAX_DEPTH {
-                        if let Ok(entries) = fs::read_dir(&path) {
-                            for entry in entries.flatten() {
+                        if let Ok(dir_entries) = fs::read_dir(&path) {
+                            for entry in dir_entries.flatten() {
                                 work.push_back((entry.path(), depth + 1));
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Phase 2: resolve the kernel s_dev once per filesystem encountered.
+        let mut kernel_devs: HashMap<u64, u32> = HashMap::new();
+        for (raw_dev, (path, meta)) in &probe_reps {
+            kernel_devs.insert(*raw_dev, self.kernel_dev_for(path, meta)?);
+        }
+
+        // Phase 3: insert the composite keys.
+        let mut map: AyaHashMap<_, InodeZoneKey, u32> = AyaHashMap::try_from(
+            self.bpf
+                .map_mut("INODE_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
+        )?;
+
+        let mut count = 0usize;
+        for (raw_dev, ino) in entries {
+            let Some(&dev) = kernel_devs.get(&raw_dev) else {
+                // Only reachable when a filesystem surfaced nothing but
+                // symlinks/specials — its entries cannot be probed, and a
+                // guessed key would silently never match in the kernel.
+                tracing::warn!(
+                    zone_id,
+                    ino,
+                    raw_dev,
+                    "no probeable representative for filesystem — entry skipped"
+                );
+                continue;
+            };
+            map.insert(InodeZoneKey::new(ino, dev), zone_id, 0)?;
+            count += 1;
         }
 
         Ok(count)
@@ -1182,6 +1295,10 @@ const OFFSET_DEFS: &[(&str, &str, &str, u64)] = &[
     ("kernfs_node", "id", "KERNFS_NODE_ID_OFFSET", 0),
     ("file", "f_inode", "FILE_F_INODE_OFFSET", 32),
     ("inode", "i_ino", "INODE_I_INO_OFFSET", 64),
+    ("inode", "i_sb", "INODE_I_SB_OFFSET", 40),
+    // s_dev follows the 16-byte s_list list_head at the top of super_block —
+    // stable layout across modern kernels.
+    ("super_block", "s_dev", "SUPER_BLOCK_S_DEV_OFFSET", 16),
     ("linux_binprm", "file", "BPRM_FILE_OFFSET", 168),
     // sk_cgrp_data is a sock_cgroup_data embedded in sock. Its first
     // field is `cgroup *` at offset 0 within the sub-struct, so the

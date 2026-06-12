@@ -228,7 +228,11 @@ Notes:
 
 - File paths may be sensitive; Syva does not log file paths in denial events by
   default.
-- The current inode map is keyed by inode number only, not `(dev, ino)`.
+- The inode map is keyed by composite `(dev, ino)` identity. The kernel-side
+  device (`s_dev`) is resolved through an in-kernel probe at registration
+  time, so registration requires the `file_open` hook to be attached (it is —
+  hooks attach before the gRPC server starts). Filesystems whose subvolumes
+  share a superblock (btrfs) still alias same-ino files within one filesystem.
 
 ### Status
 

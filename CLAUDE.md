@@ -150,7 +150,7 @@ them on every relevant syscall and allow or deny:
 
 Every hook follows one decision shape: resolve the caller's zone from
 `bpf_get_current_cgroup_id()` → `ZONE_MEMBERSHIP`; resolve the target's zone
-(file/exec via inode → `INODE_ZONE_MAP`); allow if same zone or an explicit
+(file/exec via composite `(dev, ino)` → `INODE_ZONE_MAP`); allow if same zone or an explicit
 `ZONE_ALLOWED_COMMS` pair, otherwise deny. A deny returns `-1`, surfaced to
 userspace as **EPERM** ("Operation not permitted"), not EACCES. A caller or
 target not in any zone is invisible to enforcement (allowed). On a
@@ -187,12 +187,17 @@ proceeds. The default is enforce; audit is exposed via `/healthz`
 (`enforcement_mode`) and the `syva_enforcement_mode` metric and is proven by
 the `verify-audit-mode` gate.
 
-Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP`, `ZONE_ALLOWED_COMMS`,
+Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP` (keyed by composite
+`(dev, ino)` — kernel `s_dev` + `i_ino`), `ZONE_ALLOWED_COMMS`,
 `EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` (per-zone egress CIDR LPM tries),
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
 (ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps
-used only to validate offset chains at startup.
+(startup offset validation) and `INODE_PROBE_REQUEST`/`INODE_PROBE_RESULT` —
+the inode probe through which userspace learns a file's kernel `s_dev` (armed
+per registration with the core's tgid; also drives the startup inode
+self-test). Userspace never converts `stat` st_dev into map keys: filesystems
+like btrfs report per-subvolume st_dev values that don't match `s_dev`.
 
 Separate from the nine LSM hooks, a best-effort fentry program
 (`escape_guard.rs`, attached to `cgroup_attach_task`) detects cgroup-zone
@@ -279,5 +284,7 @@ Fail-open hook errors are degraded security, not harmless warnings.
   degraded health). The migration itself is not blocked. Proven by
   `verify-cgroup-escape`.
 - `/proc` and `/sys` coverage remains incomplete.
-- `INODE_ZONE_MAP` is keyed by inode only; `(dev, ino)` is still needed.
+- `INODE_ZONE_MAP` uses composite `(dev, ino)` identity (proven by
+  `verify-inode-identity`). Residual: btrfs subvolumes share one superblock,
+  so same-ino files in sibling subvolumes of the same filesystem still alias.
 - Kubernetes adapter status/finalizers/leader election are not implemented.

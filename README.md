@@ -82,6 +82,10 @@ exit codes:
 - `verify-egress-cidr` — a network-locked zone reaches only its allowlisted
   IPv4/IPv6 CIDRs and optional destination ports; every other destination stays
   denied with `EPERM`.
+- `verify-inode-identity` — a cross-filesystem inode-number collision is not
+  zone-confused: the unzoned same-ino file on another filesystem stays
+  readable while the genuinely zoned file is still denied (composite
+  `(dev, ino)` file identity).
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -185,7 +189,7 @@ Maps on the hot path:
 
 - `ZONE_MEMBERSHIP` — cgroup → zone
 - `ZONE_POLICY` — zone policy flags
-- `INODE_ZONE_MAP` — protected inode → zone
+- `INODE_ZONE_MAP` — protected file `(dev, ino)` → zone
 - `ZONE_ALLOWED_COMMS` — explicitly allowed cross-zone pairs
 - `ENFORCEMENT_MODE` — the global enforce / audit switch
 - `ENFORCEMENT_COUNTERS` / `ENFORCEMENT_EVENTS` — observability
@@ -240,8 +244,11 @@ workload membership yet.
   is **detected** instead — a best-effort fentry program records a zoned task
   leaving its cgroup (counter, `ESCAPE` event, degraded health; proven by
   `verify-cgroup-escape`) — but the migration itself is not blocked.
-- `INODE_ZONE_MAP` is keyed by inode number only, not `(dev, ino)`, so
-  cross-filesystem inode collisions remain a known correctness risk.
+- `INODE_ZONE_MAP` is keyed by composite `(dev, ino)` (the kernel superblock
+  `s_dev` plus `i_ino`), so cross-filesystem inode collisions are
+  disambiguated — proven by `verify-inode-identity`. Residual: all subvolumes
+  of one btrfs filesystem share a superblock, so same-ino files in *sibling
+  subvolumes of the same filesystem* still alias.
 - `SyvaZonePolicy` status / finalizers / leader election are not implemented.
 - Kubernetes membership assignment is annotation-based. The
   `verify-k8s-membership` gate proves it end to end only when run on a
@@ -303,6 +310,7 @@ sudo -E make verify-audit-mode
 sudo -E make verify-network-lock
 sudo -E make verify-egress-cidr
 sudo -E make verify-cgroup-escape
+sudo -E make verify-inode-identity
 ```
 
 ## Run it directly
@@ -325,7 +333,6 @@ RUST_LOG=syva_file=debug cargo run --bin syva-file -- \
 ## Roadmap
 
 - Broader Kubernetes runtime resolver coverage.
-- `(dev, ino)` file identity for `INODE_ZONE_MAP`.
 - Expanded privileged runtime blackbox coverage.
 - Privileged runtime verification in a self-hosted (or otherwise suitable)
   Linux CI path.

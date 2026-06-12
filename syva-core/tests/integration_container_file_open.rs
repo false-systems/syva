@@ -291,7 +291,17 @@ async fn container_file_open_cross_zone_is_blocked() -> anyhow::Result<()> {
         cat /work/zone-b/secret.txt > /work/ctl/secret.out 2> /work/ctl/secret.err; \
         echo $? > /work/ctl/secret.code; touch /work/ctl/secret.done; \
         sleep 3";
-    let mount = format!("{}:/work", workdir.display());
+    // SELinux-enforcing hosts (e.g. Fedora) deny container writes to an
+    // unlabeled bind mount; `:z` applies the shared container label. Only
+    // added when enforcing so runtimes without SELinux support are unaffected.
+    let selinux_enforcing = std::fs::read_to_string("/sys/fs/selinux/enforce")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    let mount = if selinux_enforcing {
+        format!("{}:/work:z", workdir.display())
+    } else {
+        format!("{}:/work", workdir.display())
+    };
     let cid = run_capture(
         &runtime,
         &[
