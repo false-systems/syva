@@ -63,6 +63,9 @@ enum Cli {
     /// Run the privileged egress-CIDR test: a locked zone reaches only its
     /// allowlisted CIDR; all other destinations stay denied.
     VerifyEgressCidr,
+    /// Run the privileged cross-zone TCP test: exact IPv4 destination IPs map
+    /// to zones and use the existing zone-pair rule.
+    VerifyCrossZoneTcp,
     /// Run the privileged cgroup-escape detection test: a zoned task migrating
     /// out of its zone is detected (counter + degraded health), not prevented.
     VerifyCgroupEscape,
@@ -100,6 +103,7 @@ fn main() -> Result<()> {
         Cli::VerifyAuditMode => verify_audit_mode(),
         Cli::VerifyNetworkLock => verify_network_lock(),
         Cli::VerifyEgressCidr => verify_egress_cidr(),
+        Cli::VerifyCrossZoneTcp => verify_cross_zone_tcp(),
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyInodeIdentity => verify_inode_identity(),
         Cli::VerifyDeployment => verify_deployment(),
@@ -721,6 +725,26 @@ fn verify_inode_identity() -> Result<()> {
             "syva-core",
             "--test",
             "integration_inode_identity",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged cross-zone TCP integration test: exact IPv4 pod-IP to
+/// zone mappings feed the socket_connect hook, which applies ZONE_ALLOWED_COMMS.
+fn verify_cross_zone_tcp() -> Result<()> {
+    privileged_runtime_preflight("verify-cross-zone-tcp")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_cross_zone_tcp",
             "--",
             "--ignored",
             "--nocapture",

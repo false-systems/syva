@@ -86,6 +86,9 @@ exit codes:
   zone-confused: the unzoned same-ino file on another filesystem stays
   readable while the genuinely zoned file is still denied (composite
   `(dev, ino)` file identity).
+- `verify-cross-zone-tcp` — exact IPv4 pod-IP-to-zone mappings make TCP
+  connect use the zone-pair rule: same-zone allowed, cross-zone denied until
+  `AllowComm`.
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -309,6 +312,7 @@ sudo -E make verify-k8s-membership
 sudo -E make verify-audit-mode
 sudo -E make verify-network-lock
 sudo -E make verify-egress-cidr
+sudo -E make verify-cross-zone-tcp
 sudo -E make verify-cgroup-escape
 sudo -E make verify-inode-identity
 ```

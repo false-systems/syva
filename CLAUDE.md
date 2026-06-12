@@ -180,6 +180,22 @@ Limitation: each exact CIDR prefix stores either one port or any-port; repeating
 the same exact prefix with another port overwrites the previous value. Proven
 by `verify-egress-cidr`.
 
+Resolvable IPv4 pod destinations use **IP-to-zone enforcement**:
+`IP_ZONE_MAP` maps exact network-order IPv4 pod IPs to zone IDs. On
+`socket_connect` and `socket_sendmsg`, a non-global zoned caller first checks
+whether the non-loopback IPv4 destination resolves to a zone. If it does, the
+existing zone-pair rule applies: same-zone or `ZONE_ALLOWED_COMMS` permits the
+operation; otherwise the hook denies with `EPERM` and records the destination
+zone. This check runs even for network-open zones. If the destination IP is not
+mapped, the hook falls back to the network lock and egress allowlist behavior
+above. `syva-k8s` maintains this map from a cluster-wide pod watch because
+remote pod IPs must be known on every node. Known limits: only IPv4 pod IPs are
+mapped; host-network pods are skipped because they do not have a distinct pod
+IP; enforcement is eventually consistent until every node's adapter observes a
+pod IP add/change/delete; stale mappings are removed on pod delete or IP change
+and also defensively removed when a zone is deleted. Proven by
+`verify-cross-zone-tcp`.
+
 `syva-core --mode audit` switches the global `ENFORCEMENT_MODE` map to
 observe-only: deny decisions are still counted (per-hook `deny` counter) and
 emitted as `WOULD_DENY` events, but the hooks return 0 so the operation
@@ -188,7 +204,8 @@ proceeds. The default is enforce; audit is exposed via `/healthz`
 the `verify-audit-mode` gate.
 
 Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP` (keyed by composite
-`(dev, ino)` — kernel `s_dev` + `i_ino`), `ZONE_ALLOWED_COMMS`,
+`(dev, ino)` — kernel `s_dev` + `i_ino`), `ZONE_ALLOWED_COMMS`, `IP_ZONE_MAP`
+(exact IPv4 pod IP → zone),
 `EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` (per-zone egress CIDR LPM tries),
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`

@@ -203,6 +203,12 @@ pub(crate) async fn remove_zone_local(
                 format!("BPF egress CIDR delete failed for zone '{zone_name}': {error}"),
             );
         }
+        if let Err(error) = ebpf.remove_ip_zones_for_zone(zone_id) {
+            health.write().await.record_bpf_map_error(
+                BpfMapOperation::Delete,
+                format!("BPF IP-zone delete failed for zone '{zone_name}': {error}"),
+            );
+        }
         tracing::info!(zone = zone_name, zone_id, "zone removed");
     } else if outcome.ok && drain {
         tracing::info!(zone = zone_name, "zone marked as draining");

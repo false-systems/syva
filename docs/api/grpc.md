@@ -209,6 +209,45 @@ Errors:
 
 - Unknown filter zone returns gRPC `NotFound`.
 
+### SetIpZone
+
+Maps one exact IPv4 pod IP to a zone for socket-level zone-pair enforcement.
+This is used by `syva-k8s` from its cluster-wide pod-IP watch; direct callers
+must remove stale mappings promptly when an IP is reused.
+
+Request:
+
+- `ip`: IPv4 address in dotted decimal form. IPv6 IP-to-zone enforcement is not
+  implemented yet and returns `InvalidArgument`.
+- `zone_name`: registered zone that owns this pod IP.
+
+Response:
+
+- `ok`: true when the BPF map update completed.
+
+Errors:
+
+- Invalid IPv4 or zone-name syntax returns gRPC `InvalidArgument`.
+- Unknown zone returns gRPC `NotFound`.
+- BPF/core failures return gRPC `Internal`.
+
+### RemoveIpZone
+
+Removes one exact IPv4 pod-IP mapping. Removing an absent IP is idempotent.
+
+Request:
+
+- `ip`: IPv4 address in dotted decimal form.
+
+Response:
+
+- `ok`: true when the remove operation completed.
+
+Errors:
+
+- Invalid IPv4 syntax returns gRPC `InvalidArgument`.
+- BPF/core failures return gRPC `Internal`.
+
 ### RegisterHostPath
 
 Registers one host path or a recursive set of path inodes into

@@ -1,4 +1,5 @@
 mod crd;
+mod ip_zone;
 mod mapper;
 mod membership;
 mod metrics;

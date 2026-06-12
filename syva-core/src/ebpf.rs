@@ -84,6 +84,7 @@ const MAP_NAMES: &[&str] = &[
     "CGROUP_ESCAPE_COUNT",
     "EGRESS_CIDR_MAP",
     "EGRESS_CIDR6_MAP",
+    "IP_ZONE_MAP",
 ];
 
 /// fentry program name for the cgroup-escape detector (best-effort).
@@ -662,6 +663,58 @@ impl EnforceEbpf {
         };
         map.insert(fwd, 1u8, 0)?;
         map.insert(rev, 1u8, 0)?;
+        Ok(())
+    }
+
+    /// Set or replace the exact IPv4 destination-IP to zone mapping used by
+    /// socket hooks for cross-zone TCP/UDP decisions.
+    pub fn set_ip_zone(&mut self, ip: Ipv4Addr, zone_id: u32) -> anyhow::Result<()> {
+        anyhow::ensure!(zone_id != 0, "zone_id 0 is reserved for host");
+        let mut map: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(
+            self.bpf
+                .map_mut("IP_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("IP_ZONE_MAP map not found"))?,
+        )?;
+        // Network byte order, matching the eBPF sin_addr read.
+        map.insert(u32::from(ip).to_be(), zone_id, 0)?;
+        Ok(())
+    }
+
+    /// Remove one exact IPv4 destination-IP to zone mapping.
+    pub fn remove_ip_zone(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
+        let mut map: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(
+            self.bpf
+                .map_mut("IP_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("IP_ZONE_MAP map not found"))?,
+        )?;
+        let _ = map.remove(&u32::from(ip).to_be());
+        Ok(())
+    }
+
+    /// Remove all IP-zone mappings that currently point at a zone being
+    /// removed. The adapter should remove promptly on pod delete; this is a
+    /// defensive cleanup path for zone deletion.
+    pub fn remove_ip_zones_for_zone(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        let keys_to_remove: Vec<u32> = {
+            let map: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(
+                self.bpf
+                    .map_mut("IP_ZONE_MAP")
+                    .ok_or_else(|| anyhow::anyhow!("IP_ZONE_MAP map not found"))?,
+            )?;
+            map.iter()
+                .filter_map(Result::ok)
+                .filter_map(|(key, value)| (value == zone_id).then_some(key))
+                .collect()
+        };
+
+        let mut map: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(
+            self.bpf
+                .map_mut("IP_ZONE_MAP")
+                .ok_or_else(|| anyhow::anyhow!("IP_ZONE_MAP map not found"))?,
+        )?;
+        for key in keys_to_remove {
+            let _ = map.remove(&key);
+        }
         Ok(())
     }
 
