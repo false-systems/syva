@@ -32,6 +32,11 @@ pub fn spec_to_core_register(name: &str, crd: &SyvaZonePolicy) -> RegisterZoneRe
                 ZoneTypeSpec::Standard | ZoneTypeSpec::Isolated => 0,
             },
             network_mode: network_mode_from_spec(spec) as i32,
+            allowed_egress_cidrs: spec
+                .network
+                .as_ref()
+                .map(|network| network.allowed_egress.clone())
+                .unwrap_or_default(),
         }),
     }
 }
@@ -71,6 +76,7 @@ mod tests {
             network: Some(NetworkSpec {
                 allowed_zones: vec!["db".into()],
                 mode: None,
+                allowed_egress: vec![],
             }),
             process: Some(ProcessSpec { allow_ptrace: true }),
             selector: Some(SelectorSpec {

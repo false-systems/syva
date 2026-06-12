@@ -1,8 +1,8 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    emit_deny_event, finish_decision, lookup_caller_zone, read_kernel_u16, read_kernel_u32,
-    read_kernel_u64, ZONE_POLICY,
+    egress_cidr_allows, emit_deny_event, finish_decision, lookup_caller_zone, read_kernel_u16,
+    read_kernel_u32, read_kernel_u64, ZONE_POLICY,
 };
 use syva_ebpf_common::{
     AF_INET, AF_INET6, HOOK_SOCKET_BIND, HOOK_SOCKET_CONNECT, HOOK_SOCKET_SENDMSG,
@@ -23,15 +23,19 @@ use syva_ebpf_common::{
 pub fn socket_connect(ctx: &LsmContext) -> i32 {
     finish_decision(
         PROG_SOCKET_CONNECT,
-        gate_addr_arg(ctx, 1, HOOK_SOCKET_CONNECT),
+        gate_addr_arg(ctx, 1, HOOK_SOCKET_CONNECT, true),
     )
 }
 
 /// LSM `socket_bind(struct socket *sock, struct sockaddr *address, int)`.
 /// Inbound listener — denying non-loopback bind stops an isolated zone from
 /// exposing a service on the network (and therefore from accepting from it).
+/// `bind` governs the LOCAL address, so the egress CIDR allowlist never applies.
 pub fn socket_bind(ctx: &LsmContext) -> i32 {
-    finish_decision(PROG_SOCKET_BIND, gate_addr_arg(ctx, 1, HOOK_SOCKET_BIND))
+    finish_decision(
+        PROG_SOCKET_BIND,
+        gate_addr_arg(ctx, 1, HOOK_SOCKET_BIND, false),
+    )
 }
 
 /// LSM `socket_sendmsg(struct socket *sock, struct msghdr *msg, int size)`.
@@ -42,13 +46,14 @@ pub fn socket_sendmsg(ctx: &LsmContext) -> i32 {
 }
 
 /// Shared gate for hooks whose argument `arg_idx` is a `struct sockaddr *`.
+/// `egress` enables the per-zone CIDR allowlist (connect/sendmsg only).
 #[inline(always)]
-fn gate_addr_arg(ctx: &LsmContext, arg_idx: usize, hook: u8) -> Result<i32, i64> {
+fn gate_addr_arg(ctx: &LsmContext, arg_idx: usize, hook: u8, egress: bool) -> Result<i32, i64> {
     let Some(caller) = network_locked_caller(ctx) else {
         return Ok(0);
     };
     let addr_ptr: u64 = unsafe { ctx.arg(arg_idx) };
-    gate_remote(addr_ptr, caller, hook)
+    gate_remote(addr_ptr, caller, hook, egress)
 }
 
 #[inline(always)]
@@ -64,7 +69,7 @@ fn try_sendmsg(ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
     let addr_ptr = unsafe { read_kernel_u64(msg_ptr, 0)? };
-    gate_remote(addr_ptr, caller, HOOK_SOCKET_SENDMSG)
+    gate_remote(addr_ptr, caller, HOOK_SOCKET_SENDMSG, true)
 }
 
 /// Returns the caller's zone id only when the caller is network-LOCKED: a
@@ -85,9 +90,10 @@ fn network_locked_caller(ctx: &LsmContext) -> Option<u32> {
 }
 
 /// Deny when `addr_ptr` is a non-loopback AF_INET/AF_INET6 endpoint; allow
-/// loopback, NULL, and non-IP families.
+/// loopback, NULL, and non-IP families. When `egress` is set, an IPv4
+/// destination covered by the zone's CIDR allowlist is also allowed.
 #[inline(always)]
-fn gate_remote(addr_ptr: u64, caller_zone: u32, hook: u8) -> Result<i32, i64> {
+fn gate_remote(addr_ptr: u64, caller_zone: u32, hook: u8, egress: bool) -> Result<i32, i64> {
     if addr_ptr == 0 {
         return Ok(0);
     }
@@ -97,6 +103,14 @@ fn gate_remote(addr_ptr: u64, caller_zone: u32, hook: u8) -> Result<i32, i64> {
     }
     if unsafe { is_loopback(addr_ptr, family)? } {
         return Ok(0);
+    }
+    // Egress CIDR allowlist (IPv4 only): a locked zone may still reach a
+    // destination an operator explicitly permitted.
+    if egress && family == AF_INET {
+        let addr = unsafe { read_kernel_u32(addr_ptr, 4)? };
+        if egress_cidr_allows(caller_zone, addr) {
+            return Ok(0);
+        }
     }
     emit_deny_event(hook, caller_zone, ZONE_ID_HOST, family as u64);
     Ok(-1)

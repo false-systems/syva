@@ -484,6 +484,7 @@ fn empty_policy() -> ZonePolicy {
         allow_ptrace: false,
         zone_type: ZoneType::Standard.into(),
         network_mode: 0, // Isolated (network-locked)
+        allowed_egress_cidrs: vec![],
     }
 }
 

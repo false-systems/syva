@@ -79,6 +79,8 @@ exit codes:
 - `verify-cgroup-escape` — a zoned task migrating out of its cgroup is
   **detected** (counter + degraded health). Detection only — BPF-LSM cannot
   block cgroup movement on supported kernels.
+- `verify-egress-cidr` — a network-locked zone reaches only its allowlisted
+  IPv4 CIDRs; every other destination stays denied with `EPERM`.
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
@@ -298,6 +300,7 @@ sudo -E make verify-container-integration
 sudo -E make verify-k8s-membership
 sudo -E make verify-audit-mode
 sudo -E make verify-network-lock
+sudo -E make verify-egress-cidr
 sudo -E make verify-cgroup-escape
 ```
 

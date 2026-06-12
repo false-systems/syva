@@ -14,6 +14,8 @@ pub(crate) struct CoreZonePolicyInput {
     pub allow_ptrace: bool,
     pub zone_type: ZoneType,
     pub network_mode: crate::types::NetworkMode,
+    /// IPv4 CIDRs a network-locked zone may still reach (egress allowlist).
+    pub allowed_egress_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ pub(crate) async fn register_zone_local(
         internal_policy.filesystem.host_paths = policy.host_paths.clone();
         internal_policy.network.allowed_zones = policy.allowed_zones;
         internal_policy.network.mode = policy.network_mode;
+        internal_policy.network.allowed_egress = policy.allowed_egress_cidrs.clone();
 
         {
             let mut ebpf = ebpf.lock().await;
@@ -80,6 +83,27 @@ pub(crate) async fn register_zone_local(
                             format!("BPF inode map update failed for zone '{zone_name}': {error}"),
                         );
                     }
+                }
+            }
+
+            // Egress CIDR allowlist — replace the zone's set (empty clears it).
+            match ebpf.set_zone_egress_cidrs(zone_id, &internal_policy.network.allowed_egress) {
+                Ok(applied) => {
+                    if applied > 0 {
+                        tracing::info!(
+                            zone = zone_name,
+                            zone_id,
+                            cidrs = applied,
+                            "egress CIDR allowlist applied"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(zone = zone_name, %error, "egress CIDR allowlist update failed");
+                    health.write().await.record_bpf_map_error(
+                        BpfMapOperation::Update,
+                        format!("BPF egress CIDR update failed for zone '{zone_name}': {error}"),
+                    );
                 }
             }
         }
@@ -171,6 +195,12 @@ pub(crate) async fn remove_zone_local(
             health.write().await.record_bpf_map_error(
                 BpfMapOperation::Delete,
                 format!("BPF inode map delete failed for zone '{zone_name}': {error}"),
+            );
+        }
+        if let Err(error) = ebpf.remove_zone_egress_cidrs(zone_id) {
+            health.write().await.record_bpf_map_error(
+                BpfMapOperation::Delete,
+                format!("BPF egress CIDR delete failed for zone '{zone_name}': {error}"),
             );
         }
         tracing::info!(zone = zone_name, zone_id, "zone removed");

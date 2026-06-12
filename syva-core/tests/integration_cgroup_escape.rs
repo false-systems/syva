@@ -38,6 +38,7 @@ fn empty_policy() -> ZonePolicy {
         allow_ptrace: false,
         zone_type: 0,
         network_mode: 0,
+        allowed_egress_cidrs: vec![],
     }
 }
 

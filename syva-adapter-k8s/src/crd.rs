@@ -42,6 +42,10 @@ pub struct NetworkSpec {
     /// "bridged" (network allowed), or "host" (network + host netns).
     #[serde(default)]
     pub mode: Option<String>,
+    /// Egress CIDR allowlist for a locked zone — IPv4 CIDRs ("10.0.0.0/8") a
+    /// network-locked zone may still reach.
+    #[serde(default)]
+    pub allowed_egress: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

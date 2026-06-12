@@ -80,6 +80,7 @@ const MAP_NAMES: &[&str] = &[
     "ENFORCEMENT_EVENTS",
     "ENFORCEMENT_MODE",
     "CGROUP_ESCAPE_COUNT",
+    "EGRESS_CIDR_MAP",
 ];
 
 /// fentry program name for the cgroup-escape detector (best-effort).
@@ -678,6 +679,74 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Replace a zone's egress CIDR allowlist. Each entry is an IPv4 CIDR
+    /// (`10.0.0.0/8`) or a bare address (treated as `/32`). A network-locked
+    /// zone may reach destinations covered by these prefixes. Returns the
+    /// number of entries applied; non-IPv4 entries (IPv6, host:port) are
+    /// skipped with a warning (v1 is IPv4 CIDR only).
+    pub fn set_zone_egress_cidrs(
+        &mut self,
+        zone_id: u32,
+        cidrs: &[String],
+    ) -> anyhow::Result<usize> {
+        use aya::maps::lpm_trie::{Key, LpmTrie};
+        use syva_ebpf_common::{EgressCidrKey, EGRESS_CIDR_ZONE_BITS};
+
+        self.remove_zone_egress_cidrs(zone_id)?;
+
+        let mut trie: LpmTrie<_, EgressCidrKey, u8> = LpmTrie::try_from(
+            self.bpf
+                .map_mut("EGRESS_CIDR_MAP")
+                .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_MAP map not found"))?,
+        )?;
+
+        let mut applied = 0usize;
+        for cidr in cidrs {
+            let Some((ip, bits)) = parse_ipv4_cidr(cidr) else {
+                tracing::warn!(
+                    zone_id,
+                    entry = %cidr,
+                    "skipping non-IPv4-CIDR egress entry (v1 supports IPv4 CIDR only)"
+                );
+                continue;
+            };
+            let key = Key::new(
+                EGRESS_CIDR_ZONE_BITS + bits,
+                EgressCidrKey {
+                    zone_id,
+                    // Network byte order, matching the eBPF sin_addr read.
+                    addr: u32::from(ip).to_be(),
+                },
+            );
+            trie.insert(&key, 1u8, 0)?;
+            applied += 1;
+        }
+        Ok(applied)
+    }
+
+    /// Remove every egress CIDR entry belonging to a zone.
+    pub fn remove_zone_egress_cidrs(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        use aya::maps::lpm_trie::{Key, LpmTrie};
+        use syva_ebpf_common::EgressCidrKey;
+
+        let mut trie: LpmTrie<_, EgressCidrKey, u8> = LpmTrie::try_from(
+            self.bpf
+                .map_mut("EGRESS_CIDR_MAP")
+                .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_MAP map not found"))?,
+        )?;
+
+        let stale: Vec<Key<EgressCidrKey>> = trie
+            .iter()
+            .filter_map(Result::ok)
+            .map(|(key, _)| key)
+            .filter(|key| key.data().zone_id == zone_id)
+            .collect();
+        for key in stale {
+            let _ = trie.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Clear a zone's enforcement policy (zeroed entry — Array can't remove).
     pub fn remove_zone_policy(&mut self, zone_id: u32) -> anyhow::Result<()> {
         use aya::maps::Array;
@@ -895,6 +964,23 @@ impl Drop for EnforceEbpf {
     }
 }
 
+/// Parse an IPv4 egress-allowlist entry into (address, prefix bits). Accepts
+/// `A.B.C.D/N` or a bare `A.B.C.D` (treated as `/32`). Returns None for
+/// anything that is not a valid IPv4 CIDR (IPv6, host:port, bad mask) so the
+/// caller can skip it.
+fn parse_ipv4_cidr(entry: &str) -> Option<(std::net::Ipv4Addr, u32)> {
+    let entry = entry.trim();
+    let (addr, bits) = match entry.split_once('/') {
+        Some((addr, mask)) => (addr, mask.parse::<u32>().ok()?),
+        None => (entry, 32),
+    };
+    if bits > 32 {
+        return None;
+    }
+    let ip = addr.parse::<std::net::Ipv4Addr>().ok()?;
+    Some((ip, bits))
+}
+
 /// Load (verify) the cgroup-escape fentry program. Separate from the LSM load
 /// loop because it is a different program type and a non-fatal best-effort.
 fn load_escape_detector(bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
@@ -994,6 +1080,28 @@ fn resolve_offsets() -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_ipv4_cidr_handles_masks_bare_and_rejects_bad() {
+        assert_eq!(
+            parse_ipv4_cidr("10.0.0.0/8"),
+            Some(("10.0.0.0".parse().unwrap(), 8))
+        );
+        // Bare address is treated as a /32.
+        assert_eq!(
+            parse_ipv4_cidr("192.168.1.5"),
+            Some(("192.168.1.5".parse().unwrap(), 32))
+        );
+        assert_eq!(
+            parse_ipv4_cidr(" 172.16.0.0/12 "),
+            Some(("172.16.0.0".parse().unwrap(), 12))
+        );
+        // Rejected: oversized mask, IPv6, host:port, garbage.
+        assert_eq!(parse_ipv4_cidr("10.0.0.0/33"), None);
+        assert_eq!(parse_ipv4_cidr("2001:db8::/32"), None);
+        assert_eq!(parse_ipv4_cidr("10.0.0.0:5432"), None);
+        assert_eq!(parse_ipv4_cidr("not-an-ip"), None);
+    }
 
     #[test]
     fn lsm_programs_use_real_hook_names() {

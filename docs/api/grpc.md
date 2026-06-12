@@ -52,6 +52,10 @@ Request:
   loopback only (`socket_connect`/`socket_sendmsg`/`socket_bind` deny
   non-loopback). `NETWORK_MODE_BRIDGED` / `NETWORK_MODE_HOST` open network
   access.
+- `policy.allowed_egress_cidrs`: egress CIDR allowlist for a network-locked
+  zone. Each entry is an IPv4 CIDR (`10.0.0.0/8`) or bare address (`/32`); a
+  locked zone may still reach destinations these prefixes cover. IPv6 and port
+  granularity are not yet supported (non-IPv4 entries are skipped).
 
 Response:
 
