@@ -22,7 +22,7 @@ exclude = ["eval/oracle", "eval/harness", "syva-ebpf"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Async

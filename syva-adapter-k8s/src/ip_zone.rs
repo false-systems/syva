@@ -42,32 +42,75 @@ impl IpZoneReconciler {
             return Vec::new();
         }
 
+        // Update tracked state first so the reuse check below sees the
+        // post-event world (including this pod keeping the same IP).
+        match desired.clone() {
+            Some(desired) => {
+                self.applied_by_uid.insert(uid, desired);
+            }
+            None => {
+                self.applied_by_uid.remove(&uid);
+            }
+        }
+
         let mut intents = Vec::new();
         if let Some(previous) = previous {
-            intents.push(IpZoneIntent::Remove { ip: previous.ip });
+            // Pod IPs are reused: if event ordering delivered the new owner's
+            // Set before this pod released the IP, a blind Remove would kill
+            // the live mapping. Only remove an IP no tracked pod still claims.
+            if !self.ip_claimed(previous.ip) {
+                self.drop_pending_for(previous.ip);
+                intents.push(IpZoneIntent::Remove { ip: previous.ip });
+            }
         }
         if let Some(desired) = desired {
             intents.push(IpZoneIntent::Set {
                 ip: desired.ip,
-                zone: desired.zone.clone(),
+                zone: desired.zone,
             });
-            self.applied_by_uid.insert(uid, desired);
-        } else {
-            self.applied_by_uid.remove(&uid);
         }
         intents
     }
 
     pub(crate) fn delete_pod(&mut self, pod: &Pod) -> Vec<IpZoneIntent> {
         let uid = pod_key(pod);
-        self.applied_by_uid
-            .remove(&uid)
-            .map(|applied| vec![IpZoneIntent::Remove { ip: applied.ip }])
-            .unwrap_or_default()
+        let Some(applied) = self.applied_by_uid.remove(&uid) else {
+            return Vec::new();
+        };
+        if self.ip_claimed(applied.ip) {
+            // The IP was already reused by another pod; its mapping stands.
+            return Vec::new();
+        }
+        self.drop_pending_for(applied.ip);
+        vec![IpZoneIntent::Remove { ip: applied.ip }]
     }
 
-    pub(crate) fn pending_intents(&self) -> Vec<IpZoneIntent> {
+    pub(crate) fn pending_intents(&mut self) -> Vec<IpZoneIntent> {
+        // A queued retry-Remove whose IP a live pod now claims is stale by
+        // definition — replaying it would delete the new owner's mapping.
+        let claimed_removes: Vec<String> = self
+            .pending
+            .iter()
+            .filter(
+                |(_, intent)| matches!(intent, IpZoneIntent::Remove { ip } if self.ip_claimed(*ip)),
+            )
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in claimed_removes {
+            self.pending.remove(&key);
+        }
         self.pending.values().cloned().collect()
+    }
+
+    /// True when any tracked pod currently claims `ip`.
+    fn ip_claimed(&self, ip: Ipv4Addr) -> bool {
+        self.applied_by_uid.values().any(|applied| applied.ip == ip)
+    }
+
+    /// Drop any queued retry for `ip` — the intent we are about to emit
+    /// supersedes it (pending is keyed by IP, not by owner).
+    fn drop_pending_for(&mut self, ip: Ipv4Addr) {
+        self.pending.remove(&ip.to_string());
     }
 
     pub(crate) fn absorb_outcomes(&mut self, outcomes: &[IpZoneOutcome]) {
@@ -248,6 +291,74 @@ mod tests {
         let p = pod("uid-a", Some("zone-a"), Some("10.123.0.2"), false);
         assert_eq!(reconciler.reconcile_pod(&p).len(), 1);
         assert!(reconciler.reconcile_pod(&p).is_empty());
+    }
+
+    #[test]
+    fn late_delete_does_not_remove_reused_ip() {
+        let mut reconciler = IpZoneReconciler::new();
+        let old_owner = pod("uid-a", Some("zone-a"), Some("10.123.0.2"), false);
+        reconciler.reconcile_pod(&old_owner);
+
+        // The IP is reused by a new pod before the old pod's delete event
+        // arrives — its Set lands first.
+        let new_owner = pod("uid-b", Some("zone-b"), Some("10.123.0.2"), false);
+        assert_eq!(
+            reconciler.reconcile_pod(&new_owner),
+            vec![IpZoneIntent::Set {
+                ip: "10.123.0.2".parse().unwrap(),
+                zone: "zone-b".to_string(),
+            }]
+        );
+
+        // The late delete must NOT emit a Remove for the now-live mapping.
+        assert!(reconciler.delete_pod(&old_owner).is_empty());
+    }
+
+    #[test]
+    fn ip_change_does_not_remove_reused_old_ip() {
+        let mut reconciler = IpZoneReconciler::new();
+        reconciler.reconcile_pod(&pod("uid-a", Some("zone-a"), Some("10.123.0.2"), false));
+        // Another pod claims the old IP before uid-a's change event arrives.
+        reconciler.reconcile_pod(&pod("uid-b", Some("zone-b"), Some("10.123.0.2"), false));
+
+        // uid-a moves to a new IP: only the Set may be emitted.
+        assert_eq!(
+            reconciler.reconcile_pod(&pod("uid-a", Some("zone-a"), Some("10.123.0.9"), false)),
+            vec![IpZoneIntent::Set {
+                ip: "10.123.0.9".parse().unwrap(),
+                zone: "zone-a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn same_ip_zone_change_emits_set_only() {
+        let mut reconciler = IpZoneReconciler::new();
+        reconciler.reconcile_pod(&pod("uid-a", Some("zone-a"), Some("10.123.0.2"), false));
+        // Same IP, new zone: the Set overwrites in place; no Remove window.
+        assert_eq!(
+            reconciler.reconcile_pod(&pod("uid-a", Some("zone-b"), Some("10.123.0.2"), false)),
+            vec![IpZoneIntent::Set {
+                ip: "10.123.0.2".parse().unwrap(),
+                zone: "zone-b".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn stale_pending_remove_is_pruned_when_ip_is_reclaimed() {
+        let mut reconciler = IpZoneReconciler::new();
+        // A Remove RPC failed and sits in the retry queue.
+        reconciler.absorb_outcomes(&[IpZoneOutcome {
+            intent: IpZoneIntent::Remove {
+                ip: "10.123.0.2".parse().unwrap(),
+            },
+            ok: false,
+        }]);
+        // A new pod claims the IP before the retry fires.
+        reconciler.reconcile_pod(&pod("uid-b", Some("zone-b"), Some("10.123.0.2"), false));
+        // The queued Remove must not be replayed (and is dropped).
+        assert!(reconciler.pending_intents().is_empty());
     }
 
     #[test]

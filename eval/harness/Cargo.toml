@@ -2,7 +2,7 @@
 name = "syva-harness"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Spec-driven test harness for syva. Loads YAML specs and runs the matching oracle cases."
 

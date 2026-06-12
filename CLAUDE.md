@@ -186,7 +186,10 @@ Resolvable IPv4 pod destinations use **IP-to-zone enforcement**:
 whether the non-loopback IPv4 destination resolves to a zone. If it does, the
 existing zone-pair rule applies: same-zone or `ZONE_ALLOWED_COMMS` permits the
 operation; otherwise the hook denies with `EPERM` and records the destination
-zone. This check runs even for network-open zones. If the destination IP is not
+zone. This check runs even for network-open zones, and a mapped destination
+takes precedence over the egress CIDR allowlist: a locked zone whose allowlist
+covers the IP is still denied without an explicit `AllowComm`. If the
+destination IP is not
 mapped, the hook falls back to the network lock and egress allowlist behavior
 above. `syva-k8s` maintains this map from a cluster-wide pod watch because
 remote pod IPs must be known on every node. Known limits: only IPv4 pod IPs are

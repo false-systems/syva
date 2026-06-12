@@ -215,6 +215,11 @@ Maps one exact IPv4 pod IP to a zone for socket-level zone-pair enforcement.
 This is used by `syva-k8s` from its cluster-wide pod-IP watch; direct callers
 must remove stale mappings promptly when an IP is reused.
 
+A mapped IP takes precedence over both the network mode and the egress CIDR
+allowlist: a network-open (Bridged/Host) zone, or a locked zone whose
+allowlist covers the IP, is still denied without an explicit `AllowComm` pair
+to the destination zone.
+
 Request:
 
 - `ip`: IPv4 address in dotted decimal form. IPv6 IP-to-zone enforcement is not
