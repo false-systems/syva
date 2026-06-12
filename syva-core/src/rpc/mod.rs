@@ -1,6 +1,7 @@
 //! gRPC service implementation for syva-core.
 
 use std::collections::HashSet;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,8 @@ use syva_proto::syva_core::{
     DenyCommRequest, DenyCommResponse, DenyEvent, DetachContainerRequest, DetachContainerResponse,
     HookStatus, ListCommsRequest, ListCommsResponse, ListZonesRequest, ListZonesResponse,
     RegisterHostPathRequest, RegisterHostPathResponse, RegisterZoneRequest, RegisterZoneResponse,
-    RemoveZoneRequest, RemoveZoneResponse, StatusRequest, StatusResponse, WatchEventsRequest,
+    RemoveIpZoneRequest, RemoveIpZoneResponse, RemoveZoneRequest, RemoveZoneResponse,
+    SetIpZoneRequest, SetIpZoneResponse, StatusRequest, StatusResponse, WatchEventsRequest,
     ZoneSummary,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -592,6 +594,59 @@ impl SyvaCore for SyvaCoreService {
         Ok(Response::new(ListCommsResponse { pairs }))
     }
 
+    async fn set_ip_zone(
+        &self,
+        request: Request<SetIpZoneRequest>,
+    ) -> Result<Response<SetIpZoneResponse>, Status> {
+        let req = request.into_inner();
+        let ip = parse_ipv4_for_ip_zone(&req.ip)?;
+        validate_zone_name(&req.zone_name)?;
+
+        let zone_id = {
+            let registry = self.registry.read().await;
+            registry.zone_id(&req.zone_name).ok_or_else(|| {
+                Status::not_found(format!("zone '{}' not registered", req.zone_name))
+            })?
+        };
+
+        let mut ebpf = self.ebpf.lock().await;
+        if let Err(error) = ebpf.set_ip_zone(ip, zone_id) {
+            self.health.write().await.record_bpf_map_error(
+                BpfMapOperation::Update,
+                format!(
+                    "BPF IP-zone update failed for ip '{}' zone '{}': {error}",
+                    req.ip, req.zone_name
+                ),
+            );
+            return Err(Status::internal(format!("failed to set IP zone: {error}")));
+        }
+
+        tracing::info!(ip = %ip, zone = %req.zone_name, zone_id, "IP-zone mapping set via gRPC");
+        Ok(Response::new(SetIpZoneResponse { ok: true }))
+    }
+
+    async fn remove_ip_zone(
+        &self,
+        request: Request<RemoveIpZoneRequest>,
+    ) -> Result<Response<RemoveIpZoneResponse>, Status> {
+        let req = request.into_inner();
+        let ip = parse_ipv4_for_ip_zone(&req.ip)?;
+
+        let mut ebpf = self.ebpf.lock().await;
+        if let Err(error) = ebpf.remove_ip_zone(ip) {
+            self.health.write().await.record_bpf_map_error(
+                BpfMapOperation::Delete,
+                format!("BPF IP-zone delete failed for ip '{}': {error}", req.ip),
+            );
+            return Err(Status::internal(format!(
+                "failed to remove IP zone: {error}"
+            )));
+        }
+
+        tracing::info!(ip = %ip, "IP-zone mapping removed via gRPC");
+        Ok(Response::new(RemoveIpZoneResponse { ok: true }))
+    }
+
     async fn register_host_path(
         &self,
         request: Request<RegisterHostPathRequest>,
@@ -832,6 +887,12 @@ fn attach_request_to_observation(req: &AttachContainerRequest) -> MembershipObse
         generation: req.generation,
         observed_at: std::time::SystemTime::now(),
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_ipv4_for_ip_zone(ip: &str) -> Result<Ipv4Addr, Status> {
+    ip.parse::<Ipv4Addr>()
+        .map_err(|_| Status::invalid_argument("ip must be an IPv4 address"))
 }
 
 async fn acquire_container_update(

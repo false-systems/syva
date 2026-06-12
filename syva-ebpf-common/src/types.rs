@@ -123,6 +123,9 @@ pub const EGRESS_CIDR_ZONE_BITS: u32 = 32;
 /// Max entries in the egress CIDR allowlist trie (across all zones).
 pub const MAX_EGRESS_CIDRS: u32 = 8192;
 
+/// Maximum exact IPv4 pod IP to zone mappings.
+pub const MAX_IP_ZONES: u32 = 65_536;
+
 // Flag constants for ZoneInfoKernel.flags
 /// reserved: set by userspace for ZoneType::Privileged but not checked by
 /// any eBPF hook. Privileged zones receive standard enforcement.

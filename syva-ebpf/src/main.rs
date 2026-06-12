@@ -10,8 +10,8 @@ use syva_ebpf_common::{
     EgressCidr6Key, EgressCidrKey, EgressCidrValue, EnforcementCounters, EnforcementEvent,
     InodeProbeRequest, InodeProbeResult, InodeZoneKey, SelfTestResult, SelfTestUnixResult,
     ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
-    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_EGRESS_CIDRS, MAX_INODES, MAX_ZONES,
-    MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
+    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_EGRESS_CIDRS, MAX_INODES, MAX_IP_ZONES,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
 };
 
 mod escape_guard;
@@ -39,6 +39,11 @@ static INODE_ZONE_MAP: HashMap<InodeZoneKey, u32> = HashMap::with_max_entries(MA
 #[map]
 static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
     HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
+
+#[map]
+// Exact IPv4 destination IP to zone mapping. Keys are raw network-order
+// `sockaddr_in.sin_addr` values; values are non-zero zone IDs.
+static IP_ZONE_MAP: HashMap<u32, u32> = HashMap::with_max_entries(MAX_IP_ZONES, 0);
 
 #[map]
 // Per-zone egress CIDR allowlist. A network-locked zone may still reach an
@@ -263,12 +268,17 @@ unsafe fn read_file_key(file_ptr: u64) -> Result<InodeZoneKey, i64> {
 }
 
 #[inline(always)]
-fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
+pub(crate) fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
     if src_zone == dst_zone {
         return true;
     }
     let key = ZoneCommKey { src_zone, dst_zone };
     unsafe { ZONE_ALLOWED_COMMS.get(&key).is_some() }
+}
+
+#[inline(always)]
+pub(crate) fn lookup_ip_zone(addr: u32) -> Option<u32> {
+    unsafe { IP_ZONE_MAP.get(&addr).copied() }
 }
 
 #[inline(always)]

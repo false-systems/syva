@@ -20,6 +20,10 @@ service SyvaCore {
     rpc DenyComm(DenyCommRequest) returns (DenyCommResponse);
     rpc ListComms(ListCommsRequest) returns (ListCommsResponse);
 
+    // Pod IP to zone resolution
+    rpc SetIpZone(SetIpZoneRequest) returns (SetIpZoneResponse);
+    rpc RemoveIpZone(RemoveIpZoneRequest) returns (RemoveIpZoneResponse);
+
     // Inode registration
     rpc RegisterHostPath(RegisterHostPathRequest) returns (RegisterHostPathResponse);
 
@@ -158,6 +162,28 @@ message CommPair {
     string zone_b = 2;
 }
 
+// --- Pod IP to zone resolution ---
+
+message SetIpZoneRequest {
+    // IPv4 pod IP in dotted decimal form. IPv6 IP-to-zone enforcement is a
+    // follow-up; IPv6 values return InvalidArgument.
+    string ip = 1;
+    string zone_name = 2;
+}
+
+message SetIpZoneResponse {
+    bool ok = 1;
+}
+
+message RemoveIpZoneRequest {
+    // IPv4 pod IP in dotted decimal form.
+    string ip = 1;
+}
+
+message RemoveIpZoneResponse {
+    bool ok = 1;
+}
+
 // --- Inode registration ---
 
 message RegisterHostPathRequest {
@@ -233,9 +259,8 @@ message ZonePolicy {
     NetworkMode network_mode = 5;
 
     // Egress CIDR allowlist for a network-locked zone. Each entry is an IPv4
-    // CIDR ("10.0.0.0/8") or bare address (treated as /32); a locked zone may
-    // still reach destinations these prefixes cover. IPv6 and port granularity
-    // are not yet supported (non-IPv4 entries are skipped).
+    // or IPv6 CIDR or bare address; optional destination ports use
+    // "10.0.0.0/8:5432" for IPv4 and "[2001:db8::/32]:443" for IPv6.
     repeated string allowed_egress_cidrs = 6;
 }
 

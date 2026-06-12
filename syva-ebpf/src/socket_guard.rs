@@ -1,8 +1,9 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    egress_cidr6_allows, egress_cidr_allows, emit_deny_event, finish_decision, lookup_caller_zone,
-    read_kernel_u16, read_kernel_u32, read_kernel_u64, read_kernel_u8x16, ZONE_POLICY,
+    egress_cidr6_allows, egress_cidr_allows, emit_deny_event, finish_decision,
+    is_cross_zone_allowed, lookup_caller_zone, lookup_ip_zone, read_kernel_u16, read_kernel_u32,
+    read_kernel_u64, read_kernel_u8x16, ZONE_POLICY,
 };
 use syva_ebpf_common::{
     AF_INET, AF_INET6, HOOK_SOCKET_BIND, HOOK_SOCKET_CONNECT, HOOK_SOCKET_SENDMSG,
@@ -49,7 +50,7 @@ pub fn socket_sendmsg(ctx: &LsmContext) -> i32 {
 /// `egress` enables the per-zone CIDR allowlist (connect/sendmsg only).
 #[inline(always)]
 fn gate_addr_arg(ctx: &LsmContext, arg_idx: usize, hook: u8, egress: bool) -> Result<i32, i64> {
-    let Some(caller) = network_locked_caller(ctx) else {
+    let Some(caller) = zoned_caller(ctx) else {
         return Ok(0);
     };
     let addr_ptr: u64 = unsafe { ctx.arg(arg_idx) };
@@ -58,7 +59,7 @@ fn gate_addr_arg(ctx: &LsmContext, arg_idx: usize, hook: u8, egress: bool) -> Re
 
 #[inline(always)]
 fn try_sendmsg(ctx: &LsmContext) -> Result<i32, i64> {
-    let Some(caller) = network_locked_caller(ctx) else {
+    let Some(caller) = zoned_caller(ctx) else {
         return Ok(0);
     };
     // arg(1) = struct msghdr *. msg_name (the destination sockaddr) is the
@@ -72,21 +73,32 @@ fn try_sendmsg(ctx: &LsmContext) -> Result<i32, i64> {
     gate_remote(addr_ptr, caller, HOOK_SOCKET_SENDMSG, true)
 }
 
-/// Returns the caller's zone id only when the caller is network-LOCKED: a
-/// non-global zoned task whose zone lacks POLICY_FLAG_ALLOW_NETWORK. Returns
-/// None (allow) for unzoned, global, or network-allowed callers.
+#[derive(Clone, Copy)]
+struct Caller {
+    zone_id: u32,
+    network_locked: bool,
+}
+
+/// Returns the caller's zone id for non-global zoned tasks. Network-open zones
+/// still need IP-to-zone checks for resolvable pod destinations; the
+/// `network_locked` flag only controls fallback behavior for unzoned/external
+/// destinations.
 #[inline(always)]
-fn network_locked_caller(ctx: &LsmContext) -> Option<u32> {
+fn zoned_caller(ctx: &LsmContext) -> Option<Caller> {
     let caller = lookup_caller_zone(ctx)?;
     if caller.flags & ZONE_FLAG_GLOBAL != 0 {
         return None;
     }
+    let mut network_locked = true;
     if let Some(policy) = ZONE_POLICY.get(caller.zone_id) {
         if policy.flags & POLICY_FLAG_ALLOW_NETWORK != 0 {
-            return None;
+            network_locked = false;
         }
     }
-    Some(caller.zone_id)
+    Some(Caller {
+        zone_id: caller.zone_id,
+        network_locked,
+    })
 }
 
 /// Deny when `addr_ptr` is a non-loopback AF_INET/AF_INET6 endpoint; allow
@@ -94,7 +106,7 @@ fn network_locked_caller(ctx: &LsmContext) -> Option<u32> {
 /// destination covered by the zone's CIDR allowlist is also allowed, optionally
 /// narrowed to a destination port.
 #[inline(always)]
-fn gate_remote(addr_ptr: u64, caller_zone: u32, hook: u8, egress: bool) -> Result<i32, i64> {
+fn gate_remote(addr_ptr: u64, caller: Caller, hook: u8, egress: bool) -> Result<i32, i64> {
     if addr_ptr == 0 {
         return Ok(0);
     }
@@ -105,21 +117,34 @@ fn gate_remote(addr_ptr: u64, caller_zone: u32, hook: u8, egress: bool) -> Resul
     if unsafe { is_loopback(addr_ptr, family)? } {
         return Ok(0);
     }
+    if egress && family == AF_INET {
+        let addr = unsafe { read_kernel_u32(addr_ptr, 4)? };
+        if let Some(dst_zone) = lookup_ip_zone(addr) {
+            if is_cross_zone_allowed(caller.zone_id, dst_zone) {
+                return Ok(0);
+            }
+            emit_deny_event(hook, caller.zone_id, dst_zone, addr as u64);
+            return Ok(-1);
+        }
+    }
+    if !caller.network_locked {
+        return Ok(0);
+    }
     if egress {
         let dst_port = unsafe { read_kernel_u16(addr_ptr, 2)? };
         if family == AF_INET {
             let addr = unsafe { read_kernel_u32(addr_ptr, 4)? };
-            if egress_cidr_allows(caller_zone, addr, dst_port) {
+            if egress_cidr_allows(caller.zone_id, addr, dst_port) {
                 return Ok(0);
             }
         } else {
             let addr = unsafe { read_kernel_u8x16(addr_ptr, 8)? };
-            if egress_cidr6_allows(caller_zone, addr, dst_port) {
+            if egress_cidr6_allows(caller.zone_id, addr, dst_port) {
                 return Ok(0);
             }
         }
     }
-    emit_deny_event(hook, caller_zone, ZONE_ID_HOST, family as u64);
+    emit_deny_event(hook, caller.zone_id, ZONE_ID_HOST, family as u64);
     Ok(-1)
 }
 

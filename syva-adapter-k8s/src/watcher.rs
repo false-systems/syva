@@ -1,4 +1,5 @@
 use crate::crd::SyvaZonePolicy;
+use crate::ip_zone::{apply_ip_zone_intents, IpZoneReconciler};
 use crate::mapper::spec_to_core_register;
 use crate::membership::{apply_intents, MembershipReconciler, ResolverConfig};
 use crate::metrics::{spawn_metrics_server, Metrics};
@@ -10,6 +11,7 @@ use kube::{Api, Client as KubeClient};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use syva_core_client::syva_core::{
     AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RemoveZoneRequest,
 };
@@ -45,14 +47,20 @@ async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolic
     );
 
     initial_reconcile_core(&mut core, &crds).await?;
+    let pod_api: Api<Pod> = Api::all(kube.clone());
     let mut pod_task = tokio::spawn(run_pod_membership_watcher(
         config.core_socket.clone(),
-        Api::all(kube),
+        pod_api.clone(),
         config.node_name.clone(),
         ResolverConfig {
             host_proc: config.host_proc.clone(),
             host_cgroup: config.host_cgroup.clone(),
         },
+        metrics.clone(),
+    ));
+    let mut ip_zone_task = tokio::spawn(run_pod_ip_zone_watcher(
+        config.core_socket.clone(),
+        pod_api,
         metrics.clone(),
     ));
 
@@ -93,8 +101,16 @@ async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolic
                 Err(anyhow::anyhow!(join_error).context("pod membership watcher panicked"))
             }
         },
+        joined = &mut ip_zone_task => match joined {
+            Ok(Ok(())) => Err(anyhow::anyhow!("pod IP-zone watcher exited unexpectedly")),
+            Ok(Err(error)) => Err(error.context("pod IP-zone watcher failed")),
+            Err(join_error) => {
+                Err(anyhow::anyhow!(join_error).context("pod IP-zone watcher panicked"))
+            }
+        },
     };
     pod_task.abort();
+    ip_zone_task.abort();
     result
 }
 
@@ -143,6 +159,53 @@ async fn run_pod_membership_watcher(
         }
     }
     anyhow::bail!("pod watch stream ended unexpectedly");
+}
+
+async fn run_pod_ip_zone_watcher(
+    core_socket: PathBuf,
+    pods: Api<Pod>,
+    metrics: Metrics,
+) -> Result<()> {
+    let mut core = syva_core_client::connect_unix_socket_with_retry(core_socket).await;
+    let mut reconciler = IpZoneReconciler::new();
+    info!(
+        annotation = crate::membership::ZONE_ANNOTATION,
+        "syva-k8s cluster-wide pod IP-zone watcher starting"
+    );
+
+    // Cluster-wide by design: a pod on this node may connect to a pod IP on
+    // another node, so every node needs the same eventual IP-to-zone view.
+    let mut stream = watcher(pods, WatcherConfig::default()).boxed();
+    let mut retry = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            event = stream.next() => match event {
+                Some(Ok(Event::Apply(pod)) | Ok(Event::InitApply(pod))) => {
+                    let mut intents = reconciler.pending_intents();
+                    intents.extend(reconciler.reconcile_pod(&pod));
+                    let outcomes = apply_ip_zone_intents(&mut core, &metrics, intents).await;
+                    reconciler.absorb_outcomes(&outcomes);
+                }
+                Some(Ok(Event::Delete(pod))) => {
+                    let mut intents = reconciler.pending_intents();
+                    intents.extend(reconciler.delete_pod(&pod));
+                    let outcomes = apply_ip_zone_intents(&mut core, &metrics, intents).await;
+                    reconciler.absorb_outcomes(&outcomes);
+                }
+                Some(Ok(Event::Init) | Ok(Event::InitDone)) => {}
+                Some(Err(error)) => {
+                    metrics.record_error("pod_ip_zone_watch");
+                    warn!(%error, "pod IP-zone watcher error");
+                }
+                None => anyhow::bail!("pod IP-zone watch stream ended unexpectedly"),
+            },
+            _ = retry.tick() => {
+                let intents = reconciler.pending_intents();
+                let outcomes = apply_ip_zone_intents(&mut core, &metrics, intents).await;
+                reconciler.absorb_outcomes(&outcomes);
+            }
+        }
+    }
 }
 
 async fn initial_reconcile_core(
