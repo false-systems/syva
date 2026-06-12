@@ -52,6 +52,15 @@ Request:
   loopback only (`socket_connect`/`socket_sendmsg`/`socket_bind` deny
   non-loopback). `NETWORK_MODE_BRIDGED` / `NETWORK_MODE_HOST` open network
   access.
+- `policy.allowed_egress_cidrs`: egress CIDR allowlist for a network-locked
+  zone. Each entry is an IPv4 or IPv6 CIDR, or a bare address treated as `/32`
+  for IPv4 and `/128` for IPv6. A bare CIDR allows any destination port
+  (`10.0.0.0/8`, `2001:db8::/32`); IPv4 may append a port as `CIDR:port`
+  (`10.0.0.0/8:5432`); IPv6 ports require brackets (`[2001:db8::/32]:443`).
+  A locked zone may still reach destinations these prefixes cover when the
+  optional port matches. Invalid entries are skipped with a warning. Limitation:
+  one exact CIDR prefix stores either one port or any-port; repeating the same
+  exact prefix with another port overwrites the previous value.
 
 Response:
 

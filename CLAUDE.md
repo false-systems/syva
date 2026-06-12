@@ -167,6 +167,19 @@ zones are network-locked; the lock/open switch is the zone's `network_mode`
 (proto `NetworkMode`, CRD `network.mode`, `syvactl zones register --network`).
 Roll it out behind `--mode audit` first.
 
+A locked zone can still be granted specific egress destinations via a per-zone
+**CIDR allowlist** (`EGRESS_CIDR_MAP` for IPv4 and `EGRESS_CIDR6_MAP` for IPv6,
+BPF LPM tries keyed by `(zone_id, address)`): connect/sendmsg to a covered
+IPv4/IPv6 destination is allowed, optionally narrowed to one destination port;
+everything else stays denied. A bare CIDR means any port (`10.0.0.0/8`,
+`2001:db8::/32`), IPv4 ports use `CIDR:port` (`10.0.0.0/8:5432`), and IPv6
+ports require brackets (`[2001:db8::/32]:443`). `bind` ignores the allowlist
+(it governs local listeners, not egress). Sourced from `network.allowed_egress`
+(proto `allowed_egress_cidrs`, CRD `network.allowedEgress`, file TOML).
+Limitation: each exact CIDR prefix stores either one port or any-port; repeating
+the same exact prefix with another port overwrites the previous value. Proven
+by `verify-egress-cidr`.
+
 `syva-core --mode audit` switches the global `ENFORCEMENT_MODE` map to
 observe-only: deny decisions are still counted (per-hook `deny` counter) and
 emitted as `WOULD_DENY` events, but the hooks return 0 so the operation
@@ -176,6 +189,7 @@ the `verify-audit-mode` gate.
 
 Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP` (keyed by composite
 `(dev, ino)` — kernel `s_dev` + `i_ino`), `ZONE_ALLOWED_COMMS`,
+`EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` (per-zone egress CIDR LPM tries),
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
 (ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps

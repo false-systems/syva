@@ -3,14 +3,15 @@
 
 use aya_ebpf::{
     macros::{fentry, lsm, map},
-    maps::{ring_buf::RingBuf, Array, HashMap, PerCpuArray},
+    maps::{lpm_trie::Key, ring_buf::RingBuf, Array, HashMap, LpmTrie, PerCpuArray},
     programs::{FEntryContext, LsmContext},
 };
 use syva_ebpf_common::{
-    EnforcementCounters, EnforcementEvent, InodeProbeRequest, InodeProbeResult, InodeZoneKey,
-    SelfTestResult, SelfTestUnixResult, ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel,
-    DECISION_DENY, DECISION_WOULD_DENY, ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_INODES,
-    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
+    EgressCidr6Key, EgressCidrKey, EgressCidrValue, EnforcementCounters, EnforcementEvent,
+    InodeProbeRequest, InodeProbeResult, InodeZoneKey, SelfTestResult, SelfTestUnixResult,
+    ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
+    ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_EGRESS_CIDRS, MAX_INODES, MAX_ZONES,
+    MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
 };
 
 mod escape_guard;
@@ -38,6 +39,19 @@ static INODE_ZONE_MAP: HashMap<InodeZoneKey, u32> = HashMap::with_max_entries(MA
 #[map]
 static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
     HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
+
+#[map]
+// Per-zone egress CIDR allowlist. A network-locked zone may still reach an
+// IPv4 destination whose (zone_id, addr) is covered by an inserted prefix and
+// whose destination port matches the entry value (or value port 0 = any).
+static EGRESS_CIDR_MAP: LpmTrie<EgressCidrKey, EgressCidrValue> =
+    LpmTrie::with_max_entries(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
+
+#[map]
+// IPv6 counterpart to EGRESS_CIDR_MAP. The address is the raw 16-byte
+// network-order sin6_addr.
+static EGRESS_CIDR6_MAP: LpmTrie<EgressCidr6Key, EgressCidrValue> =
+    LpmTrie::with_max_entries(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
 
 #[map]
 static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
@@ -96,6 +110,12 @@ unsafe fn read_kernel_u32(base: u64, offset: usize) -> Result<u32, i64> {
 #[inline(always)]
 unsafe fn read_kernel_u16(base: u64, offset: usize) -> Result<u16, i64> {
     let addr = (base + offset as u64) as *const u16;
+    aya_ebpf::helpers::bpf_probe_read_kernel(addr).map_err(|e| e as i64)
+}
+
+#[inline(always)]
+unsafe fn read_kernel_u8x16(base: u64, offset: usize) -> Result<[u8; 16], i64> {
+    let addr = (base + offset as u64) as *const [u8; 16];
     aya_ebpf::helpers::bpf_probe_read_kernel(addr).map_err(|e| e as i64)
 }
 
@@ -249,6 +269,35 @@ fn is_cross_zone_allowed(src_zone: u32, dst_zone: u32) -> bool {
     }
     let key = ZoneCommKey { src_zone, dst_zone };
     unsafe { ZONE_ALLOWED_COMMS.get(&key).is_some() }
+}
+
+#[inline(always)]
+fn egress_port_allows(entry: &EgressCidrValue, dst_port: u16) -> bool {
+    entry.port == 0 || entry.port == dst_port
+}
+
+/// True when `zone_id` has an egress-CIDR allowlist entry covering the IPv4
+/// destination `addr` (raw network-order `sin_addr`) and destination port.
+/// Looked up with a full 64-bit prefix; the LPM trie returns the longest
+/// inserted match.
+#[inline(always)]
+pub(crate) fn egress_cidr_allows(zone_id: u32, addr: u32, dst_port: u16) -> bool {
+    let key = Key::new(64, EgressCidrKey { zone_id, addr });
+    match EGRESS_CIDR_MAP.get(&key) {
+        Some(entry) => egress_port_allows(entry, dst_port),
+        None => false,
+    }
+}
+
+/// IPv6 counterpart to `egress_cidr_allows`. The lookup uses the full
+/// zone-plus-IPv6 width (32 + 128 bits).
+#[inline(always)]
+pub(crate) fn egress_cidr6_allows(zone_id: u32, addr: [u8; 16], dst_port: u16) -> bool {
+    let key = Key::new(160, EgressCidr6Key { zone_id, addr });
+    match EGRESS_CIDR6_MAP.get(&key) {
+        Some(entry) => egress_port_allows(entry, dst_port),
+        None => false,
+    }
 }
 
 /// True when userspace has switched the global mode to audit (observe-only).

@@ -59,6 +59,7 @@ sudo -E make verify-integration
 sudo -E make verify-container-integration
 sudo -E make verify-audit-mode
 sudo -E make verify-network-lock
+sudo -E make verify-egress-cidr
 sudo -E make verify-cgroup-escape
 ```
 

@@ -314,6 +314,7 @@ mod tests {
                         .map(|zone| (*zone).to_string())
                         .collect(),
                     mode: None,
+                    allowed_egress: vec![],
                 }),
                 process: None,
                 selector: None,

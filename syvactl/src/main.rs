@@ -245,6 +245,7 @@ Run `syvactl events --follow`."
                     allow_ptrace: false,
                     zone_type: zone_type.proto_value(),
                     network_mode: network.proto_value(),
+                    allowed_egress_cidrs: Vec::new(),
                 }),
             };
             let response = match client.register_zone(request).await {

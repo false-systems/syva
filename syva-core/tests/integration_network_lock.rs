@@ -49,6 +49,7 @@ fn policy(network_mode: i32) -> ZonePolicy {
         allow_ptrace: false,
         zone_type: 0,
         network_mode,
+        allowed_egress_cidrs: vec![],
     }
 }
 

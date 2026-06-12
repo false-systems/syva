@@ -33,6 +33,7 @@ pub fn policy_to_core_register(name: &str, policy: &FilePolicy) -> RegisterZoneR
                 0
             },
             network_mode: network_mode_to_proto(policy.policy.network.mode) as i32,
+            allowed_egress_cidrs: policy.policy.network.allowed_egress.clone(),
         }),
     }
 }

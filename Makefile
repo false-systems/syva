@@ -14,7 +14,7 @@ VERIFY_ENV = export PATH="$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/lo
 		export RUSTUP_HOME="/home/$$SUDO_USER/.rustup" CARGO_HOME="/home/$$SUDO_USER/.cargo"; \
 	fi
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-cgroup-escape verify-inode-identity verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-egress-cidr verify-cgroup-escape verify-inode-identity verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -88,6 +88,12 @@ verify-integration:
 # Run as: sudo -E make verify-container-integration
 verify-container-integration:
 	$(VERIFY_ENV); cargo run -p xtask -- verify-container-integration
+
+# Privileged Linux / BPF-LSM only: proves a network-locked zone reaches only
+# the destinations its egress CIDR allowlist permits.
+# Run as: sudo -E make verify-egress-cidr
+verify-egress-cidr:
+	$(VERIFY_ENV); cargo run -p xtask -- verify-egress-cidr
 
 # Privileged Linux / BPF-LSM only: proves a zoned task migrating out of its
 # cgroup is DETECTED (counter + degraded health). Detection only, not blocked.

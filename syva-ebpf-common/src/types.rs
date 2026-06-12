@@ -86,6 +86,43 @@ impl InodeZoneKey {
     }
 }
 
+/// LPM-trie key for the per-zone IPv4 egress CIDR allowlist (`EGRESS_CIDR_MAP`).
+/// `zone_id` is matched exactly (prefix always covers its 32 bits); `addr` is
+/// the IPv4 destination in NETWORK byte order, longest-prefix matched for CIDR
+/// semantics. eBPF reads `addr` straight from `sockaddr_in.sin_addr`; userspace
+/// writes `u32::from(ipv4).to_be()` — both land as network-order bytes in
+/// memory, which is what the kernel LPM trie compares.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EgressCidrKey {
+    pub zone_id: u32,
+    pub addr: u32,
+}
+
+/// LPM-trie key for the per-zone IPv6 egress CIDR allowlist
+/// (`EGRESS_CIDR6_MAP`). The IPv6 address is stored as the 16 raw network-order
+/// bytes from `sockaddr_in6.sin6_addr`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EgressCidr6Key {
+    pub zone_id: u32,
+    pub addr: [u8; 16],
+}
+
+/// Value in both egress CIDR tries. `port == 0` means any destination port;
+/// otherwise it is the raw network-order `sin_port` value read by eBPF.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EgressCidrValue {
+    pub port: u16,
+    pub _pad: u16,
+}
+
+/// Bits of an `EgressCidrKey` prefix that pin the zone_id (the leading u32).
+pub const EGRESS_CIDR_ZONE_BITS: u32 = 32;
+/// Max entries in the egress CIDR allowlist trie (across all zones).
+pub const MAX_EGRESS_CIDRS: u32 = 8192;
+
 // Flag constants for ZoneInfoKernel.flags
 /// reserved: set by userspace for ZoneType::Privileged but not checked by
 /// any eBPF hook. Privileged zones receive standard enforcement.
@@ -394,6 +431,12 @@ unsafe impl Sync for ZonePolicyKernel {}
 unsafe impl Send for ZonePolicyKernel {}
 unsafe impl Sync for ZoneCommKey {}
 unsafe impl Send for ZoneCommKey {}
+unsafe impl Sync for EgressCidrKey {}
+unsafe impl Send for EgressCidrKey {}
+unsafe impl Sync for EgressCidr6Key {}
+unsafe impl Send for EgressCidr6Key {}
+unsafe impl Sync for EgressCidrValue {}
+unsafe impl Send for EgressCidrValue {}
 unsafe impl Sync for SelfTestResult {}
 unsafe impl Send for SelfTestResult {}
 unsafe impl Sync for EnforcementCounters {}
@@ -415,6 +458,12 @@ unsafe impl aya::Pod for ZoneInfoKernel {}
 unsafe impl aya::Pod for ZonePolicyKernel {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ZoneCommKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for EgressCidrKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for EgressCidr6Key {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for EgressCidrValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SelfTestResult {}
 #[cfg(feature = "userspace")]
@@ -448,6 +497,13 @@ mod tests {
     #[test]
     fn zone_comm_key_size() {
         assert_eq!(size_of::<ZoneCommKey>(), 8);
+    }
+
+    #[test]
+    fn egress_cidr_keys_and_value_sizes() {
+        assert_eq!(size_of::<EgressCidrKey>(), 8);
+        assert_eq!(size_of::<EgressCidr6Key>(), 20);
+        assert_eq!(size_of::<EgressCidrValue>(), 4);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! wrappers for BPF map operations (zone membership, policy, comms).
 
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -81,6 +82,8 @@ const MAP_NAMES: &[&str] = &[
     "ENFORCEMENT_EVENTS",
     "ENFORCEMENT_MODE",
     "CGROUP_ESCAPE_COUNT",
+    "EGRESS_CIDR_MAP",
+    "EGRESS_CIDR6_MAP",
 ];
 
 /// fentry program name for the cgroup-escape detector (best-effort).
@@ -662,6 +665,140 @@ impl EnforceEbpf {
         Ok(())
     }
 
+    /// Replace a zone's egress allowlist. Entries may be IPv4 or IPv6 CIDRs,
+    /// bare addresses, and may include one destination port. A network-locked
+    /// zone may reach destinations covered by these prefixes when the port
+    /// matches; port 0 in the BPF value means any port.
+    pub fn set_zone_egress_cidrs(
+        &mut self,
+        zone_id: u32,
+        cidrs: &[String],
+    ) -> anyhow::Result<usize> {
+        use aya::maps::lpm_trie::{Key, LpmTrie};
+        use syva_ebpf_common::{
+            EgressCidr6Key, EgressCidrKey, EgressCidrValue, EGRESS_CIDR_ZONE_BITS,
+        };
+
+        self.remove_zone_egress_cidrs(zone_id)?;
+
+        let mut parsed = Vec::new();
+        for cidr in cidrs {
+            let Some(entry) = parse_egress_cidr(cidr) else {
+                tracing::warn!(
+                    zone_id,
+                    entry = %cidr,
+                    "skipping invalid egress allowlist entry"
+                );
+                continue;
+            };
+            parsed.push(entry);
+        }
+
+        let mut applied = 0usize;
+        {
+            let mut trie4: LpmTrie<_, EgressCidrKey, EgressCidrValue> = LpmTrie::try_from(
+                self.bpf
+                    .map_mut("EGRESS_CIDR_MAP")
+                    .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_MAP map not found"))?,
+            )?;
+            for entry in parsed
+                .iter()
+                .filter(|entry| matches!(entry.family, ParsedEgressFamily::Ipv4(_)))
+            {
+                let ParsedEgressFamily::Ipv4(ip) = entry.family else {
+                    continue;
+                };
+                let value = EgressCidrValue {
+                    // Network byte order, matching the eBPF sin_port read.
+                    port: entry.port.map(u16::to_be).unwrap_or(0),
+                    _pad: 0,
+                };
+                let key = Key::new(
+                    EGRESS_CIDR_ZONE_BITS + entry.prefix_bits,
+                    EgressCidrKey {
+                        zone_id,
+                        // Network byte order, matching the eBPF sin_addr read.
+                        addr: u32::from(ip).to_be(),
+                    },
+                );
+                trie4.insert(&key, value, 0)?;
+                applied += 1;
+            }
+        }
+
+        {
+            let mut trie6: LpmTrie<_, EgressCidr6Key, EgressCidrValue> = LpmTrie::try_from(
+                self.bpf
+                    .map_mut("EGRESS_CIDR6_MAP")
+                    .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR6_MAP map not found"))?,
+            )?;
+            for entry in parsed
+                .iter()
+                .filter(|entry| matches!(entry.family, ParsedEgressFamily::Ipv6(_)))
+            {
+                let ParsedEgressFamily::Ipv6(ip) = entry.family else {
+                    continue;
+                };
+                let value = EgressCidrValue {
+                    // Network byte order, matching the eBPF sin_port read.
+                    port: entry.port.map(u16::to_be).unwrap_or(0),
+                    _pad: 0,
+                };
+                let key = Key::new(
+                    EGRESS_CIDR_ZONE_BITS + entry.prefix_bits,
+                    EgressCidr6Key {
+                        zone_id,
+                        addr: ip.octets(),
+                    },
+                );
+                trie6.insert(&key, value, 0)?;
+                applied += 1;
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Remove every egress CIDR entry belonging to a zone.
+    pub fn remove_zone_egress_cidrs(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        use aya::maps::lpm_trie::{Key, LpmTrie};
+        use syva_ebpf_common::{EgressCidr6Key, EgressCidrKey, EgressCidrValue};
+
+        {
+            let mut trie4: LpmTrie<_, EgressCidrKey, EgressCidrValue> = LpmTrie::try_from(
+                self.bpf
+                    .map_mut("EGRESS_CIDR_MAP")
+                    .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_MAP map not found"))?,
+            )?;
+            let stale4: Vec<Key<EgressCidrKey>> = trie4
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(key, _)| key)
+                .filter(|key| key.data().zone_id == zone_id)
+                .collect();
+            for key in stale4 {
+                let _ = trie4.remove(&key);
+            }
+        }
+
+        {
+            let mut trie6: LpmTrie<_, EgressCidr6Key, EgressCidrValue> = LpmTrie::try_from(
+                self.bpf
+                    .map_mut("EGRESS_CIDR6_MAP")
+                    .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR6_MAP map not found"))?,
+            )?;
+            let stale6: Vec<Key<EgressCidr6Key>> = trie6
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(key, _)| key)
+                .filter(|key| key.data().zone_id == zone_id)
+                .collect();
+            for key in stale6 {
+                let _ = trie6.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     /// Clear a zone's enforcement policy (zeroed entry — Array can't remove).
     pub fn remove_zone_policy(&mut self, zone_id: u32) -> anyhow::Result<()> {
         use aya::maps::Array;
@@ -1008,6 +1145,111 @@ impl Drop for EnforceEbpf {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedEgressFamily {
+    Ipv4(Ipv4Addr),
+    Ipv6(Ipv6Addr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedEgressCidr {
+    family: ParsedEgressFamily,
+    prefix_bits: u32,
+    port: Option<u16>,
+}
+
+/// Parse an egress-allowlist entry. Accepted grammar:
+/// - IPv4: `A.B.C.D`, `A.B.C.D/N`, `A.B.C.D:P`, `A.B.C.D/N:P`
+/// - IPv6: `v6`, `v6/N`, `[v6]:P`, `[v6/N]:P`
+///
+/// Brackets are required for IPv6 ports because `:` is part of the address.
+fn parse_egress_cidr(entry: &str) -> Option<ParsedEgressCidr> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = entry.strip_prefix('[') {
+        let (inner, port) = rest.split_once("]:")?;
+        let port = parse_port(port)?;
+        let (addr, prefix_bits) = parse_addr_prefix(inner, 128)?;
+        let ip = addr.parse::<Ipv6Addr>().ok()?;
+        if prefix_bits > 128 {
+            return None;
+        }
+        return Some(ParsedEgressCidr {
+            family: ParsedEgressFamily::Ipv6(ip),
+            prefix_bits,
+            port: Some(port),
+        });
+    }
+
+    if let Some((cidr, port)) = split_ipv4_port(entry) {
+        let port = parse_port(port)?;
+        let (addr, prefix_bits) = parse_addr_prefix(cidr, 32)?;
+        let ip = addr.parse::<Ipv4Addr>().ok()?;
+        if prefix_bits > 32 {
+            return None;
+        }
+        return Some(ParsedEgressCidr {
+            family: ParsedEgressFamily::Ipv4(ip),
+            prefix_bits,
+            port: Some(port),
+        });
+    }
+
+    if entry.parse::<Ipv4Addr>().is_ok() || entry.contains('.') {
+        let (addr, prefix_bits) = parse_addr_prefix(entry, 32)?;
+        let ip = addr.parse::<Ipv4Addr>().ok()?;
+        if prefix_bits > 32 {
+            return None;
+        }
+        return Some(ParsedEgressCidr {
+            family: ParsedEgressFamily::Ipv4(ip),
+            prefix_bits,
+            port: None,
+        });
+    }
+
+    let (addr, prefix_bits) = parse_addr_prefix(entry, 128)?;
+    let ip = addr.parse::<Ipv6Addr>().ok()?;
+    if prefix_bits > 128 {
+        return None;
+    }
+    Some(ParsedEgressCidr {
+        family: ParsedEgressFamily::Ipv6(ip),
+        prefix_bits,
+        port: None,
+    })
+}
+
+fn parse_addr_prefix(entry: &str, default_bits: u32) -> Option<(&str, u32)> {
+    let (addr, bits) = match entry.split_once('/') {
+        Some((addr, mask)) => (addr, mask.parse::<u32>().ok()?),
+        None => (entry, default_bits),
+    };
+    if addr.is_empty() {
+        return None;
+    }
+    Some((addr, bits))
+}
+
+fn split_ipv4_port(entry: &str) -> Option<(&str, &str)> {
+    let (cidr, port) = entry.rsplit_once(':')?;
+    if cidr.contains(':') {
+        return None;
+    }
+    Some((cidr, port))
+}
+
+fn parse_port(port: &str) -> Option<u16> {
+    let port = port.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some(port)
+}
+
 /// Load (verify) the cgroup-escape fentry program. Separate from the LSM load
 /// loop because it is a different program type and a non-fatal best-effort.
 fn load_escape_detector(bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
@@ -1111,6 +1353,70 @@ fn resolve_offsets() -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_egress_cidr_handles_ipv4_masks_ports_and_rejects_bad() {
+        assert_eq!(
+            parse_egress_cidr("10.0.0.0/8"),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv4("10.0.0.0".parse().unwrap()),
+                prefix_bits: 8,
+                port: None,
+            })
+        );
+        assert_eq!(
+            parse_egress_cidr("192.168.1.5"),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv4("192.168.1.5".parse().unwrap()),
+                prefix_bits: 32,
+                port: None,
+            })
+        );
+        assert_eq!(
+            parse_egress_cidr(" 172.16.0.0/12:5432 "),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv4("172.16.0.0".parse().unwrap()),
+                prefix_bits: 12,
+                port: Some(5432),
+            })
+        );
+        assert_eq!(parse_egress_cidr("10.0.0.0/33"), None);
+        assert_eq!(parse_egress_cidr("10.0.0.0:0"), None);
+        assert_eq!(parse_egress_cidr("10.0.0.0:65536"), None);
+        assert_eq!(parse_egress_cidr("not-an-ip"), None);
+    }
+
+    #[test]
+    fn parse_egress_cidr_handles_ipv6_masks_ports_and_rejects_ambiguous_ports() {
+        assert_eq!(
+            parse_egress_cidr("2001:db8::/32"),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv6("2001:db8::".parse().unwrap()),
+                prefix_bits: 32,
+                port: None,
+            })
+        );
+        assert_eq!(
+            parse_egress_cidr("2001:db8::1"),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv6("2001:db8::1".parse().unwrap()),
+                prefix_bits: 128,
+                port: None,
+            })
+        );
+        assert_eq!(
+            parse_egress_cidr("[2001:db8::/32]:443"),
+            Some(ParsedEgressCidr {
+                family: ParsedEgressFamily::Ipv6("2001:db8::".parse().unwrap()),
+                prefix_bits: 32,
+                port: Some(443),
+            })
+        );
+        assert_eq!(parse_egress_cidr("2001:db8::/129"), None);
+        assert_eq!(parse_egress_cidr("2001:db8::1/128:443"), None);
+        assert_eq!(parse_egress_cidr("[2001:db8::1]"), None);
+        assert_eq!(parse_egress_cidr("[2001:db8::1]:0"), None);
+    }
 
     #[test]
     fn lsm_programs_use_real_hook_names() {

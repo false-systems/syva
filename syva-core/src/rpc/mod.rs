@@ -784,6 +784,7 @@ fn proto_policy_to_core_input(
         allow_ptrace: proto_policy.allow_ptrace,
         zone_type: parse_proto_zone_type(proto_policy.zone_type)?,
         network_mode: parse_proto_network_mode(proto_policy.network_mode)?,
+        allowed_egress_cidrs: proto_policy.allowed_egress_cidrs,
     })
 }
 

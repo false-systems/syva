@@ -60,6 +60,9 @@ enum Cli {
     /// non-loopback connect/sendmsg/bind (loopback only) while a Bridged zone
     /// is allowed out.
     VerifyNetworkLock,
+    /// Run the privileged egress-CIDR test: a locked zone reaches only its
+    /// allowlisted CIDR; all other destinations stay denied.
+    VerifyEgressCidr,
     /// Run the privileged cgroup-escape detection test: a zoned task migrating
     /// out of its zone is detected (counter + degraded health), not prevented.
     VerifyCgroupEscape,
@@ -96,6 +99,7 @@ fn main() -> Result<()> {
         Cli::VerifyK8sMembership => verify_k8s_membership(),
         Cli::VerifyAuditMode => verify_audit_mode(),
         Cli::VerifyNetworkLock => verify_network_lock(),
+        Cli::VerifyEgressCidr => verify_egress_cidr(),
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyInodeIdentity => verify_inode_identity(),
         Cli::VerifyDeployment => verify_deployment(),
@@ -676,6 +680,26 @@ fn verify_cgroup_escape() -> Result<()> {
             "syva-core",
             "--test",
             "integration_cgroup_escape",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged egress-CIDR integration test: a network-locked zone may
+/// reach only the destinations its CIDR allowlist permits.
+fn verify_egress_cidr() -> Result<()> {
+    privileged_runtime_preflight("verify-egress-cidr")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_egress_cidr",
             "--",
             "--ignored",
             "--nocapture",
