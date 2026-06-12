@@ -80,7 +80,8 @@ exit codes:
   **detected** (counter + degraded health). Detection only — BPF-LSM cannot
   block cgroup movement on supported kernels.
 - `verify-egress-cidr` — a network-locked zone reaches only its allowlisted
-  IPv4 CIDRs; every other destination stays denied with `EPERM`.
+  IPv4/IPv6 CIDRs and optional destination ports; every other destination stays
+  denied with `EPERM`.
 
 These are privileged Linux + BPF-LSM gates (the container gate also needs a
 container runtime, and the Kubernetes gate needs `kubectl` against a local
