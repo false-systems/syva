@@ -19,10 +19,27 @@
 //!
 //! ## Why it cannot pass trivially
 //!
-//! The same workload, cgroup, and zoned files are also used to confirm a
-//! genuine cross-zone denial DOES fire (the final check). So a core that
-//! allowed everything fails the denial check, and a core that blocks too much
-//! fails the allow checks — only correct enforcement passes both.
+//! Each allow assertion is paired with a same-hook cross-zone *control* that
+//! must still be DENIED in the same run. So a core that allowed everything
+//! fails a control, and a core that blocks too much fails an allow — only
+//! correct, discriminating enforcement passes both.
+//!
+//! ## Allow-side coverage
+//!
+//! Proven here, allow + cross-zone control, with kernel deny-counter evidence:
+//! - `file_open` (inode-target) — same-zone and AllowComm'd
+//! - exec — same-zone exec of an own-zone binary completes (exercises
+//!   `bprm_check`'s allow path); cross-zone exec is blocked at `file_open`,
+//!   which fires on the exec's FMODE_EXEC open before `bprm_check`
+//! - the network lock (`socket_connect`) — loopback from a locked zone
+//!
+//! The other socket hooks have allow-side proof in their own gates
+//! (`verify-network-lock` Bridged, `verify-egress-cidr` allowlisted,
+//! `verify-cross-zone-tcp` same-zone/AllowComm). `mmap_file`,
+//! `ptrace_access_check`, `task_kill`, and `unix_stream_connect` share a
+//! target-resolution shape already covered above (file/exec inode-target, or
+//! the cross-zone pair rule) and remain deny-only for now — dedicated
+//! allow gates for the live process/peer-target hooks are a follow-up.
 
 mod common;
 
@@ -189,8 +206,38 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
         "OVER-BLOCK: loopback connect moved the socket_connect deny counter ({before_c} -> {after_c})"
     );
 
-    // CONTROL — confirm the SAME setup still denies a real cross-zone open,
-    // so "all green" cannot mean "allows everything".
+    // ALLOW 3 — same-zone exec (bprm_check). A distinct target-resolution path
+    // from file_open (binprm->file inode), so it earns its own allow proof.
+    // Copied ELFs avoid shebang/interpreter ambiguity: bprm_check fires on the
+    // copied binary's own inode, which is what we register.
+    let a_bin = workdir.join("a-bin");
+    let b_bin = workdir.join("b-bin");
+    fs::copy("/bin/true", &a_bin)?;
+    fs::copy("/bin/true", &b_bin)?;
+    for (zone, bin) in [(ZONE_A, &a_bin), (ZONE_B, &b_bin)] {
+        client
+            .register_host_path(RegisterHostPathRequest {
+                zone_name: zone.to_string(),
+                path: bin.to_string_lossy().into_owned(),
+                recursive: false,
+            })
+            .await?;
+    }
+    let before_x = hook_deny(&mut client, "bprm_check_security").await?;
+    let exec_same = workload(&cgroup_procs, &format!("exec '{}'", a_bin.display()));
+    let after_x = hook_deny(&mut client, "bprm_check_security").await?;
+    anyhow::ensure!(
+        exec_same.status.success(),
+        "OVER-BLOCK: zone-a workload could not exec its OWN zone-a binary. stderr={:?}",
+        String::from_utf8_lossy(&exec_same.stderr)
+    );
+    anyhow::ensure!(
+        after_x == before_x,
+        "OVER-BLOCK: same-zone exec moved the bprm_check deny counter ({before_x} -> {after_x})"
+    );
+
+    // CONTROL (file) — confirm the SAME setup still denies a real cross-zone
+    // open, so "all green" cannot mean "allows everything".
     let before_d = file_open_deny(&mut client).await?;
     let cross = workload(&cgroup_procs, &format!("exec cat '{}'", b_file.display()));
     let after_d = file_open_deny(&mut client).await?;
@@ -200,7 +247,31 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
         after_d.saturating_sub(before_d)
     );
 
-    // ALLOW 3 — after AllowComm, the previously-denied pair is permitted.
+    // CONTROL (exec) — cross-zone exec must be denied, proving the same-zone
+    // exec ALLOW above is discriminating, not blanket-allow. execve opens the
+    // binary with FMODE_EXEC, so `file_open` fires and denies the cross-zone
+    // open before `bprm_check` is reached — the denial is attributed to
+    // file_open (for a registered inode, bprm is the same caller-vs-inode
+    // decision as a second layer). The shell stat/access-checks the path before
+    // and around the failed exec, so a single `exec` produces SEVERAL denied
+    // file_open hits, not exactly one — assert the op is blocked with EPERM and
+    // that the file_open deny counter moved (the workload is the only zoned
+    // process, so any movement in this window is attributable to it).
+    let before_xc = file_open_deny(&mut client).await?;
+    let exec_cross = workload(&cgroup_procs, &format!("exec '{}'", b_bin.display()));
+    let after_xc = file_open_deny(&mut client).await?;
+    let xc_err = String::from_utf8_lossy(&exec_cross.stderr);
+    anyhow::ensure!(
+        !exec_cross.status.success()
+            && xc_err.contains("Operation not permitted")
+            && after_xc > before_xc,
+        "control failed: cross-zone exec was not denied (success={}, file_open delta={}, stderr={:?})",
+        exec_cross.status.success(),
+        after_xc.saturating_sub(before_xc),
+        xc_err
+    );
+
+    // ALLOW 4 — after AllowComm, the previously-denied pair is permitted.
     client
         .allow_comm(AllowCommRequest {
             zone_a: ZONE_A.to_string(),
@@ -222,9 +293,12 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
     );
 
     println!("=== syva integration evidence: ALLOW contract (must-not-block) ===");
-    println!("same-zone file open      : ALLOWED, deny_delta=0");
-    println!("loopback from locked zone: ALLOWED, deny_delta=0");
-    println!("cross-zone control       : DENIED, deny_delta=1 (green != allow-everything)");
-    println!("AllowComm pair           : ALLOWED at runtime, deny_delta=0");
+    println!("same-zone file open      : ALLOWED, file_open deny_delta=0");
+    println!("same-zone exec           : ALLOWED, bprm_check deny_delta=0");
+    println!("loopback from locked zone: ALLOWED, socket_connect deny_delta=0");
+    println!("cross-zone file control  : DENIED, file_open deny_delta=1");
+    println!("cross-zone exec control  : DENIED with EPERM at file_open (exec-open)");
+    println!("AllowComm pair           : ALLOWED at runtime, file_open deny_delta=0");
+    println!("(green proves both directions: blocks the bad AND allows the good)");
     Ok(())
 }

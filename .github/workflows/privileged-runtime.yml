@@ -1,22 +1,87 @@
 name: privileged-runtime
 
+# Kernel-enforcement contract gates on a real kernel. Hosted runners cannot run
+# these (no one grants BPF-LSM), so they execute on a self-hosted privileged
+# runner — see docs/development/self-hosted-runner.md.
+#
+# SECURITY: these jobs run `sudo` with BPF/kernel access. They MUST NOT run on
+# untrusted code. There is intentionally NO `pull_request` trigger, so a forked
+# PR can never execute on the privileged runner; the `if:` guard below also
+# rejects anything that isn't the canonical repository.
+#
+# Trigger is workflow_dispatch ONLY until a self-hosted privileged runner is
+# registered (see docs/development/self-hosted-runner.md). Turning on the
+# push/tag triggers before a runner exists would queue jobs against labels with
+# no matching runner — they sit Queued and eventually fail, redding out main
+# and every release tag. Once a runner is up, add:
+#   push:
+#     branches: [main]
+#     tags: ['v*']
 on:
   workflow_dispatch:
 
+concurrency:
+  group: privileged-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  verify-runtime:
-    name: privileged v0.2 runtime gates
+  kernel-gates:
+    name: kernel enforcement contract
+    if: github.repository == 'false-systems/syva'
     runs-on: [self-hosted, linux, bpf-lsm, privileged]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - name: Host evidence
         run: |
           uname -a
           id
           cat /sys/kernel/security/lsm
-      - name: Verify load, attach, and self-tests
+          test "$(getent group syva)" || { echo "missing 'syva' group"; exit 1; }
+
+      # Load + attach + self-tests (offset chains verified against this kernel).
+      - name: verify-runtime
         run: sudo -E make verify-runtime
-      - name: Verify process/cgroup file_open enforcement
+
+      # Enforcement — it BLOCKS what it should.
+      - name: verify-integration
         run: sudo -E make verify-integration
-      - name: Verify container file_open enforcement
+      - name: verify-container-integration
         run: sudo -E make verify-container-integration
+      - name: verify-network-lock
+        run: sudo -E make verify-network-lock
+      - name: verify-egress-cidr
+        run: sudo -E make verify-egress-cidr
+      - name: verify-cross-zone-tcp
+        run: sudo -E make verify-cross-zone-tcp
+      - name: verify-inode-identity
+        run: sudo -E make verify-inode-identity
+
+      # The other half — it does NOT over-block. Pairing this with the deny
+      # gates above is the whole point: a deny-only suite passes just as happily
+      # if the core denies everything. Keep this green before treating the
+      # suite as an authoritative gate.
+      - name: verify-allow
+        run: sudo -E make verify-allow
+
+      # Observability + modes.
+      - name: verify-events
+        run: sudo -E make verify-events
+      - name: verify-audit-mode
+        run: sudo -E make verify-audit-mode
+      - name: verify-cgroup-escape
+        run: sudo -E make verify-cgroup-escape
+
+  # The Kubernetes membership gate needs a single-node cluster on the runner
+  # (k3s). Separate job so a runner without a cluster can be configured to skip
+  # it without failing the kernel-gates job above.
+  k8s-gate:
+    name: kubernetes membership contract
+    if: github.repository == 'false-systems/syva'
+    runs-on: [self-hosted, linux, bpf-lsm, privileged, k8s]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify-k8s-membership
+        run: sudo -E make verify-k8s-membership
