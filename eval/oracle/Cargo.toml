@@ -2,7 +2,7 @@
 name = "syva-oracle"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Blackbox oracle suite for syva-core. Numbered test cases against a running core."
 

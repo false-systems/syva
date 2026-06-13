@@ -1,10 +1,15 @@
 //! Privileged Linux / BPF-LSM integration test: prove IPv4 IP-to-zone
 //! cross-zone TCP enforcement.
 //!
-//! A zoned workload connects to two local non-loopback dummy-interface IPs.
-//! The core maps one IP to the caller's zone and one IP to another zone. The
-//! hook must allow same-zone, deny cross-zone with EPERM, and then allow the
+//! A zoned workload connects to local non-loopback dummy-interface IPs. The
+//! core maps one IP to the caller's zone and one IP to another zone. The hook
+//! must allow same-zone, deny cross-zone with EPERM, and then allow the
 //! cross-zone connect after `AllowComm`.
+//!
+//! A second workload in a network-OPEN (Bridged) zone proves the headline
+//! semantic: an unmapped destination is reachable (the zone really is open),
+//! but a destination that maps to another zone still follows the zone-pair
+//! rule — open network mode does not bypass `ZONE_ALLOWED_COMMS`.
 
 mod common;
 
@@ -22,8 +27,11 @@ use tonic::transport::Channel;
 
 const ZONE_A: &str = "syva-it-zone-ip-a";
 const ZONE_B: &str = "syva-it-zone-ip-b";
+const ZONE_C: &str = "syva-it-zone-ip-c";
 const IP_A: &str = "10.123.91.2";
 const IP_B: &str = "10.123.91.3";
+/// On the dummy interface but never inserted into IP_ZONE_MAP.
+const IP_UNMAPPED: &str = "10.123.91.4";
 
 fn locked_policy() -> ZonePolicy {
     ZonePolicy {
@@ -36,15 +44,24 @@ fn locked_policy() -> ZonePolicy {
     }
 }
 
+fn bridged_policy() -> ZonePolicy {
+    ZonePolicy {
+        network_mode: 1, // Bridged — network-open
+        ..locked_policy()
+    }
+}
+
 struct Cleanup {
-    cgroup: PathBuf,
+    cgroups: Vec<PathBuf>,
     iface: String,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
         remove_dummy_interface_silent(&self.iface);
-        let _ = fs::remove_dir(&self.cgroup);
+        for cgroup in &self.cgroups {
+            let _ = fs::remove_dir(cgroup);
+        }
     }
 }
 
@@ -63,6 +80,7 @@ fn setup_dummy_interface(iface: &str) -> anyhow::Result<()> {
     run_ip(&["link", "add", iface, "type", "dummy"])?;
     run_ip(&["addr", "add", &format!("{IP_A}/32"), "dev", iface])?;
     run_ip(&["addr", "add", &format!("{IP_B}/32"), "dev", iface])?;
+    run_ip(&["addr", "add", &format!("{IP_UNMAPPED}/32"), "dev", iface])?;
     run_ip(&["link", "set", iface, "up"])?;
     Ok(())
 }
@@ -108,19 +126,23 @@ fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
-async fn attach_zone_a(client: &mut SyvaCoreClient<Channel>, cgroup: &Path) -> anyhow::Result<()> {
+async fn attach_zone(
+    client: &mut SyvaCoreClient<Channel>,
+    cgroup: &Path,
+    zone: &str,
+) -> anyhow::Result<()> {
     let cgroup_id = fs::metadata(cgroup)?.ino();
     let attach = client
         .attach_container(AttachContainerRequest {
             container_id: format!("{:08x}{cgroup_id:08x}", std::process::id()),
-            zone_name: ZONE_A.to_string(),
+            zone_name: zone.to_string(),
             cgroup_id,
             source: "integration".to_string(),
             ..Default::default()
         })
         .await?
         .into_inner();
-    anyhow::ensure!(attach.ok, "attach failed: {}", attach.message);
+    anyhow::ensure!(attach.ok, "attach to {zone} failed: {}", attach.message);
     Ok(())
 }
 
@@ -130,13 +152,16 @@ async fn ip_zone_map_enforces_zone_pair_for_tcp_connect() -> anyhow::Result<()> 
     let pid = std::process::id();
     let iface = format!("syvaxz{pid}");
     let cgroup = PathBuf::from(format!("/sys/fs/cgroup/syva-cross-zone-tcp-{pid}"));
+    let bridged_cgroup = PathBuf::from(format!("/sys/fs/cgroup/syva-cross-zone-tcp-open-{pid}"));
     let procs = cgroup.join("cgroup.procs");
+    let bridged_procs = bridged_cgroup.join("cgroup.procs");
     let _cleanup = Cleanup {
-        cgroup: cgroup.clone(),
+        cgroups: vec![cgroup.clone(), bridged_cgroup.clone()],
         iface: iface.clone(),
     };
     setup_dummy_interface(&iface)?;
     fs::create_dir_all(&cgroup)?;
+    fs::create_dir_all(&bridged_cgroup)?;
 
     let sock_dir = tempfile::tempdir()?;
     let socket_path = sock_dir.path().join("syva-core.sock");
@@ -155,7 +180,14 @@ async fn ip_zone_map_enforces_zone_pair_for_tcp_connect() -> anyhow::Result<()> 
             policy: Some(locked_policy()),
         })
         .await?;
-    attach_zone_a(&mut client, &cgroup).await?;
+    client
+        .register_zone(RegisterZoneRequest {
+            zone_name: ZONE_C.to_string(),
+            policy: Some(bridged_policy()),
+        })
+        .await?;
+    attach_zone(&mut client, &cgroup, ZONE_A).await?;
+    attach_zone(&mut client, &bridged_cgroup, ZONE_C).await?;
 
     client
         .set_ip_zone(SetIpZoneRequest {
@@ -213,9 +245,45 @@ async fn ip_zone_map_enforces_zone_pair_for_tcp_connect() -> anyhow::Result<()> 
         out(&allowed)
     );
 
+    // --- Network-OPEN (Bridged) caller: open mode does not bypass zone-pair. ---
+    // Control: an unmapped non-loopback destination is reachable (no EPERM —
+    // ECONNREFUSED from the dummy interface is the expected network outcome),
+    // proving zone-c is genuinely network-open.
+    let open_unmapped = workload_connect(&bridged_procs, IP_UNMAPPED, 9);
+    anyhow::ensure!(
+        !out(&open_unmapped).contains("EPERM"),
+        "bridged zone was denied an UNMAPPED destination {IP_UNMAPPED}:9: {}",
+        out(&open_unmapped)
+    );
+    println!(
+        "bridged unmapped connect -> {IP_UNMAPPED}:9 : {} (NOT EPERM — open zone reaches unmapped destinations)",
+        out(&open_unmapped)
+    );
+
+    // The same open zone connecting to a MAPPED zone-b IP (no AllowComm
+    // between zone-c and zone-b) must be denied: zone-pair beats open mode.
+    let before_open = hook_deny(&mut client, "socket_connect").await?;
+    let open_cross = workload_connect(&bridged_procs, IP_B, 9);
+    let after_open = hook_deny(&mut client, "socket_connect").await?;
+    anyhow::ensure!(
+        out(&open_cross).contains("EPERM"),
+        "bridged zone reached mapped cross-zone IP {IP_B}:9 without AllowComm: {}",
+        out(&open_cross)
+    );
+    anyhow::ensure!(
+        after_open.saturating_sub(before_open) == 1,
+        "socket_connect deny did not move by 1 for the bridged caller (before={before_open}, after={after_open})"
+    );
+    println!(
+        "bridged cross-zone connect -> {IP_B}:9 : DENIED EPERM, deny_delta=1 (open mode does not bypass zone-pair)"
+    );
+
     println!("=== syva integration evidence: cross-zone TCP by IP-zone map ===");
     println!(
         "zone-a workload: same-zone IP {IP_A} allowed; zone-b IP {IP_B} denied with EPERM until AllowComm flips it to allowed"
+    );
+    println!(
+        "zone-c (Bridged) workload: unmapped {IP_UNMAPPED} reachable; mapped zone-b IP {IP_B} denied with EPERM — network-open zones still honor the zone-pair rule"
     );
     Ok(())
 }
