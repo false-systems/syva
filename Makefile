@@ -14,7 +14,7 @@ VERIFY_ENV = export PATH="$$HOME/.cargo/bin:/home/$$SUDO_USER/.cargo/bin:/usr/lo
 		export RUSTUP_HOME="/home/$$SUDO_USER/.rustup" CARGO_HOME="/home/$$SUDO_USER/.cargo"; \
 	fi
 
-.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-egress-cidr verify-cross-zone-tcp verify-cgroup-escape verify-inode-identity verify-events verify-deployment macos-check
+.PHONY: fmt lint test check precommit ci linux-bpf-check proto-check check-api-docs check-syvactl-contract check-openapi check-release-docs check-ebpf-artifact-policy lima-up lima-shell lima-check lima-test lima-ebpf-build lima-bootstrap lima-deploy lima-verify-deployment lima-undeploy lima-reset lima-smoke eval-build verify-runtime verify-integration verify-container-integration verify-k8s-membership verify-audit-mode verify-network-lock verify-egress-cidr verify-cross-zone-tcp verify-cgroup-escape verify-inode-identity verify-events verify-allow verify-deployment macos-check
 
 fmt:
 	cargo run -p xtask -- fmt
@@ -124,6 +124,12 @@ verify-inode-identity:
 # Run as: sudo -E make verify-events
 verify-events:
 	$(VERIFY_ENV); cargo run -p xtask -- verify-events
+
+# Privileged Linux / BPF-LSM only: proves the ALLOW contract — operations that
+# must NOT be blocked (same-zone, loopback, AllowComm pair) stay allowed.
+# Run as: sudo -E make verify-allow
+verify-allow:
+	$(VERIFY_ENV); cargo run -p xtask -- verify-allow
 
 # Privileged Linux / BPF-LSM only: proves audit mode records a cross-zone
 # would-deny decision WITHOUT blocking the operation.

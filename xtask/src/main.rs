@@ -75,6 +75,10 @@ enum Cli {
     /// Run the privileged enriched-events test: WatchEvents delivers zone
     /// names, comm, registered path, and destination ip:port on denials.
     VerifyEvents,
+    /// Run the privileged ALLOW-contract test: operations that must NOT be
+    /// blocked (same-zone, loopback, AllowComm pair) stay allowed
+    /// (deny_delta=0) — guards against over-blocking regressions.
+    VerifyAllow,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -110,6 +114,7 @@ fn main() -> Result<()> {
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyInodeIdentity => verify_inode_identity(),
         Cli::VerifyEvents => verify_events(),
+        Cli::VerifyAllow => verify_allow(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -708,6 +713,28 @@ fn verify_egress_cidr() -> Result<()> {
             "syva-core",
             "--test",
             "integration_egress_cidr",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged ALLOW-contract test: the operations Syva must NOT block
+/// (same-zone, loopback from a locked zone, an AllowComm pair) stay allowed
+/// with deny_delta=0, alongside a control that a real cross-zone open is still
+/// denied. Guards against over-blocking regressions.
+fn verify_allow() -> Result<()> {
+    privileged_runtime_preflight("verify-allow")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_allow_contract",
             "--",
             "--ignored",
             "--nocapture",
