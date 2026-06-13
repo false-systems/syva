@@ -8,11 +8,12 @@ to **deny cross-zone operations before they happen** — file opens, exec,
 executable `mmap`, `ptrace`, signals, Unix-socket connects, and network access
 (an Isolated zone is locked to loopback only).
 
-Current release: **v0.3.0** (the Kubernetes membership watcher release), on
-the v0.2 kernel-enforcement contract; the canonical control API is
-`syva.core.v1`. The network lock — `socket_sendmsg` / `socket_bind` and the
-per-zone `network_mode` switch — landed after the v0.3.0 tag and is on
-`main`, unreleased.
+Current release: **v0.4.0** — the first complete release: all nine hooks
+including the network lock, per-zone egress CIDR allowlists (ports + IPv6),
+pod-IP cross-zone TCP policy, composite `(dev, ino)` file identity, enriched
+deny events that explain themselves (zone names, process, path, destination,
+reasons), per-zone metrics, and a one-apply Kubernetes DaemonSet install.
+The canonical control API is `syva.core.v1`. See [CHANGELOG.md](CHANGELOG.md).
 
 No sidecar. No proxy. No remote control plane. Run `syva-core` per node, point an
 adapter at it, done.
@@ -126,6 +127,8 @@ single-node cluster); they are `#[ignore]`d in normal `cargo test`. See
 
 Enforcement runs on Linux only:
 
+- **Linux ≥ 5.10** — the pinned kernel floor (BPF-LSM, the BPF ring buffer,
+  and per-superblock tmpfs inode allocation all hold from there).
 - **BPF LSM enabled** — `bpf` must appear in `/sys/kernel/security/lsm`
   (enable at boot with `lsm=...,bpf` if it doesn't).
 - **cgroup v2** and **kernel BTF** (`/sys/kernel/btf/vmlinux`) — struct
