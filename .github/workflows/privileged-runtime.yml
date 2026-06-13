@@ -6,13 +6,18 @@ name: privileged-runtime
 #
 # SECURITY: these jobs run `sudo` with BPF/kernel access. They MUST NOT run on
 # untrusted code. There is intentionally NO `pull_request` trigger, so a forked
-# PR can never execute on the privileged runner. They run only on pushes to the
-# canonical repo's main branch, on release tags, and on manual dispatch — and
-# the `if:` guard rejects anything that isn't the canonical repository.
+# PR can never execute on the privileged runner; the `if:` guard below also
+# rejects anything that isn't the canonical repository.
+#
+# Trigger is workflow_dispatch ONLY until a self-hosted privileged runner is
+# registered (see docs/development/self-hosted-runner.md). Turning on the
+# push/tag triggers before a runner exists would queue jobs against labels with
+# no matching runner — they sit Queued and eventually fail, redding out main
+# and every release tag. Once a runner is up, add:
+#   push:
+#     branches: [main]
+#     tags: ['v*']
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 concurrency:
@@ -24,6 +29,7 @@ jobs:
     name: kernel enforcement contract
     if: github.repository == 'false-systems/syva'
     runs-on: [self-hosted, linux, bpf-lsm, privileged]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +80,7 @@ jobs:
     name: kubernetes membership contract
     if: github.repository == 'false-systems/syva'
     runs-on: [self-hosted, linux, bpf-lsm, privileged, k8s]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: verify-k8s-membership

@@ -256,7 +256,7 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
         after_xc.saturating_sub(before_xc)
     );
 
-    // ALLOW 3 — after AllowComm, the previously-denied pair is permitted.
+    // ALLOW 4 — after AllowComm, the previously-denied pair is permitted.
     client
         .allow_comm(AllowCommRequest {
             zone_a: ZONE_A.to_string(),
