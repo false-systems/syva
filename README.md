@@ -240,9 +240,23 @@ host-safe everywhere.
 
 ## Control surface
 
-The canonical control API is the local gRPC API `syva.core.v1` on the
-`syva-core` Unix socket — adapters and `syvactl` are clients of it. The REST API
-(`syva-api`) is partial. Full contract and OpenAPI under
+Policy is **live and programmable**, not a static file format. The canonical
+control API is the local gRPC API `syva.core.v1` on the `syva-core` Unix
+socket; every adapter and `syvactl` is a client of it. The verbs map straight
+to BPF map updates the kernel reads on the next syscall:
+
+- `RegisterZone` / `RemoveZone` — define a zone and its policy
+- `AllowComm` / `DenyComm` — open or close a cross-zone pair **at runtime**
+- `AttachContainer` / `DetachContainer` — bind a cgroup to a zone
+- `RegisterHostPath` — claim files `(dev, ino)` for a zone
+- `SetIpZone` / `RemoveIpZone` — map a pod IP to a zone for cross-zone TCP
+- `Status` / `WatchEvents` — health + the live enriched deny stream
+
+Because the decision data lives in maps, changes take effect with no reload and
+no redeploy — `verify-cross-zone-tcp` exercises exactly this: an `AllowComm`
+call flips a live kernel denial to an allow mid-test. (The file adapter also
+reconciles TOML on change; "no static policy" is the point.) The REST API
+(`syva-api`) is a partial proxy. Full contract and OpenAPI under
 [`docs/api/`](docs/api/).
 
 ```sh
@@ -265,6 +279,31 @@ permits it).
 
 Kernel struct offsets are resolved from BTF at startup — no hardcoded offsets. A
 caller or target not in any zone is invisible to enforcement (allowed).
+
+### Policy → enforcement
+
+What a written policy actually does. Each section of the file-adapter policy
+maps to a specific kernel mechanism — or, where there is no LSM hook for it, is
+explicitly **planned, not enforced** (parsed and validated, but Syvä does not
+enforce it; use the noted alternative). Source of truth is the code, not this
+table; it is checked against the hooks and the adapter.
+
+| Policy section | Enforced by | Status |
+| --- | --- | --- |
+| `[filesystem] host_paths` | `INODE_ZONE_MAP` → `file_open`, `bprm_check`, `mmap_file` | **enforced** |
+| `[network] mode` | `ZONE_POLICY` flag → `socket_connect`/`sendmsg`/`bind` (network lock) | **enforced** |
+| `[network] allowed_zones` | `ZONE_ALLOWED_COMMS` → every cross-zone hook | **enforced** |
+| `[network] allowed_egress` | `EGRESS_CIDR` maps → `socket_connect`/`sendmsg` (CIDR + optional port, v4/v6) | **enforced** |
+| `[capabilities] allowed` | only `CAP_SYS_PTRACE` → `ptrace_access_check`; other capabilities are not read by any hook | **partial** (ptrace only) |
+| `[network] allowed_ingress` | — no inbound LSM hook | **planned** — use NetworkPolicy / iptables |
+| `[resources]` cpu/memory/io/pids | cgroup controllers, not BPF-LSM | **planned** — validated, not enforced by Syvä |
+| `[devices] allowed` | device cgroup controller | **planned** |
+| `[syscalls] deny` | seccomp | **planned** — use a seccomp profile |
+| `[zone]` (name, type) | — | metadata only |
+
+Pod-IP → zone mapping for cross-zone TCP is set through the gRPC `SetIpZone`
+(driven by the Kubernetes adapter's cluster-wide pod-IP watch), not the TOML
+schema; it enforces via `IP_ZONE_MAP` + `ZONE_ALLOWED_COMMS`.
 
 Container membership is tracked per node (container ID, optional pod identity,
 cgroup ID, zone, source adapter, generation); updates are idempotent and
