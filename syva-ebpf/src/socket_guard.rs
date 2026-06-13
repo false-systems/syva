@@ -1,9 +1,9 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    egress_cidr6_allows, egress_cidr_allows, emit_deny_event, finish_decision,
+    egress_cidr6_allows, egress_cidr_allows, emit_deny_event_net, finish_decision,
     is_cross_zone_allowed, lookup_caller_zone, lookup_ip_zone, read_kernel_u16, read_kernel_u32,
-    read_kernel_u64, read_kernel_u8x16, ZONE_POLICY,
+    read_kernel_u64, read_kernel_u8x16, NetDst, ZONE_POLICY,
 };
 use syva_ebpf_common::{
     AF_INET, AF_INET6, HOOK_SOCKET_BIND, HOOK_SOCKET_CONNECT, HOOK_SOCKET_SENDMSG,
@@ -117,13 +117,29 @@ fn gate_remote(addr_ptr: u64, caller: Caller, hook: u8, egress: bool) -> Result<
     if unsafe { is_loopback(addr_ptr, family)? } {
         return Ok(0);
     }
-    if egress && family == AF_INET {
+    // Capture the destination once for both deny paths: the port (offset 2 in
+    // both sockaddr_in and sockaddr_in6) and the address (v4 at offset 4 in
+    // the first 4 bytes, v6 at offset 8 in all 16), network order throughout.
+    let dst_port = unsafe { read_kernel_u16(addr_ptr, 2)? };
+    let mut dst = NetDst {
+        addr: [0; 16],
+        port: dst_port,
+    };
+    let addr_v4 = if family == AF_INET {
         let addr = unsafe { read_kernel_u32(addr_ptr, 4)? };
-        if let Some(dst_zone) = lookup_ip_zone(addr) {
+        dst.addr[..4].copy_from_slice(&addr.to_ne_bytes());
+        addr
+    } else {
+        dst.addr = unsafe { read_kernel_u8x16(addr_ptr, 8)? };
+        0
+    };
+
+    if egress && family == AF_INET {
+        if let Some(dst_zone) = lookup_ip_zone(addr_v4) {
             if is_cross_zone_allowed(caller.zone_id, dst_zone) {
                 return Ok(0);
             }
-            emit_deny_event(hook, caller.zone_id, dst_zone, addr as u64);
+            emit_deny_event_net(hook, caller.zone_id, dst_zone, family as u64, dst);
             return Ok(-1);
         }
     }
@@ -131,20 +147,15 @@ fn gate_remote(addr_ptr: u64, caller: Caller, hook: u8, egress: bool) -> Result<
         return Ok(0);
     }
     if egress {
-        let dst_port = unsafe { read_kernel_u16(addr_ptr, 2)? };
         if family == AF_INET {
-            let addr = unsafe { read_kernel_u32(addr_ptr, 4)? };
-            if egress_cidr_allows(caller.zone_id, addr, dst_port) {
+            if egress_cidr_allows(caller.zone_id, addr_v4, dst_port) {
                 return Ok(0);
             }
-        } else {
-            let addr = unsafe { read_kernel_u8x16(addr_ptr, 8)? };
-            if egress_cidr6_allows(caller.zone_id, addr, dst_port) {
-                return Ok(0);
-            }
+        } else if egress_cidr6_allows(caller.zone_id, dst.addr, dst_port) {
+            return Ok(0);
         }
     }
-    emit_deny_event(hook, caller.zone_id, ZONE_ID_HOST, family as u64);
+    emit_deny_event_net(hook, caller.zone_id, ZONE_ID_HOST, family as u64, dst);
     Ok(-1)
 }
 

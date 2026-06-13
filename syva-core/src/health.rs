@@ -186,6 +186,11 @@ pub struct HealthState {
     pub escape_detector_attached: bool,
     /// Count of detected cgroup-zone escapes (latest snapshot).
     pub cgroup_escapes_detected: u64,
+    /// Per-(zone name, hook) deny/would-deny counts, fed by the event pump.
+    /// Series for removed zones persist until restart (documented).
+    pub zone_denies: std::collections::HashMap<(String, String), u64>,
+    /// Events dropped on lagging WatchEvents subscribers (broadcast gaps).
+    pub watch_events_dropped: u64,
 }
 
 impl HealthState {
@@ -211,7 +216,21 @@ impl HealthState {
             enforcement_mode: "enforce",
             escape_detector_attached: false,
             cgroup_escapes_detected: 0,
+            zone_denies: std::collections::HashMap::new(),
+            watch_events_dropped: 0,
         }
+    }
+
+    /// Fold a batch of per-(zone, hook) deny counts from the event pump.
+    pub fn record_zone_denies(&mut self, counts: std::collections::HashMap<(String, String), u64>) {
+        for (key, count) in counts {
+            *self.zone_denies.entry(key).or_default() += count;
+        }
+    }
+
+    /// Count events a lagging WatchEvents subscriber missed.
+    pub fn add_watch_events_dropped(&mut self, n: u64) {
+        self.watch_events_dropped += n;
     }
 
     pub fn mark_ebpf_loaded(&mut self) {
@@ -523,6 +542,32 @@ pub fn render_metrics(health: &HealthState) -> String {
     out.push_str(&format!(
         "syva_cgroup_escape_detected_total {}\n",
         health.cgroup_escapes_detected
+    ));
+
+    if !health.zone_denies.is_empty() {
+        out.push_str(
+            "# HELP syva_zone_deny_total Deny and would-deny decisions per zone and hook, from the event stream.\n",
+        );
+        out.push_str("# TYPE syva_zone_deny_total counter\n");
+        let mut series: Vec<_> = health.zone_denies.iter().collect();
+        series.sort();
+        for ((zone, hook), count) in series {
+            out.push_str(&format!(
+                "syva_zone_deny_total{{zone=\"{}\",hook=\"{}\"}} {}\n",
+                escape_label(zone),
+                escape_label(hook),
+                count
+            ));
+        }
+    }
+
+    out.push_str(
+        "# HELP syva_watch_events_dropped_total Events missed by lagging WatchEvents subscribers.\n",
+    );
+    out.push_str("# TYPE syva_watch_events_dropped_total counter\n");
+    out.push_str(&format!(
+        "syva_watch_events_dropped_total {}\n",
+        health.watch_events_dropped
     ));
 
     out.push_str("# HELP syva_ebpf_attached_hooks Attached BPF-LSM hook count.\n");

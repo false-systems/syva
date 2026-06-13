@@ -317,10 +317,33 @@ fn audit_mode_active() -> bool {
     matches!(ENFORCEMENT_MODE.get(0), Some(&MODE_AUDIT))
 }
 
+/// Destination endpoint of a denied socket operation, threaded from the
+/// network hooks into the event. NONE for every non-socket hook.
+#[derive(Clone, Copy)]
+pub(crate) struct NetDst {
+    /// IPv4 in the first 4 bytes / IPv6 in all 16, network order.
+    pub addr: [u8; 16],
+    /// Network-order sin_port / sin6_port.
+    pub port: u16,
+}
+
+impl NetDst {
+    pub(crate) const NONE: NetDst = NetDst {
+        addr: [0; 16],
+        port: 0,
+    };
+}
+
 #[inline(always)]
 fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
+    emit_deny_event_net(hook, caller_zone, target_zone, context, NetDst::NONE);
+}
+
+#[inline(always)]
+fn emit_deny_event_net(hook: u8, caller_zone: u32, target_zone: u32, context: u64, dst: NetDst) {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    let comm = aya_ebpf::helpers::bpf_get_current_comm().unwrap_or([0; 16]);
 
     let decision = if audit_mode_active() {
         DECISION_WOULD_DENY
@@ -333,11 +356,12 @@ fn emit_deny_event(hook: u8, caller_zone: u32, target_zone: u32, context: u64) {
         pid,
         hook,
         decision,
-        _pad0: [0; 2],
+        dst_port: dst.port,
         caller_zone,
         target_zone,
         context,
-        _reserved: [0; 2],
+        comm,
+        dst_addr: dst.addr,
     };
 
     if let Some(mut entry) = ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) {
@@ -359,22 +383,27 @@ fn record_escape(src_zone: u32, dst_cgroup_id: u64) {
 
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    let comm = aya_ebpf::helpers::bpf_get_current_comm().unwrap_or([0; 16]);
     let event = EnforcementEvent {
         timestamp_ns: ts,
         pid,
         hook: syva_ebpf_common::HOOK_CGROUP_ESCAPE,
         decision: syva_ebpf_common::DECISION_ESCAPE,
-        _pad0: [0; 2],
+        dst_port: 0,
         caller_zone: src_zone,
         target_zone: syva_ebpf_common::ZONE_ID_HOST,
         // context = the cgroup the task escaped TO (caller_zone is the zone it left).
         context: dst_cgroup_id,
-        _reserved: [0; 2],
+        comm,
+        dst_addr: [0; 16],
     };
     if let Some(mut entry) = ENFORCEMENT_EVENTS.reserve::<EnforcementEvent>(0) {
         entry.write(event);
         entry.submit(0);
     }
+    // No lost counter: HOOK_CGROUP_ESCAPE (0xFF) is outside the per-hook
+    // counter array by design, and CGROUP_ESCAPE_COUNT above already recorded
+    // the detection itself.
 }
 
 /// Increment the lost event counter for a hook when ring buffer reserve fails.

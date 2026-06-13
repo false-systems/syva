@@ -119,18 +119,20 @@ syvactl comms deny zone-a zone-b --format json
 ### syvactl events --follow
 
 Calls gRPC `WatchEvents`. `--follow` is **required**: `WatchEvents` is a live
-stream and syva-core hands out a single ring-buffer consumer, so a non-follow
-call would drain and release it. `syvactl events` without `--follow` exits with
-an error rather than consuming the stream.
+broadcast stream from the core's event pump, and a non-follow call returns no
+events (the pump owns the ring buffer, so there is no drainable backlog).
+`syvactl events` without `--follow` exits with an error.
 
 ```sh
 syvactl events --follow
 syvactl events --follow --format json
 ```
 
-The event stream consumes the existing single-consumer ring buffer. If another
-client has already taken the stream, the command reports the gRPC error from
-`syva-core`.
+Any number of clients may watch concurrently. Events are enriched server-side:
+zone names, process comm, registered path (file denials), destination IP:port
+(socket denials), and stable `what_failed` / `why_it_matters` /
+`possible_causes` reason fields. The text form is the compact human
+projection; `--format json` carries every field.
 
 ## Relationship To Other Surfaces
 

@@ -5,7 +5,6 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use syva_ebpf_common::{EnforcementEvent, DECISION_DENY, DECISION_ESCAPE, DECISION_WOULD_DENY};
 use syva_proto::syva_core::syva_core_server::SyvaCore;
 use syva_proto::syva_core::{
     AllowCommRequest, AllowCommResponse, AttachContainerRequest, AttachContainerResponse, CommPair,
@@ -41,6 +40,9 @@ pub(crate) struct SyvaCoreService {
     pub(crate) ebpf: Arc<Mutex<EnforceEbpf>>,
     pub(crate) health: SharedHealth,
     pub(crate) start_time: Instant,
+    /// Enriched enforcement events from the core's event pump; WatchEvents
+    /// subscribers attach here.
+    pub(crate) events: tokio::sync::broadcast::Sender<DenyEvent>,
 }
 
 impl SyvaCoreService {
@@ -755,6 +757,11 @@ impl SyvaCore for SyvaCoreService {
 
     type WatchEventsStream = ReceiverStream<Result<DenyEvent, Status>>;
 
+    /// Stream enriched enforcement events. The core's event pump owns the
+    /// ring buffer and broadcasts enriched events; any number of subscribers
+    /// may watch concurrently. A subscriber that lags behind the broadcast
+    /// capacity gets a counted gap (`syva_watch_events_dropped_total`), never
+    /// a stalled core.
     async fn watch_events(
         &self,
         request: Request<WatchEventsRequest>,
@@ -762,65 +769,31 @@ impl SyvaCore for SyvaCoreService {
         let req = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(256);
 
-        let mut ebpf = self.ebpf.lock().await;
-        let ring_buf = ebpf
-            .take_event_ring_buf()
-            .ok_or_else(|| Status::unavailable("event ring buffer already taken"))?;
-        drop(ebpf);
+        if !req.follow {
+            // The pump owns the ring buffer; there is no drainable backlog
+            // outside the live stream. Close immediately.
+            drop(tx);
+            return Ok(Response::new(ReceiverStream::new(rx)));
+        }
 
+        let mut events = self.events.subscribe();
+        let health = self.health.clone();
         tokio::spawn(async move {
-            let mut ring_buf = ring_buf;
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-
             loop {
-                interval.tick().await;
-
-                let events: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
-                    let mut out = Vec::new();
-                    while let Some(item) = ring_buf.next() {
-                        if item.len() < std::mem::size_of::<EnforcementEvent>() {
-                            continue;
-                        }
-                        let event = unsafe {
-                            std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
-                        };
-                        out.push(event);
-                        if out.len() >= 1000 {
-                            break;
+                match events.recv().await {
+                    Ok(event) => {
+                        if tx.send(Ok(event)).await.is_err() {
+                            return; // client went away
                         }
                     }
-                    out
-                });
-
-                let had_events = !events.is_empty();
-                for event in events {
-                    // Deny, audit would-deny, and cgroup-escape events all reach
-                    // watchers. A per-event decision label on DenyEvent is part
-                    // of the structured-reason proto follow-up (issue #67).
-                    if !matches!(
-                        event.decision,
-                        DECISION_DENY | DECISION_WOULD_DENY | DECISION_ESCAPE
-                    ) {
-                        continue;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        health.write().await.add_watch_events_dropped(missed);
+                        tracing::warn!(
+                            missed,
+                            "WatchEvents subscriber lagged — events skipped for this client"
+                        );
                     }
-                    let deny_event = DenyEvent {
-                        timestamp_ns: event.timestamp_ns,
-                        hook: crate::events::hook_label(event.hook).to_string(),
-                        zone_id: event.caller_zone,
-                        target_zone_id: event.target_zone,
-                        pid: event.pid,
-                        comm: String::new(),
-                        inode: 0,
-                        context: event.context.to_string(),
-                    };
-
-                    if tx.send(Ok(deny_event)).await.is_err() {
-                        return;
-                    }
-                }
-
-                if !req.follow && !had_events {
-                    return;
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
             }
         });

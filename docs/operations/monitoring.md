@@ -92,7 +92,22 @@ syva_memberships_active
 syva_membership_updates_total{result}
 syva_membership_generation_stale_total
 syva_membership_conflicts_total
+syva_zone_deny_total{zone,hook}
+syva_watch_events_dropped_total
 ```
+
+`syva_zone_deny_total` counts deny and would-deny decisions per zone name and
+hook, fed by the core's event pump — alert on a zone whose deny rate jumps.
+Series for removed zones persist until the core restarts.
+`syva_watch_events_dropped_total` counts events missed by lagging
+`WatchEvents` subscribers (broadcast gaps), not kernel-side loss — kernel
+ring-buffer loss stays in the per-hook `lost` counters.
+
+Every deny also lands in the core log as one structured line with a constant
+event name (`syva.enforcement.denied`, `syva.enforcement.would_deny` at INFO
+for audit mode, `syva.cgroup.escape`) carrying zone names, comm, path or
+destination, and the reason fields — `--log-format json` makes these directly
+shippable.
 
 Supported hook labels:
 
