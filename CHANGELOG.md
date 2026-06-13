@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+Post-v0.4.0 polish — docs, testing, and CI. No enforcement-behavior change
+except the corrected adapter log noted below.
+
+### Fixed
+
+- **Misleading adapter log**: the file adapter warned that
+  `network.allowed_egress` was "configured but NOT enforced." Egress CIDRs
+  *are* enforced (`EGRESS_CIDR` maps → `socket_connect`/`sendmsg`, proven by
+  `verify-egress-cidr`); the warning now covers only `network.allowed_ingress`,
+  which genuinely has no inbound LSM hook. (#102)
+
+### Testing & CI
+
+- **ALLOW-side exec coverage**: `verify-allow` now proves a same-zone exec is
+  permitted (`bprm_check`) while a cross-zone exec is still denied — pairing
+  the must-not-block half with a same-hook control so "all green" cannot mean
+  "denies everything." (#103)
+- **Self-hosted runner sweep**: `privileged-runtime.yml` runs the full v0.4
+  gate set on a self-hosted BPF-LSM runner, fork-safe by construction (no
+  `pull_request` trigger; canonical-repo guard). New
+  `docs/development/self-hosted-runner.md` documents the threat model, runner
+  requirements, and the current + floor (5.10) kernel matrix. (#103)
+
+### Docs
+
+- README: real SVG architecture diagrams; a **policy → enforcement** table
+  (each policy section mapped to its kernel mechanism, gaps labeled *planned*,
+  audited against the code); live-programmable control-surface framing; and a
+  corrected CO-RE description (Syva injects BTF-resolved offsets and self-tests
+  them at startup rather than using CO-RE relocation). (#101, #102)
+- Removed the stale `CODEX_MIGRATION.md` v0.2 cleanup note (all its follow-ups
+  shipped); archive references repointed to `CLAUDE.md`. (#104)
+
 ## v0.4.0 — 2026-06-13
 
 The first complete release. Everything below is proven by privileged kernel
