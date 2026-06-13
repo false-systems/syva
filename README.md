@@ -2,138 +2,79 @@
 
 **Your containers share a kernel. Syvä makes the kernel enforce the boundaries between them.**
 
-Syvä is a node-local Linux/eBPF LSM enforcement engine. It puts each workload in
-a *zone*, keeps zone membership and policy in BPF maps, and uses kernel LSM hooks
-to **deny cross-zone operations before they happen** — file opens, exec,
-executable `mmap`, `ptrace`, signals, Unix-socket connects, and network access
-(an Isolated zone is locked to loopback only).
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![release](https://img.shields.io/badge/release-v0.4.0-2ea44f.svg)](CHANGELOG.md)
+[![platform](https://img.shields.io/badge/platform-Linux%20%E2%89%A5%205.10%20%C2%B7%20BPF--LSM-informational.svg)](#requirements)
+[![enforcement](https://img.shields.io/badge/enforcement-kernel%20proven-8a2be2.svg)](#proof-not-promises)
 
-Current release: **v0.3.0** (the Kubernetes membership watcher release), on
-the v0.2 kernel-enforcement contract; the canonical control API is
-`syva.core.v1`. The network lock — `socket_sendmsg` / `socket_bind` and the
-per-zone `network_mode` switch — landed after the v0.3.0 tag and is on
-`main`, unreleased.
+Syvä is a node-local Linux/eBPF enforcement engine. It puts each workload in a
+*zone* and uses kernel **BPF-LSM** hooks to **deny cross-zone operations before
+they happen** — reading another zone's files, executing its binaries, debugging
+or signaling its processes, talking to its sockets, or reaching the network it
+isn't allowed to. The decision lives in the kernel, on the syscall path, and
+returns `EPERM` before the operation completes.
 
-No sidecar. No proxy. No remote control plane. Run `syva-core` per node, point an
-adapter at it, done.
+No sidecar. No proxy. No remote control plane. Run `syva-core` per node, point
+an adapter at it, done.
 
 > *Syvä* (Finnish) — *deep*. Where enforcement happens.
 
----
-
-## The idea
-
-Namespaces and cgroups put up structural walls, but nothing checks whether
-container A should be allowed to read container B's files, signal its processes,
-attach a debugger, or connect to its sockets. The kernel doesn't know these
-workloads shouldn't interact.
-
-Syvä makes it know:
-
 ```text
- Node
- ════════════════════════════════════════════════
-   zone: "frontend"            zone: "database"
-  ┌──────────────┐            ┌──────────────┐
-  │ nginx        │            │ postgres     │
-  │ web          │            │ redis        │
-  └──────────────┘            └──────────────┘
-        │                            │
-        │  open("/db/secret") ───X   │
-        │  exec("/db/pg_dump") ──X   │
-        │  ptrace(redis_pid) ────X   │
-        │  kill(pg_pid) ─────────X   │
-        │  connect(10.0.0.5) ────X   │
-        │                            │
-        X = denied in the kernel, before it happens
+                         one shared kernel
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                  │
+  │   zone: frontend                          zone: database         │
+  │   ┌───────────────┐                       ┌───────────────┐      │
+  │   │  nginx · web   │                       │  postgres      │     │
+  │   └───────┬───────┘                       └───────┬───────┘      │
+  │           │                                       │              │
+  │           │   open   /db/secret    ──────╳        │              │
+  │           │   exec   /db/pg_dump   ──────╳        │              │
+  │           │   ptrace postgres      ──────╳        │              │
+  │           │   connect 10.0.0.5:5432 ─────╳        │              │
+  │           │                                       │              │
+  │   ════════╪═══════════════  Syvä  ════════════════╪═══════════   │
+  │           ▼            (BPF-LSM, on the           ▼              │
+  │        syscall          syscall path)          syscall          │
+  │                                                                  │
+  │   ╳  denied in the kernel, before it happens — returns EPERM     │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-Same zone — or an explicitly allowed pair — is permitted. Any other cross-zone
-operation is denied with `EPERM` and recorded in per-hook counters and the event
-stream. An *Isolated* zone (the default network mode) is additionally
-network-locked: non-loopback TCP/UDP connect, datagram send, and bind are
-denied in the kernel, so the zone reaches loopback only.
+Same zone — or an explicitly allowed pair — is permitted. Everything else
+cross-zone is denied and recorded. An *Isolated* zone (the default) is also
+network-locked: it reaches loopback only until you open it.
 
-## Proof, not promises
+---
 
-Syvä ships with reproducible **kernel-level enforcement evidence**, not just unit
-tests. Each gate prints its declared PASS/BLOCK contract *before* it runs and
-then asserts real kernel evidence — a per-hook deny counter delta, an `EPERM`
-from a live syscall, a recorded would-deny, or an escape detection — not just
-exit codes:
+## Contents
 
-- `verify-runtime` — loads the release eBPF object, attaches all nine BPF-LSM
-  hooks, and passes the cgroup / inode / unix self-tests.
-- `verify-integration` — a zoned process reads its own zone's file (allowed) but
-  is blocked from another zone's file with `EPERM`.
-- `verify-container-integration` — the same denial against a **real container**
-  (`docker` / `nerdctl` / `podman`).
-- `verify-k8s-membership` — an annotated Kubernetes pod is attached by
-  `syva-k8s` and blocked from a zone-b file by `file_open` enforcement.
-- `verify-audit-mode` — with `--mode audit`, the same cross-zone read is
-  recorded as a would-deny decision but **not** blocked (observe-only rollout
-  path).
-- `verify-network-lock` — an Isolated zone is denied non-loopback
-  `connect`/`sendmsg`/`bind` with `EPERM` (loopback only), while a Bridged zone
-  is allowed out (the per-zone lock/open switch).
-- `verify-cgroup-escape` — a zoned task migrating out of its cgroup is
-  **detected** (counter + degraded health). Detection only — BPF-LSM cannot
-  block cgroup movement on supported kernels.
-- `verify-egress-cidr` — a network-locked zone reaches only its allowlisted
-  IPv4/IPv6 CIDRs and optional destination ports; every other destination stays
-  denied with `EPERM`.
-- `verify-inode-identity` — a cross-filesystem inode-number collision is not
-  zone-confused: the unzoned same-ino file on another filesystem stays
-  readable while the genuinely zoned file is still denied (composite
-  `(dev, ino)` file identity).
-- `verify-cross-zone-tcp` — exact IPv4 pod-IP-to-zone mappings make TCP
-  connect use the zone-pair rule: same-zone allowed, cross-zone denied until
-  `AllowComm`.
+- [Why Syvä is different](#why-syvä-is-different)
+- [Quickstart (Kubernetes)](#quickstart-kubernetes)
+- [Architecture](#architecture)
+- [Proof, not promises](#proof-not-promises)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Control surface](#control-surface)
+- [How enforcement works](#how-enforcement-works)
+- [Limitations (honest)](#limitations-honest)
+- [Build, test, and verify](#build-test-and-verify)
+- [License](#license)
 
-These are privileged Linux + BPF-LSM gates (the container gate also needs a
-container runtime, and the Kubernetes gate needs `kubectl` against a local
-single-node cluster); they are `#[ignore]`d in normal `cargo test`. See
-[docs/release/v0.2-runtime-verification.md](docs/release/v0.2-runtime-verification.md).
+## Why Syvä is different
 
-## Features
-
-- **Nine kernel-enforced hooks** — file open, exec, executable `mmap`,
-  `ptrace`, signals, Unix-socket connect, and the network lock (outbound
-  `connect`/`sendmsg` + `bind`) that makes an Isolated zone loopback-only, all
-  via BPF-LSM.
-- **Node-local by design** — one `syva-core` per node behind the `syva.core.v1`
-  Unix socket; no control plane. Scale with the Kubernetes primitives you
-  already run.
-- **Adapters for your world** — TOML files (`syva-file`), Kubernetes
-  `SyvaZonePolicy` CRDs (`syva-k8s`), or REST (`syva-api`).
-- **Operator CLI** — `syvactl` talks to a running core over gRPC:
-  `status`, `zones list/register/remove`, `host-paths register`,
-  `comms list/allow/deny`, and `events --follow`.
-- **Audit mode for rollout** — `syva-core --mode audit` records every
-  would-deny decision (per-hook counters + `WOULD_DENY` events) without
-  blocking, so you can measure impact before enforcing. The mode is exposed in
-  `/healthz` and metrics and proven by `verify-audit-mode`.
-- **Observability built in** — `/healthz` (`healthy` / `degraded` / `unsafe`
-  with reasons) and `/metrics` (per-hook decisions, self-test state, BPF map
-  errors, membership outcomes); Grafana dashboard and Prometheus alerts under
-  [`deploy/monitoring/`](deploy/monitoring/).
-- **Fail-open, never fail-dark** — a kernel read failure allows the operation but
-  flips health to `degraded` and increments an error counter.
-- **One-command dev deploy** — `make lima-smoke` deploys to a Lima VM and proves
-  a real container gets blocked.
-
-## Requirements
-
-Enforcement runs on Linux only:
-
-- **BPF LSM enabled** — `bpf` must appear in `/sys/kernel/security/lsm`
-  (enable at boot with `lsm=...,bpf` if it doesn't).
-- **cgroup v2** and **kernel BTF** (`/sys/kernel/btf/vmlinux`) — struct
-  offsets are resolved from BTF at startup, never hardcoded.
-- **Root** (or equivalent BPF privileges) to load and attach the LSM programs.
-
-macOS works for development through the Lima VM below; building and testing
-are host-safe everywhere.
+- **The kernel decides, not a proxy.** Enforcement is BPF-LSM on the syscall
+  path — there is no userspace data path to bypass, no sidecar to outrun.
+- **Small frozen mechanism, open policy.** The eBPF layer enforces a handful of
+  proven decision *shapes*; everything expressive lives in the data that fills
+  the BPF maps, supplied at runtime over one gRPC API. Policy is hot-swappable
+  (an `AllowComm` flips a live denial to an allow with no redeploy); the kernel
+  surface stays small and auditable. See
+  [docs/design/predicate-shapes.md](docs/design/predicate-shapes.md).
+- **Proven, both ways.** Reproducible privileged gates assert that Syvä
+  *blocks* what it should **and** *doesn't over-block* what it shouldn't —
+  because the failure that gets a security tool ripped out is the false denial,
+  not the missed one.
 
 ## Quickstart (Kubernetes)
 
@@ -141,37 +82,75 @@ are host-safe everywhere.
 kubectl apply -f deploy/k8s/
 ```
 
-One apply installs the CRD, namespace + RBAC, and the per-node DaemonSet
-(`syva-core` + `syva-k8s`). Declare a `SyvaZonePolicy`, annotate pods with
-`syva.false.systems/zone: <zone>`, and watch enriched denials with
-`syvactl events --follow`. See
-[docs/deployment/kubernetes.md](docs/deployment/kubernetes.md).
-
-## Quickstart (Lima development VM)
-
-A single-node development deployment that deploys `syva-core` as a node-local
-agent and proves the *deployed* instance blocks a real container's cross-zone
-`file_open`:
+One apply installs the `SyvaZonePolicy` CRD, the `syva-system` namespace + RBAC,
+and the per-node DaemonSet (`syva-core` + `syva-k8s`). Then declare a zone and
+annotate workloads:
 
 ```sh
-make lima-up
-make lima-bootstrap          # install/verify deps (idempotent)
-make lima-deploy             # build + install + start syva-core, prove healthy
-make lima-verify-deployment  # prove the deployed core blocks a real container
-make lima-undeploy           # stop and clean up
+kubectl apply -f - <<'EOF'
+apiVersion: syva.dev/v1alpha1
+kind: SyvaZonePolicy
+metadata: { name: payments, namespace: default }
+spec: {}
+EOF
+
+kubectl annotate pod my-pod syva.false.systems/zone=payments
 ```
 
-`make lima-smoke` runs bootstrap → deploy → verify → undeploy in one command.
-This is a development deployment proof, not a production/Kubernetes install. See
-[docs/deployment/lima.md](docs/deployment/lima.md).
+Watch denials explain themselves — zone names, process, path or destination,
+and the reason:
+
+```sh
+kubectl exec -n syva-system ds/syva -c syva-core -- syvactl events --follow
+```
+
+```text
+14:22:01Z  DENY  file_open       payments → database  pid=1843 comm=cat  path=/db/secret
+              why: cross-zone file open — a workload read another zone's protected file
+14:22:07Z  DENY  socket_connect  payments → host      pid=1902 comm=curl dst=10.0.0.5:5432
+              why: network egress outside zone policy — destination not allowed for this zone
+```
+
+See [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md). For a local
+single-node development loop on macOS or Linux, see
+[Lima deployment](docs/deployment/lima.md) (`make lima-smoke`).
 
 ## Architecture
 
+Policy flows in through adapters; the core compiles it into BPF maps; the kernel
+hooks read those maps on every relevant syscall and allow or deny; enriched
+events flow back out.
+
 ```text
-syva-file ──┐
-syva-k8s  ──┤
-syva-api  ──┼── gRPC over Unix socket ──► syva-core ──► eBPF LSM hooks
-syvactl   ──┘        syva.core.v1                       BPF maps
+   POLICY — what to enforce                  OBSERVABILITY — what happened
+   ┌─────────────────────────────┐          ┌─────────────────────────────┐
+   │ syva-file   TOML directory   │          │ syvactl events --follow     │
+   │ syva-k8s    SyvaZonePolicy   │          │ /metrics   per-zone denies  │
+   │ syva-api    REST proxy       │          │ /healthz   enforcement state│
+   │ syvactl     operator CLI     │          └──────────────▲──────────────┘
+   └──────────────┬──────────────┘                          │ enriched
+                  │  gRPC · syva.core.v1 · Unix socket       │ deny events
+                  ▼                                          │
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │                              syva-core                                 │
+   │      zone registry · container membership · ingest → BPF maps         │
+   └──────────────────────────────────┬───────────────────────────────────┘
+                                       │ writes maps / drains events
+   ════════════════════════════════════════════════════════════  userspace
+                                       │                              kernel
+                                       ▼
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  BPF maps   ZONE_MEMBERSHIP · ZONE_POLICY · INODE_ZONE_MAP ·           │
+   │             ZONE_ALLOWED_COMMS · IP_ZONE_MAP · EGRESS_CIDR · …         │
+   │                  ▲                                                     │
+   │                  │ read on every relevant syscall                     │
+   │   ┌──────────────┴───────────────────────────────────────────────┐   │
+   │   │  9 BPF-LSM hooks                                              │   │
+   │   │  file_open · bprm_check · mmap_file · ptrace · task_kill      │   │
+   │   │  unix_connect · socket_connect · socket_sendmsg · socket_bind │   │
+   │   └──────────────────────────────┬───────────────────────────────┘   │
+   │                                   ▼   allow (0)  /  deny (EPERM)       │
+   └──────────────────────────────────────────────────────────────────────┘
 ```
 
 | Crate | Role |
@@ -181,137 +160,147 @@ syvactl   ──┘        syva.core.v1                       BPF maps
 | `syva-core-client` | shared Unix-socket gRPC client |
 | `syvactl` | thin local operator CLI over `syva.core.v1` |
 | `syva-adapter-file` (`syva-file`) | TOML policy directory reconciler |
-| `syva-adapter-k8s` (`syva-k8s`) | `SyvaZonePolicy` CRD reconciler |
+| `syva-adapter-k8s` (`syva-k8s`) | `SyvaZonePolicy` CRD + pod membership reconciler |
 | `syva-adapter-api` (`syva-api`) | partial REST proxy to the local core |
 | `syva-ebpf` / `syva-ebpf-common` | the eBPF programs and shared `repr(C)` types |
 | `xtask` | build / check / verify helper |
 
-The v0.3 `syva-cp` control-plane experiment (and the legacy monolithic `syva`
-binary) were removed; historical design notes live under
-[`docs/archive/`](docs/archive/).
+## Proof, not promises
 
-## How enforcement works
+Syvä ships reproducible **kernel-level enforcement evidence**, not just unit
+tests. Each gate declares a PASS/BLOCK contract, runs against a real kernel, and
+asserts real evidence — a per-hook deny-counter delta, an `EPERM` from a live
+syscall, a recorded would-deny — never just an exit code.
 
-`syva-core` populates BPF maps; the eBPF programs read them on every relevant
-syscall. Every hook follows one decision shape: resolve the caller's zone from
-its cgroup, resolve the target's zone (files/exec by inode), and allow if the
-zones match or are an explicitly allowed pair — otherwise deny with `EPERM`.
-The three network hooks are the one exception: they have no target zone — a
-zoned, non-global caller whose zone lacks network access is denied any
-non-loopback `connect` / `sendmsg` / `bind`.
+It proves enforcement works **in both directions**:
 
-Maps on the hot path:
+- **It blocks** — `verify-integration` (process), `verify-container-integration`
+  (a real `docker`/`nerdctl`/`podman` container), `verify-k8s-membership` (an
+  annotated pod), `verify-network-lock`, `verify-egress-cidr`,
+  `verify-cross-zone-tcp` (pod-IP zone pairs), `verify-inode-identity`
+  (cross-filesystem `(dev, ino)` is not zone-confused). Each asserts EPERM +
+  `deny_delta=1`.
+- **It doesn't over-block** — `verify-allow` proves the must-not-block contract:
+  same-zone access, loopback from a locked zone, and an `AllowComm`'d pair stay
+  allowed at `deny_delta=0`, with a control in the same run that a real
+  cross-zone open *still* denies. A core that blocked everything would fail
+  here, so "green" cannot mean "allows nothing through."
+- **It loads and observes** — `verify-runtime` (loads the release object,
+  attaches all nine hooks, passes the cgroup/inode/unix self-tests),
+  `verify-events` (enriched deny stream), `verify-audit-mode` (would-deny
+  recorded, operation proceeds), `verify-cgroup-escape` (escape detected, not
+  prevented), `verify-deployment` (the deployed DaemonSet blocks a real
+  container).
 
-- `ZONE_MEMBERSHIP` — cgroup → zone
-- `ZONE_POLICY` — zone policy flags
-- `INODE_ZONE_MAP` — protected file `(dev, ino)` → zone
-- `ZONE_ALLOWED_COMMS` — explicitly allowed cross-zone pairs
-- `ENFORCEMENT_MODE` — the global enforce / audit switch
-- `ENFORCEMENT_COUNTERS` / `ENFORCEMENT_EVENTS` — observability
-- `CGROUP_ESCAPE_COUNT` — detected cgroup-escape events
+These are privileged Linux + BPF-LSM gates (`#[ignore]`d in normal
+`cargo test`); the container gate also needs a container runtime, the Kubernetes
+gate a local cluster. Latest evidence:
+[docs/release/v0.4.0-runtime-verification.md](docs/release/v0.4.0-runtime-verification.md).
 
-Kernel struct offsets are resolved from BTF at startup, so there are no
-hardcoded offsets. A caller or target not in any zone is invisible to
-enforcement.
+## Features
+
+- **Nine kernel-enforced hooks** — file open, exec, executable `mmap`, `ptrace`,
+  signals, Unix-socket connect, and the network lock (outbound
+  `connect`/`sendmsg` + `bind`) that makes an Isolated zone loopback-only — all
+  via BPF-LSM.
+- **Network policy, layered** — per-zone lock/open (`network_mode`), egress CIDR
+  allowlists with optional ports (IPv4 + IPv6), and pod-IP → zone mappings so
+  cross-zone TCP follows the same `AllowComm` zone-pair rule as everything else.
+- **Deny events that explain themselves** — every denial carries zone names, the
+  process `comm`, the registered file path or destination `ip:port`, and a
+  templated reason (`what_failed` / `why_it_matters` / `possible_causes`),
+  streamed live, logged structured, and counted per-zone.
+- **Node-local by design** — one `syva-core` per node behind the `syva.core.v1`
+  Unix socket; no control plane. Scale with the Kubernetes primitives you run.
+- **Adapters for your world** — TOML files (`syva-file`), Kubernetes
+  `SyvaZonePolicy` CRDs (`syva-k8s`), or REST (`syva-api`).
+- **Audit mode for rollout** — `--mode audit` records would-deny decisions
+  without blocking, so you measure impact before enforcing.
+- **Observability built in** — `/healthz` (`healthy`/`degraded`/`unsafe` with
+  reasons) and `/metrics` (per-hook + per-zone decisions, self-test state, map
+  errors); Grafana dashboard and Prometheus alerts under
+  [`deploy/monitoring/`](deploy/monitoring/).
+- **Fail-open, never fail-dark** — a kernel read failure allows the operation
+  but flips health to `degraded` and increments an error counter.
+
+## Requirements
+
+Enforcement runs on Linux only:
+
+- **Linux ≥ 5.10** — the pinned kernel floor (BPF-LSM, the BPF ring buffer, and
+  per-superblock tmpfs inode allocation all hold from there).
+- **BPF LSM enabled** — `bpf` must appear in `/sys/kernel/security/lsm` (enable
+  at boot with `lsm=...,bpf` if it doesn't).
+- **cgroup v2** and **kernel BTF** (`/sys/kernel/btf/vmlinux`) — struct offsets
+  are resolved from BTF at startup, never hardcoded.
+- **Root** (or equivalent BPF privileges) to load and attach the LSM programs.
+
+macOS works for development through the Lima VM; building and testing are
+host-safe everywhere.
 
 ## Control surface
 
 The canonical control API is the local gRPC API `syva.core.v1` on the
 `syva-core` Unix socket — adapters and `syvactl` are clients of it. The REST API
-(`syva-api`) is partial. Full API contract, generation/error semantics, and the
-OpenAPI document live under [`docs/api/`](docs/api/).
+(`syva-api`) is partial. Full contract and OpenAPI under
+[`docs/api/`](docs/api/).
 
 ```sh
-syvactl status                 # gRPC Status: health, hooks, self-tests, counters
+syvactl status                 # health, hooks, self-tests, counters
 syvactl zones list             # registered zones
 syvactl comms list             # allowed cross-zone pairs
-syvactl events --follow        # live enforcement deny stream
+syvactl events --follow        # live, enriched deny stream
 ```
 
-`syva-core status` shows the same gRPC status (falling back to pinned BPF
-counters if the socket is unavailable); `syva-core events --follow` streams deny
-events directly from the ring buffer.
+## How enforcement works
 
-## Membership
+`syva-core` populates BPF maps; the eBPF programs read them on every relevant
+syscall. Every hook follows one decision shape: resolve the caller's zone from
+its cgroup, resolve the target's zone (files/exec by `(dev, ino)`), and allow if
+the zones match or are an explicitly allowed pair — otherwise deny with `EPERM`.
+The three network hooks are the exception: they have no target zone, so a zoned,
+non-global caller whose zone lacks network access is denied any non-loopback
+`connect` / `sendmsg` / `bind` (unless an egress allowlist or pod-IP zone-pair
+permits it).
 
-`syva-core` tracks container membership (container ID, optional pod identity,
-cgroup ID, zone, source adapter, source generation, observed timestamp). Updates
-are idempotent and generation-aware: stale updates are ignored, conflicting zone
-assignments are reported, and successful observations produce explicit BPF map
-update intents.
+Kernel struct offsets are resolved from BTF at startup — no hardcoded offsets. A
+caller or target not in any zone is invisible to enforcement (allowed).
 
-`syva-k8s` includes an annotation-based membership watcher. Pods scheduled to
-the local node with `syva.false.systems/zone: <zone>` are reconciled into
-`AttachContainer` calls after the adapter resolves each running container's real
-host cgroup id. Pods without that annotation are ignored. `syva-file` still
-reconciles zones, host paths, and communication policy only; it does not watch
-workload membership yet.
+Container membership is tracked per node (container ID, optional pod identity,
+cgroup ID, zone, source adapter, generation); updates are idempotent and
+generation-aware. `syva-k8s` reconciles annotated pods into `AttachContainer`
+calls after resolving each container's real host cgroup id, and maintains a
+cluster-wide pod-IP → zone view for cross-zone TCP.
 
 ## Limitations (honest)
 
-- Full eBPF build/load/runtime verification requires Linux with BPF LSM support.
-  Lima verifies Linux build/test and eBPF object compilation from macOS, but
-  runtime load/attach enforcement still needs a privileged Linux host or CI
-  runner.
+- Full eBPF load/attach/runtime verification requires a privileged Linux host
+  with BPF LSM; hosted CI can build and test but cannot run the enforcement
+  gates (no one grants BPF-LSM on their kernel). Lima covers Linux build/test
+  and eBPF object compilation from macOS — not runtime attachment.
 - `/proc` and `/sys` coverage is incomplete.
 - Cgroup movement / zone escape cannot be **prevented** through BPF-LSM:
   `cgroup_attach_task` is not a BPF-LSM hook on supported mainline kernels. It
-  is **detected** instead — a best-effort fentry program records a zoned task
-  leaving its cgroup (counter, `ESCAPE` event, degraded health; proven by
-  `verify-cgroup-escape`) — but the migration itself is not blocked.
-- `INODE_ZONE_MAP` is keyed by composite `(dev, ino)` (the kernel superblock
-  `s_dev` plus `i_ino`), so cross-filesystem inode collisions are
-  disambiguated — proven by `verify-inode-identity`. Residual: all subvolumes
-  of one btrfs filesystem share a superblock, so same-ino files in *sibling
-  subvolumes of the same filesystem* still alias.
-- `SyvaZonePolicy` status / finalizers / leader election are not implemented.
-- Kubernetes membership assignment is annotation-based. The
-  `verify-k8s-membership` gate proves it end to end only when run on a
-  privileged Linux/Kubernetes node; it is not covered by macOS checks.
-
-## Container images
-
-`syva-core` and `syva-adapter-k8s` images are published to GHCR for
-`linux/amd64` and `linux/arm64` on each version tag (see
-`docs/deployment/kubernetes.md`):
-
-```text
-ghcr.io/false-systems/syva-core:<version>
-ghcr.io/false-systems/syva-adapter-k8s:<version>
-```
-
-Or build them yourself from the repo `Dockerfile`:
-
-```sh
-docker build --target syva-core        -t syva-core:dev .
-docker build --target syva-adapter-k8s -t syva-adapter-k8s:dev .
-```
+  is **detected** instead (counter, `ESCAPE` event, degraded health; proven by
+  `verify-cgroup-escape`) — the migration itself is not blocked.
+- `INODE_ZONE_MAP` is keyed by composite `(dev, ino)`, so cross-filesystem inode
+  collisions are disambiguated (proven by `verify-inode-identity`). Residual:
+  sibling subvolumes of one btrfs filesystem share a superblock dev, so same-ino
+  files within one btrfs filesystem still alias.
+- Pod-IP → zone mapping is IPv4 only so far; `SyvaZonePolicy`
+  status/finalizers/leader election are not implemented.
 
 ## Build, test, and verify
 
-Fast host-safe checks (macOS-friendly):
-
 ```sh
-make macos-check
+make macos-check   # fast host-safe checks (macOS-friendly)
+make ci            # full non-privileged gate: fmt, clippy, tests, doc/proto/
+                   # api guardrails, release eBPF object build
 ```
 
-Full non-privileged gates (formatting, clippy, workspace tests, eval crate
-builds, proto/OpenAPI/API-doc checks, release-doc drift check, and the release
-eBPF object build):
-
-```sh
-make ci          # or: make fmt / make lint / make test / make precommit
-```
-
-`cargo run -p xtask -- build-ebpf` builds the release eBPF object by default; use
-`--debug` only for development experiments.
-
-macOS uses Lima as the Linux bridge for the full workspace and eBPF build:
-
-```sh
-make lima-up
-make lima-check
-```
+`cargo run -p xtask -- build-ebpf` builds the release eBPF object (the runtime
+artifact); `--debug` is for development only. On macOS, `make lima-up` then
+`make lima-check` runs the full workspace and eBPF build inside a Lima VM.
 
 Privileged runtime evidence (privileged Linux + BPF LSM; the container gate also
 needs a container runtime):
@@ -320,38 +309,47 @@ needs a container runtime):
 sudo -E make verify-runtime
 sudo -E make verify-integration
 sudo -E make verify-container-integration
-sudo -E make verify-k8s-membership
-sudo -E make verify-audit-mode
+sudo -E make verify-allow              # the must-not-block contract
+sudo -E make verify-events             # enriched deny stream
 sudo -E make verify-network-lock
 sudo -E make verify-egress-cidr
 sudo -E make verify-cross-zone-tcp
-sudo -E make verify-cgroup-escape
 sudo -E make verify-inode-identity
+sudo -E make verify-audit-mode
+sudo -E make verify-cgroup-escape
+sudo -E make verify-k8s-membership     # needs a local single-node cluster
 ```
 
-## Run it directly
-
-Linux only, with the required BPF privileges and kernel config:
+Run the core directly on Linux:
 
 ```sh
 RUST_LOG=syva_core=debug cargo run --bin syva-core -- \
   --socket-path /run/syva/syva-core.sock
 ```
 
-Then point an adapter at the local socket:
+## Container images
 
-```sh
-RUST_LOG=syva_file=debug cargo run --bin syva-file -- \
-  --policy-dir ./policies \
-  --core-socket /run/syva/syva-core.sock
+Published to GHCR for `linux/amd64` and `linux/arm64` on each version tag:
+
+```text
+ghcr.io/false-systems/syva-core:<version>
+ghcr.io/false-systems/syva-adapter-k8s:<version>
 ```
+
+Or build them yourself: `docker build --target syva-core -t syva-core:dev .`
+(and `--target syva-adapter-k8s`). See
+[docs/deployment/kubernetes.md](docs/deployment/kubernetes.md).
 
 ## Roadmap
 
-- Broader Kubernetes runtime resolver coverage.
+- Kernel-enforcement contract gates running per-commit on self-hosted runners
+  with a small kernel matrix (own kernels are a permanent dependency of building
+  this).
+- Broader Kubernetes runtime resolver coverage; IPv6 pod-IP mapping.
 - Expanded privileged runtime blackbox coverage.
-- Privileged runtime verification in a self-hosted (or otherwise suitable)
-  Linux CI path.
+
+Historical design notes (the removed v0.3 `syva-cp` control-plane experiment and
+the legacy monolithic binary) live under [`docs/archive/`](docs/archive/).
 
 ## License
 

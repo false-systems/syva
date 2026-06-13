@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Syva REST API
-  version: 0.3.0
+  version: 0.4.0
   description: >
     Partial node-local REST API for Syva. The canonical control API is the
     local syva.core.v1 gRPC API over the syva-core Unix socket.
