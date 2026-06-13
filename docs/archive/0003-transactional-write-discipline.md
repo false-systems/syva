@@ -1,7 +1,7 @@
 # ADR 0003 — transactional write discipline
 
 **Status:** accepted, but applies to v0.3 control-plane code that is being removed
-(see ADR 0002 and `CODEX_MIGRATION.md`). Kept as a **reference** for the
+(see ADR 0002 and `CLAUDE.md` (Current State)). Kept as a **reference** for the
 write-discipline patterns — the principles outlive the deleted code.
 **Date:** 2026-04-19
 **Supersedes:** —

@@ -4,7 +4,7 @@
 
 > ⚠️ **SUPERSEDED — historical record.** The v0.3 control plane described here is
 > being **removed**; Syva is returning to the v0.2 core+adapters design. See
-> `CODEX_MIGRATION.md` for the walkback and `SKILLS.md` for why. Do not build
+> `CLAUDE.md` (Current State) for the walkback and `SKILLS.md` for why. Do not build
 > against this design or treat it as current. Kept only to document what was
 > tried and why.
 

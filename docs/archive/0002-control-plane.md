@@ -1,7 +1,7 @@
 # ADR 0002 — syvä control plane
 
 **Status:** REVERSED — the control plane is being removed and Syva is returning
-to the v0.2 core+adapters design. See `CODEX_MIGRATION.md` for the walkback and
+to the v0.2 core+adapters design. See `CLAUDE.md` (Current State) for the walkback and
 its rationale. This record is kept to document the decision and why it was undone.
 **Date:** 2026-04-19
 **Supersedes:** —

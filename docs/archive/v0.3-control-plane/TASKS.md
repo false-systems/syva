@@ -1,7 +1,7 @@
 # syva-cp — task list (v0.3 control plane)
 
 > ⚠️ **SUPERSEDED — historical record.** These tasks built the v0.3 control plane,
-> which is now being removed (see `CODEX_MIGRATION.md`). Do not pick up tasks from
+> which is now being removed (see `CLAUDE.md` (Current State)). Do not pick up tasks from
 > this list. Kept only as a record of the abandoned line of work.
 
 Source design: `docs/v0.3/CONTROL_PLANE.md` (the design doc this list was extracted from).
