@@ -249,20 +249,26 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
 
     // CONTROL (exec) — cross-zone exec must be denied, proving the same-zone
     // exec ALLOW above is discriminating, not blanket-allow. execve opens the
-    // binary with FMODE_EXEC, so `file_open` fires first and denies the
-    // cross-zone open before `bprm_check` is reached — the denial is attributed
-    // to file_open (for a registered inode, bprm is the same caller-vs-inode
-    // decision as a second layer). Assert the op is blocked and that the
-    // file_open deny counter moved.
+    // binary with FMODE_EXEC, so `file_open` fires and denies the cross-zone
+    // open before `bprm_check` is reached — the denial is attributed to
+    // file_open (for a registered inode, bprm is the same caller-vs-inode
+    // decision as a second layer). The shell stat/access-checks the path before
+    // and around the failed exec, so a single `exec` produces SEVERAL denied
+    // file_open hits, not exactly one — assert the op is blocked with EPERM and
+    // that the file_open deny counter moved (the workload is the only zoned
+    // process, so any movement in this window is attributable to it).
     let before_xc = file_open_deny(&mut client).await?;
     let exec_cross = workload(&cgroup_procs, &format!("exec '{}'", b_bin.display()));
     let after_xc = file_open_deny(&mut client).await?;
+    let xc_err = String::from_utf8_lossy(&exec_cross.stderr);
     anyhow::ensure!(
-        !exec_cross.status.success() && after_xc == before_xc + 1,
+        !exec_cross.status.success()
+            && xc_err.contains("Operation not permitted")
+            && after_xc > before_xc,
         "control failed: cross-zone exec was not denied (success={}, file_open delta={}, stderr={:?})",
         exec_cross.status.success(),
         after_xc.saturating_sub(before_xc),
-        String::from_utf8_lossy(&exec_cross.stderr)
+        xc_err
     );
 
     // ALLOW 4 — after AllowComm, the previously-denied pair is permitted.
@@ -291,7 +297,7 @@ except OSError as e: print('EPERM' if e.errno==1 else 'OTHER', file=sys.stderr);
     println!("same-zone exec           : ALLOWED, bprm_check deny_delta=0");
     println!("loopback from locked zone: ALLOWED, socket_connect deny_delta=0");
     println!("cross-zone file control  : DENIED, file_open deny_delta=1");
-    println!("cross-zone exec control  : DENIED at file_open (exec-open), deny_delta=1");
+    println!("cross-zone exec control  : DENIED with EPERM at file_open (exec-open)");
     println!("AllowComm pair           : ALLOWED at runtime, file_open deny_delta=0");
     println!("(green proves both directions: blocks the bad AND allows the good)");
     Ok(())
