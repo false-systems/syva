@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 640" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a93a3"/>
+    </marker>
+  </defs>
+
+  <!-- card -->
+  <rect x="1" y="1" width="938" height="638" rx="16" fill="#fbfcfd" stroke="#e6e8eb"/>
+
+  <!-- POLICY -->
+  <rect x="48" y="40" width="380" height="166" rx="12" fill="#eaf1fe" stroke="#3b6fd4"/>
+  <text x="68" y="70" font-size="15" font-weight="700" fill="#234a93">POLICY — what to enforce</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+    <text x="68" y="100" fill="#1b2230" font-weight="600">syva-file</text><text x="180" y="100" fill="#6b7280">TOML directory</text>
+    <text x="68" y="128" fill="#1b2230" font-weight="600">syva-k8s</text><text x="180" y="128" fill="#6b7280">SyvaZonePolicy CRD</text>
+    <text x="68" y="156" fill="#1b2230" font-weight="600">syva-api</text><text x="180" y="156" fill="#6b7280">REST proxy</text>
+    <text x="68" y="184" fill="#1b2230" font-weight="600">syvactl</text><text x="180" y="184" fill="#6b7280">operator CLI</text>
+  </g>
+
+  <!-- OBSERVABILITY -->
+  <rect x="512" y="40" width="380" height="166" rx="12" fill="#f1ecfe" stroke="#7c5cff"/>
+  <text x="532" y="70" font-size="15" font-weight="700" fill="#553bb0">OBSERVABILITY — what happened</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+    <text x="532" y="100" fill="#1b2230" font-weight="600">syvactl events --follow</text>
+    <text x="532" y="128" fill="#1b2230" font-weight="600">/metrics</text><text x="636" y="128" fill="#6b7280">per-zone denies</text>
+    <text x="532" y="156" fill="#1b2230" font-weight="600">/healthz</text><text x="636" y="156" fill="#6b7280">enforcement state</text>
+    <text x="532" y="184" fill="#6b7280">structured deny logs (JSON)</text>
+  </g>
+
+  <!-- policy -> core -->
+  <line x1="238" y1="206" x2="238" y2="248" stroke="#8a93a3" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="250" y="232" font-size="12" fill="#6b7280">gRPC · syva.core.v1 · Unix socket</text>
+
+  <!-- core -> observability (events out) -->
+  <path d="M702 248 L702 206" fill="none" stroke="#8a93a3" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="712" y="232" font-size="12" fill="#6b7280">enriched events</text>
+
+  <!-- CORE slab -->
+  <rect x="48" y="248" width="844" height="74" rx="12" fill="#1b2230"/>
+  <text x="74" y="282" font-size="17" font-weight="700" fill="#ffffff">syva-core</text>
+  <text x="74" y="305" font-size="13" fill="#9aa3b2" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">zone registry · container membership · ingest → BPF maps · event pump</text>
+
+  <!-- core <-> kernel -->
+  <line x1="300" y1="322" x2="300" y2="384" stroke="#8a93a3" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="312" y="358" font-size="12" fill="#6b7280">writes maps</text>
+  <line x1="640" y1="384" x2="640" y2="322" stroke="#8a93a3" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="652" y="358" font-size="12" fill="#6b7280">drains events</text>
+
+  <!-- user/kernel divider -->
+  <line x1="48" y1="350" x2="892" y2="350" stroke="#cfd4da" stroke-width="1" stroke-dasharray="5 5"/>
+  <text x="888" y="345" font-size="11" fill="#9aa3b2" text-anchor="end">user space</text>
+  <text x="888" y="368" font-size="11" fill="#9aa3b2" text-anchor="end">kernel</text>
+
+  <!-- KERNEL region -->
+  <rect x="48" y="384" width="844" height="224" rx="12" fill="#fff8ee" stroke="#e4a85a"/>
+  <text x="74" y="412" font-size="14" font-weight="700" fill="#9a6212">kernel — BPF-LSM enforcement</text>
+
+  <!-- BPF map chips -->
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11.5" fill="#9a6212">
+    <rect x="74"  y="426" width="150" height="26" rx="6" fill="#ffffff" stroke="#e4a85a"/><text x="149" y="443" text-anchor="middle">ZONE_MEMBERSHIP</text>
+    <rect x="234" y="426" width="120" height="26" rx="6" fill="#ffffff" stroke="#e4a85a"/><text x="294" y="443" text-anchor="middle">ZONE_POLICY</text>
+    <rect x="364" y="426" width="146" height="26" rx="6" fill="#ffffff" stroke="#e4a85a"/><text x="437" y="443" text-anchor="middle">INODE_ZONE_MAP</text>
+    <rect x="520" y="426" width="186" height="26" rx="6" fill="#ffffff" stroke="#e4a85a"/><text x="613" y="443" text-anchor="middle">ZONE_ALLOWED_COMMS</text>
+    <rect x="716" y="426" width="116" height="26" rx="6" fill="#ffffff" stroke="#e4a85a"/><text x="774" y="443" text-anchor="middle">IP_ZONE_MAP</text>
+  </g>
+  <text x="74" y="478" font-size="12" fill="#9a6212">read on every relevant syscall ↓</text>
+
+  <!-- HOOKS slab -->
+  <rect x="74" y="488" width="690" height="76" rx="10" fill="#1b2230"/>
+  <text x="92" y="514" font-size="14" font-weight="700" fill="#ffffff">9 BPF-LSM hooks</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" fill="#cdd3dd">
+    <text x="92" y="535">file_open · bprm_check · mmap_file · ptrace · task_kill</text>
+    <text x="92" y="554">unix_connect · socket_connect · socket_sendmsg · socket_bind</text>
+  </g>
+
+  <!-- decision pills -->
+  <rect x="780" y="496" width="92" height="28" rx="14" fill="#e7f6ec" stroke="#2ea44f"/>
+  <text x="826" y="515" font-size="12.5" font-weight="700" fill="#1a7f37" text-anchor="middle">allow (0)</text>
+  <rect x="780" y="530" width="92" height="28" rx="14" fill="#fdeceb" stroke="#d1242f"/>
+  <text x="826" y="549" font-size="12.5" font-weight="700" fill="#b1232c" text-anchor="middle">deny · EPERM</text>
+</svg>

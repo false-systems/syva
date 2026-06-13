@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 440" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b1232c"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="938" height="438" rx="16" fill="#fbfcfd" stroke="#e6e8eb"/>
+  <text x="470" y="40" font-size="13" fill="#9aa3b2" text-anchor="middle" font-style="italic">one shared kernel — no structural wall between these workloads</text>
+
+  <!-- frontend zone (with attempted cross-zone ops) -->
+  <rect x="40" y="62" width="384" height="312" rx="12" fill="#eaf1fe" stroke="#3b6fd4"/>
+  <text x="64" y="96" font-size="16" font-weight="700" fill="#234a93">zone: frontend</text>
+  <text x="64" y="122" font-size="13" fill="#3b5074" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">nginx · web</text>
+  <line x1="64" y1="140" x2="400" y2="140" stroke="#c3d4f3"/>
+  <text x="64" y="166" font-size="12" fill="#6b7280">tries to reach the database zone:</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" fill="#1b2230">
+    <text x="64" y="206">open    /db/secret</text>
+    <text x="64" y="248">exec    /db/pg_dump</text>
+    <text x="64" y="290">ptrace  postgres</text>
+    <text x="64" y="332">connect 10.0.0.5:5432</text>
+  </g>
+
+  <!-- arrows toward the barrier, each blocked at the wall -->
+  <g>
+    <line x1="430" y1="201" x2="452" y2="201" stroke="#b1232c" stroke-width="1.8" marker-end="url(#a)"/>
+    <line x1="430" y1="243" x2="452" y2="243" stroke="#b1232c" stroke-width="1.8" marker-end="url(#a)"/>
+    <line x1="430" y1="285" x2="452" y2="285" stroke="#b1232c" stroke-width="1.8" marker-end="url(#a)"/>
+    <line x1="430" y1="327" x2="452" y2="327" stroke="#b1232c" stroke-width="1.8" marker-end="url(#a)"/>
+  </g>
+  <g fill="#b1232c" font-size="17" font-weight="700" text-anchor="middle">
+    <text x="462" y="207">✗</text>
+    <text x="462" y="249">✗</text>
+    <text x="462" y="291">✗</text>
+    <text x="462" y="333">✗</text>
+  </g>
+
+  <!-- Syvä barrier on the syscall path -->
+  <rect x="476" y="62" width="40" height="312" rx="8" fill="#1b2230"/>
+  <text x="496" y="218" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle" transform="rotate(-90 496 218)">Syvä · BPF-LSM</text>
+
+  <!-- database zone (untouched) -->
+  <rect x="560" y="62" width="340" height="312" rx="12" fill="#e7f6ec" stroke="#2ea44f"/>
+  <text x="584" y="96" font-size="16" font-weight="700" fill="#1a7f37">zone: database</text>
+  <text x="584" y="122" font-size="13" fill="#2c6b43" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">postgres</text>
+  <line x1="584" y1="140" x2="876" y2="140" stroke="#bce3c9"/>
+  <text x="584" y="172" font-size="13" fill="#2c6b43">Files, processes, and sockets stay</text>
+  <text x="584" y="192" font-size="13" fill="#2c6b43">unreachable across the zone boundary.</text>
+  <text x="584" y="232" font-size="12" fill="#6b7280">Same zone — or an explicitly allowed</text>
+  <text x="584" y="250" font-size="12" fill="#6b7280">pair — is permitted. Everything else</text>
+  <text x="584" y="268" font-size="12" fill="#6b7280">cross-zone is denied and recorded.</text>
+
+  <!-- legend -->
+  <text x="64" y="410" font-size="13" fill="#b1232c" font-weight="600">✗ denied in the kernel — returns EPERM, before the operation completes.</text>
+</svg>
