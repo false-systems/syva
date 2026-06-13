@@ -40,7 +40,22 @@ The single cross-cutting rule, recurring at every layer: **do the reduction as d
 
 ## 2. Probe layer — portability and discipline
 
-**CO-RE is non-negotiable for anything you distribute.** Compile the eBPF object once against BTF type information, and let the loader relocate field offsets against the *running* kernel's types at load (exposed at `/sys/kernel/btf/vmlinux`). Generate `vmlinux.h` with `bpftool btf dump`. This removes the dependency on target-host kernel headers entirely.
+> **What Syva does today (≠ CO-RE).** Real CO-RE field relocation is not yet
+> available for Rust eBPF: aya's loader can *apply* CO-RE relocations, but the
+> `aya-ebpf` authoring side that would *emit* them is still in progress (as of
+> this writing). So Syva does not use CO-RE. Instead it resolves the kernel
+> struct offsets it needs by parsing `/sys/kernel/btf/vmlinux` **directly** at
+> load (no pahole, no kernel headers), injects them into the eBPF programs as
+> globals, and **self-tests every offset chain against a known-good kernel
+> helper at startup, failing closed (`unsafe` health, refuse to enforce) on any
+> mismatch.** That is the same portability *goal* as CO-RE — one object, no
+> baked-in offsets, runs across kernels — achieved without the relocation
+> machinery, and with a stronger correctness guarantee at the boundary: we
+> don't trust an offset we haven't verified against the running kernel.
+> Migrating to true CO-RE is a roadmap item gated on aya shipping the authoring
+> side. The rest of this section is the general best-practice background.
+
+**CO-RE is the standard answer for anything you distribute.** Compile the eBPF object once against BTF type information, and let the loader relocate field offsets against the *running* kernel's types at load (exposed at `/sys/kernel/btf/vmlinux`). Generate `vmlinux.h` with `bpftool btf dump`. This removes the dependency on target-host kernel headers entirely.
 
 - The old-world alternatives are unacceptable for a shipped product: BCC compiles on the target at runtime (needs LLVM/Clang + headers on every host), and per-kernel precompiled binaries are a maintenance swamp.
 - CO-RE **requires a BTF-enabled kernel** (`CONFIG_DEBUG_INFO_BTF`). Modern distros ship it; for older fleets, **BTFHub** supplies BTF blobs. Decide your kernel floor early.

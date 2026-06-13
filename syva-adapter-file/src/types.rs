@@ -158,11 +158,13 @@ impl ZonePolicy {
                  use device cgroup controller for device access control"
             );
         }
-        if !self.network.allowed_egress.is_empty() || !self.network.allowed_ingress.is_empty() {
+        // `network.allowed_egress` IS enforced (EGRESS_CIDR maps → socket
+        // hooks, proven by verify-egress-cidr). Only ingress has no LSM hook.
+        if !self.network.allowed_ingress.is_empty() {
             tracing::info!(
                 zone = zone_name,
-                "network egress/ingress rules are configured but NOT enforced by Syva — \
-                 use NetworkPolicy or iptables for network filtering"
+                "network.allowed_ingress is configured but NOT enforced by Syva — \
+                 there is no inbound LSM hook; use NetworkPolicy/iptables for ingress filtering"
             );
         }
 
