@@ -19,27 +19,7 @@ an adapter at it, done.
 
 > *Syvä* (Finnish) — *deep*. Where enforcement happens.
 
-```text
-                         one shared kernel
-  ┌────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │   zone: frontend                          zone: database         │
-  │   ┌───────────────┐                       ┌───────────────┐      │
-  │   │  nginx · web   │                       │  postgres      │     │
-  │   └───────┬───────┘                       └───────┬───────┘      │
-  │           │                                       │              │
-  │           │   open   /db/secret    ──────╳        │              │
-  │           │   exec   /db/pg_dump   ──────╳        │              │
-  │           │   ptrace postgres      ──────╳        │              │
-  │           │   connect 10.0.0.5:5432 ─────╳        │              │
-  │           │                                       │              │
-  │   ════════╪═══════════════  Syvä  ════════════════╪═══════════   │
-  │           ▼            (BPF-LSM, on the           ▼              │
-  │        syscall          syscall path)          syscall          │
-  │                                                                  │
-  │   ╳  denied in the kernel, before it happens — returns EPERM     │
-  └────────────────────────────────────────────────────────────────┘
-```
+<p align="center"><img src="docs/assets/idea.svg" alt="Two zones sharing one kernel; Syvä on the BPF-LSM syscall path denies cross-zone file, exec, ptrace, and network operations with EPERM" width="820"></p>
 
 Same zone — or an explicitly allowed pair — is permitted. Everything else
 cross-zone is denied and recorded. An *Isolated* zone (the default) is also
@@ -121,37 +101,7 @@ Policy flows in through adapters; the core compiles it into BPF maps; the kernel
 hooks read those maps on every relevant syscall and allow or deny; enriched
 events flow back out.
 
-```text
-   POLICY — what to enforce                  OBSERVABILITY — what happened
-   ┌─────────────────────────────┐          ┌─────────────────────────────┐
-   │ syva-file   TOML directory   │          │ syvactl events --follow     │
-   │ syva-k8s    SyvaZonePolicy   │          │ /metrics   per-zone denies  │
-   │ syva-api    REST proxy       │          │ /healthz   enforcement state│
-   │ syvactl     operator CLI     │          └──────────────▲──────────────┘
-   └──────────────┬──────────────┘                          │ enriched
-                  │  gRPC · syva.core.v1 · Unix socket       │ deny events
-                  ▼                                          │
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │                              syva-core                                 │
-   │      zone registry · container membership · ingest → BPF maps         │
-   └──────────────────────────────────┬───────────────────────────────────┘
-                                       │ writes maps / drains events
-   ════════════════════════════════════════════════════════════  userspace
-                                       │                              kernel
-                                       ▼
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │  BPF maps   ZONE_MEMBERSHIP · ZONE_POLICY · INODE_ZONE_MAP ·           │
-   │             ZONE_ALLOWED_COMMS · IP_ZONE_MAP · EGRESS_CIDR · …         │
-   │                  ▲                                                     │
-   │                  │ read on every relevant syscall                     │
-   │   ┌──────────────┴───────────────────────────────────────────────┐   │
-   │   │  9 BPF-LSM hooks                                              │   │
-   │   │  file_open · bprm_check · mmap_file · ptrace · task_kill      │   │
-   │   │  unix_connect · socket_connect · socket_sendmsg · socket_bind │   │
-   │   └──────────────────────────────┬───────────────────────────────┘   │
-   │                                   ▼   allow (0)  /  deny (EPERM)       │
-   └──────────────────────────────────────────────────────────────────────┘
-```
+<p align="center"><img src="docs/assets/architecture.svg" alt="Data flow: policy adapters (file/k8s/api/CLI) send policy over gRPC to syva-core, which writes BPF maps; nine BPF-LSM hooks read them on each syscall and allow or deny; enriched deny events flow back to observability" width="900"></p>
 
 | Crate | Role |
 | --- | --- |
