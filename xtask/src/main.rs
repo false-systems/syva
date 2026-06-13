@@ -72,6 +72,9 @@ enum Cli {
     /// Run the privileged (dev, ino) identity test: an inode-number collision
     /// across two filesystems must not cause cross-zone confusion.
     VerifyInodeIdentity,
+    /// Run the privileged enriched-events test: WatchEvents delivers zone
+    /// names, comm, registered path, and destination ip:port on denials.
+    VerifyEvents,
     /// Verify an already-deployed syva-core (SYVA_SOCKET) blocks a real
     /// container's cross-zone file_open. Does not start its own core.
     VerifyDeployment,
@@ -106,6 +109,7 @@ fn main() -> Result<()> {
         Cli::VerifyCrossZoneTcp => verify_cross_zone_tcp(),
         Cli::VerifyCgroupEscape => verify_cgroup_escape(),
         Cli::VerifyInodeIdentity => verify_inode_identity(),
+        Cli::VerifyEvents => verify_events(),
         Cli::VerifyDeployment => verify_deployment(),
         Cli::Ci => ci(),
     }
@@ -704,6 +708,26 @@ fn verify_egress_cidr() -> Result<()> {
             "syva-core",
             "--test",
             "integration_egress_cidr",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// Run the privileged enriched-events test: the WatchEvents stream carries
+/// zone names, comm, registered path, and destination ip:port on denials.
+fn verify_events() -> Result<()> {
+    privileged_runtime_preflight("verify-events")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_events_stream",
             "--",
             "--ignored",
             "--nocapture",
