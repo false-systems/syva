@@ -27,7 +27,11 @@ Every hook reduces to one of a handful of decision shapes. Counting distinct
 | 2 | **Caller-zone network lock** (no target; deny non-loopback unless the zone is network-open) | `socket_connect`, `socket_sendmsg`, `socket_bind` | `ZONE_POLICY` flag |
 | 3 | **Destination allowlist** (LPM CIDR + optional port) layered under shape 2 | `socket_connect`, `socket_sendmsg` | `EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` |
 | 4 | **Destination-zone pair** (resolve dst IP → zone, then shape 1's pair rule) layered under shape 2 | `socket_connect`, `socket_sendmsg` | `IP_ZONE_MAP` + `ZONE_ALLOWED_COMMS` |
-| — | **Detection-only** (record, never block) | `cgroup_attach_task` fentry | `CGROUP_ESCAPE_COUNT` |
+| — | **Detection-only** (record, never block) | `cgroup_attach_task` fentry (not a BPF-LSM hook; do not reintroduce as enforcement) | `CGROUP_ESCAPE_COUNT` |
+
+The detection-only row is not a blocking shape: `cgroup_attach_task` is not a
+BPF-LSM hook on supported kernels, so it cannot deny — it is a best-effort
+fentry that records escapes (do not reintroduce it as an enforcement hook).
 
 Plus two global modifiers that apply to all blocking shapes without adding new
 ones: the **enforce/audit** switch (`ENFORCEMENT_MODE`) and the always-allow
