@@ -182,14 +182,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> u8 {
-    // Fail fast before connecting: WatchEvents is a live stream and syva-core
-    // hands out a single ring-buffer consumer, so a non-follow call would drain
-    // and release it. Require --follow.
+    // Fail fast before connecting: WatchEvents is a live broadcast stream;
+    // a non-follow call returns nothing (the core's event pump owns the ring
+    // buffer, so there is no drainable backlog). Require --follow.
     if let Command::Events { follow: false } = cli.command {
         eprintln!(
             "`syvactl events` requires --follow: WatchEvents is a live stream and a \
-non-follow call would consume syva-core's single event-stream handle. \
-Run `syvactl events --follow`."
+non-follow call returns no events. Run `syvactl events --follow`."
         );
         return EXIT_USAGE;
     }
@@ -531,28 +530,82 @@ fn print_event(format: OutputFormat, event: &syva_core_client::syva_core::DenyEv
             println!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
-                    "event": "syva.enforcement.denied",
+                    "event": match event.decision.as_str() {
+                        "would_deny" => "syva.enforcement.would_deny",
+                        "escape" => "syva.cgroup.escape",
+                        _ => "syva.enforcement.denied",
+                    },
+                    // Kernel CLOCK_MONOTONIC ns, not wall clock.
                     "timestamp_ns": event.timestamp_ns,
                     "hook": event.hook,
+                    "decision": event.decision,
+                    "zone": event.zone,
+                    "target_zone": event.target_zone,
                     "zone_id": event.zone_id,
                     "target_zone_id": event.target_zone_id,
                     "pid": event.pid,
                     "comm": event.comm,
                     "inode": event.inode,
+                    "path": event.path,
+                    "dst_ip": event.dst_ip,
+                    "dst_port": event.dst_port,
+                    "what_failed": event.what_failed,
+                    "why_it_matters": event.why_it_matters,
+                    "possible_causes": event.possible_causes,
                     "context": event.context,
-                    "result": "deny",
-                    "errno": "EPERM",
+                    "result": event.decision,
+                    "errno": if event.decision == "deny" { "EPERM" } else { "" },
                 }))
                 .expect("event JSON serializes")
             );
         }
         OutputFormat::Text => {
+            // The human projection: receive time, constant decision/hook
+            // columns, zone names not ids, and the most specific target field
+            // available for the hook (path, destination, or raw context).
+            let target = if !event.path.is_empty() {
+                format!("path={}", event.path)
+            } else if !event.dst_ip.is_empty() {
+                format!("dst={}:{}", event.dst_ip, event.dst_port)
+            } else {
+                format!("context={}", event.context)
+            };
             println!(
-                "DENY hook={} pid={} zone={} target_zone={} context={}",
-                event.hook, event.pid, event.zone_id, event.target_zone_id, event.context
+                "{}  {:<10} {:<22} {} \u{2192} {}  pid={} comm={} {}",
+                receive_time_utc(),
+                event.decision.to_uppercase(),
+                event.hook,
+                event.zone,
+                event.target_zone,
+                event.pid,
+                event.comm,
+                target
             );
+            if !event.what_failed.is_empty() {
+                println!(
+                    "              why: {} \u{2014} {}",
+                    event.what_failed, event.why_it_matters
+                );
+            }
         }
     }
+}
+
+/// HH:MM:SSZ UTC receive time. The kernel timestamp in the event is
+/// CLOCK_MONOTONIC and not directly renderable as wall clock; receive time is
+/// the honest human-readable column (raw kernel ns stays in the JSON form).
+fn receive_time_utc() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs_of_day = now % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}Z",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
 }
 
 fn hook_json(hook: &syva_core_client::syva_core::HookStatus) -> serde_json::Value {

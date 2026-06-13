@@ -212,7 +212,12 @@ Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP` (keyed by composite
 `EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` (per-zone egress CIDR LPM tries),
 `ENFORCEMENT_MODE` (global enforce/audit switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
-(ring buffer), `CGROUP_ESCAPE_COUNT` (detected escapes), plus `SELF_TEST*` maps
+(ring buffer; 64-byte events carrying comm and, for socket hooks, the
+destination addr/port — drained exclusively by the core's event pump, which
+enriches each event with zone names, registered path, and templated reason
+fields, then fans out to the `WatchEvents` broadcast, the core log, and
+per-zone `syva_zone_deny_total` metrics), `CGROUP_ESCAPE_COUNT` (detected
+escapes), plus `SELF_TEST*` maps
 (startup offset validation) and `INODE_PROBE_REQUEST`/`INODE_PROBE_RESULT` —
 the inode probe through which userspace learns a file's kernel `s_dev` (armed
 per registration with the core's tgid; also drives the startup inode
@@ -231,7 +236,8 @@ patched into eBPF globals — no offsets are hardcoded.
 discovery — release preferred over debug), `zone.rs` (zone registry + ID
 allocation), `membership.rs` (container→zone), `ingest.rs` (RPC→map apply),
 `rpc/mod.rs` (`syva.core.v1` gRPC service), `health.rs` (`/healthz` + `/metrics`),
-`events.rs` (ring-buffer drain, `HOOK_NAMES`), `btf.rs` (offset resolution),
+`events.rs` (the event pump: drain → enrich → sink fan-out, `HOOK_NAMES`,
+reason templates), `btf.rs` (offset resolution),
 `container_id.rs` (ID validation), `types.rs` (shared core types). Privileged
 integration tests are under
 `syva-core/tests/` (all `#[ignore]`d; driven by the `verify-*` gates).

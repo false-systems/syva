@@ -367,8 +367,9 @@ WatchEvents
 
 Semantics:
 
-- `--follow` is required by the CLI because the event stream is a single
-  ring-buffer consumer.
+- `--follow` is required by the CLI because the stream is live-only: the
+  core's event pump owns the ring buffer and a non-follow call returns no
+  events. Multiple concurrent watchers are supported.
 - JSON streaming output is newline-delimited JSON.
 - Events are enforcement events. In v0.1, the exposed stream is denial-focused.
 - Paths may be omitted or redacted depending on privacy settings and available

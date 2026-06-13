@@ -104,7 +104,19 @@ pub struct EnforceEbpf {
     /// probe. One probe per filesystem (per btrfs subvolume) is enough; the
     /// kernel value cannot change for a mounted superblock.
     dev_cache: std::collections::HashMap<u64, u32>,
+    /// (zone_id, ino) → registered host path, for enriching file deny events
+    /// with the path the operator registered. Keyed by ino (not dev) because
+    /// the deny event carries ino + target zone only; same-zone same-ino
+    /// cross-device collisions are last-write-wins. Bounded by the per-zone
+    /// inode scan cap. Shared with the event pump via `path_index()`.
+    path_index: InodePathIndex,
 }
+
+/// Shared (zone_id, ino) → registered-path index. std RwLock on purpose:
+/// writers are the synchronous registration methods, readers hold it for
+/// microseconds, and it is never held across an await.
+pub type InodePathIndex =
+    std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(u32, u64), String>>>;
 
 impl EnforceEbpf {
     /// Load and attach eBPF programs.
@@ -214,7 +226,14 @@ impl EnforceEbpf {
             pin_path,
             escape_detector_loaded,
             dev_cache: std::collections::HashMap::new(),
+            path_index: InodePathIndex::default(),
         })
+    }
+
+    /// Clone of the shared (zone_id, ino) → path index for the event pump,
+    /// so event enrichment never contends the EnforceEbpf mutex.
+    pub fn path_index(&self) -> InodePathIndex {
+        self.path_index.clone()
     }
 
     /// Attach the cgroup-escape fentry detector. Best-effort and idempotent:
@@ -922,6 +941,9 @@ impl EnforceEbpf {
 
     /// Remove all INODE_ZONE_MAP entries for a given zone.
     pub fn remove_zone_inodes(&mut self, zone_id: u32) -> anyhow::Result<()> {
+        if let Ok(mut index) = self.path_index.write() {
+            index.retain(|(z, _), _| *z != zone_id);
+        }
         let keys_to_remove: Vec<InodeZoneKey> = {
             let map: AyaHashMap<_, InodeZoneKey, u32> = AyaHashMap::try_from(
                 self.bpf
@@ -1065,6 +1087,9 @@ impl EnforceEbpf {
                 .ok_or_else(|| anyhow::anyhow!("INODE_ZONE_MAP map not found"))?,
         )?;
         map.insert(key, zone_id, 0)?;
+        if let Ok(mut index) = self.path_index.write() {
+            index.insert((zone_id, meta.ino()), canon.display().to_string());
+        }
         Ok(1)
     }
 
@@ -1095,7 +1120,7 @@ impl EnforceEbpf {
         // Phase 1: walk the paths and collect (raw st_dev, ino) entries plus
         // one probeable representative per filesystem. The walk cannot hold
         // the BPF map handle because the dev probe needs `self.bpf` too.
-        let mut entries: Vec<(u64, u64)> = Vec::new();
+        let mut entries: Vec<(u64, u64, PathBuf)> = Vec::new();
         let mut probe_reps: HashMap<u64, (PathBuf, fs::Metadata)> = HashMap::new();
         let mut visited: HashSet<(u64, u64)> = HashSet::new();
 
@@ -1127,7 +1152,7 @@ impl EnforceEbpf {
                     if !visited.insert((meta.dev(), meta.ino())) {
                         continue; // Cycle detection, per (dev, ino).
                     }
-                    entries.push((meta.dev(), meta.ino()));
+                    entries.push((meta.dev(), meta.ino(), path.clone()));
 
                     // A probe must open the path itself, so the representative
                     // has to be a directory or regular file: opening a symlink
@@ -1162,7 +1187,8 @@ impl EnforceEbpf {
         )?;
 
         let mut count = 0usize;
-        for (raw_dev, ino) in entries {
+        let mut indexed_paths: Vec<((u32, u64), String)> = Vec::new();
+        for (raw_dev, ino, path) in entries {
             let Some(&dev) = kernel_devs.get(&raw_dev) else {
                 // Only reachable when a filesystem surfaced nothing but
                 // symlinks/specials — its entries cannot be probed, and a
@@ -1176,7 +1202,11 @@ impl EnforceEbpf {
                 continue;
             };
             map.insert(InodeZoneKey::new(ino, dev), zone_id, 0)?;
+            indexed_paths.push(((zone_id, ino), path.display().to_string()));
             count += 1;
+        }
+        if let Ok(mut index) = self.path_index.write() {
+            index.extend(indexed_paths);
         }
 
         Ok(count)

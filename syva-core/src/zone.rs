@@ -77,6 +77,8 @@ pub struct ZoneRegistry {
     allowed_comms: HashSet<(String, String)>,
     /// Monotonic zone ID counter. Starts at 1. 0 is reserved for ZONE_ID_HOST.
     next_id: u32,
+    /// zone_id → zone_name reverse index, for enriching enforcement events.
+    id_to_name: std::collections::BTreeMap<u32, String>,
 }
 
 impl ZoneRegistry {
@@ -87,6 +89,7 @@ impl ZoneRegistry {
             container_to_info: HashMap::new(),
             allowed_comms: HashSet::new(),
             next_id: 1,
+            id_to_name: std::collections::BTreeMap::new(),
         }
     }
 
@@ -121,6 +124,7 @@ impl ZoneRegistry {
                 refcount: 0,
             },
         );
+        self.id_to_name.insert(zone_id, zone_name.to_string());
         Ok(zone_id)
     }
 
@@ -254,6 +258,7 @@ impl ZoneRegistry {
         }
         let zone_id = entry.zone_id;
         self.zones.remove(zone_name);
+        self.id_to_name.remove(&zone_id);
         self.allowed_comms
             .retain(|(a, b)| a != zone_name && b != zone_name);
         Ok(zone_id)
@@ -280,6 +285,24 @@ impl ZoneRegistry {
     /// Look up zone_id by name.
     pub fn zone_id(&self, zone_name: &str) -> Option<u32> {
         self.zones.get(zone_name).map(|e| e.zone_id)
+    }
+
+    /// Look up a zone name by numeric id (reverse of `zone_id`).
+    pub fn zone_name(&self, zone_id: u32) -> Option<&str> {
+        self.id_to_name.get(&zone_id).map(String::as_str)
+    }
+
+    /// Display name for a zone id in enforcement events: "host" for the
+    /// reserved id 0, the registered name when known, "zone-<id>" otherwise
+    /// (e.g. an event raced a zone removal).
+    pub fn zone_display_name(&self, zone_id: u32) -> String {
+        if zone_id == syva_ebpf_common::ZONE_ID_HOST {
+            return "host".to_string();
+        }
+        match self.zone_name(zone_id) {
+            Some(name) => name.to_string(),
+            None => format!("zone-{zone_id}"),
+        }
     }
 
     /// Update the zone type for an already-registered zone.
@@ -391,6 +414,20 @@ mod tests {
         let id1 = reg.register_zone("frontend").unwrap();
         let id2 = reg.register_zone("database").unwrap();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn zone_name_reverse_lookup_follows_register_and_remove() {
+        let mut reg = ZoneRegistry::new();
+        let id = reg.register_zone("frontend").unwrap();
+        assert_eq!(reg.zone_name(id), Some("frontend"));
+        assert_eq!(reg.zone_display_name(id), "frontend");
+
+        reg.unregister_zone("frontend").unwrap();
+        assert_eq!(reg.zone_name(id), None);
+        // Removed/unknown ids fall back to a synthetic label, host id to "host".
+        assert_eq!(reg.zone_display_name(id), format!("zone-{id}"));
+        assert_eq!(reg.zone_display_name(0), "host");
     }
 
     #[test]

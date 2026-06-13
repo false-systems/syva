@@ -264,11 +264,14 @@ pub const MODE_AUDIT: u32 = 1;
 
 /// Enforcement event emitted from BPF hooks via ring buffer.
 ///
-/// Fixed 48-byte struct. All hooks populate the common fields;
+/// Fixed 64-byte struct. All hooks populate the common fields;
 /// hook-specific context goes in the `context` field:
-///   - file_open / bprm_check: the denied inode number
+///   - file_open / bprm_check / mmap_file: the denied inode number
 ///   - unix_stream_connect: the peer cgroup_id
+///   - socket_connect / socket_sendmsg / socket_bind: the address family
+///     (the destination itself is in `dst_addr` / `dst_port`)
 ///   - ptrace / task_kill: 0 (target PID to be added later)
+///   - cgroup escape: the destination cgroup_id
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EnforcementEvent {
@@ -276,11 +279,17 @@ pub struct EnforcementEvent {
     pub pid: u32,
     pub hook: u8,
     pub decision: u8,
-    pub _pad0: [u8; 2],
+    /// Network-order `sin_port` / `sin6_port` for the socket hooks; 0 for
+    /// every other hook.
+    pub dst_port: u16,
     pub caller_zone: u32,
     pub target_zone: u32,
     pub context: u64,
-    pub _reserved: [u64; 2],
+    /// Caller task comm from `bpf_get_current_comm`, NUL-padded.
+    pub comm: [u8; 16],
+    /// Destination address for the socket hooks: IPv4 in the first 4 bytes,
+    /// IPv6 in all 16 (network order). Zeroed for every other hook.
+    pub dst_addr: [u8; 16],
 }
 
 #[cfg(feature = "userspace")]
@@ -541,7 +550,7 @@ mod tests {
 
     #[test]
     fn enforcement_event_size() {
-        assert_eq!(size_of::<EnforcementEvent>(), 48);
+        assert_eq!(size_of::<EnforcementEvent>(), 64);
     }
 
     #[test]

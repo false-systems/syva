@@ -28,7 +28,7 @@ Common gRPC statuses:
 - `InvalidArgument`: malformed request, empty required names, invalid cgroup ID.
 - `NotFound`: unknown zone in selected RPCs.
 - `Internal`: BPF map failures or unexpected core errors.
-- `Unavailable`: event stream already taken or socket unavailable.
+- `Unavailable`: socket unavailable.
 
 Kernel denials are not gRPC errors. A denied workload operation is returned to
 the workload as `EPERM` and appears through counters or `WatchEvents`.
@@ -297,27 +297,34 @@ health server.
 
 ### WatchEvents
 
-Streams enforcement deny events from the existing ring buffer.
+Streams enriched enforcement events from the core's event pump. The pump owns
+the kernel ring buffer and broadcasts to subscribers, so any number of clients
+may watch concurrently.
 
 Request:
 
-- `follow`: if true, continue streaming future events after draining current
-  events; if false, return after the current drain.
+- `follow`: if true, stream live events until the client disconnects; if
+  false, the stream closes immediately (the pump owns the ring buffer, so
+  there is no drainable backlog outside the live stream).
 
-Response stream:
+Response stream (per event):
 
-- `timestamp_ns`
-- `hook`
-- `zone_id`
-- `target_zone_id`
-- `pid`
-- `comm`
-- `inode`
-- `context`
+- `timestamp_ns` — kernel CLOCK_MONOTONIC ns (not wall clock)
+- `hook`, `decision` — `deny` | `would_deny` (audit mode) | `escape`
+- `zone` / `target_zone` — zone names (`host` for the unzoned id 0,
+  `zone-<id>` when the id is no longer registered); raw `zone_id` /
+  `target_zone_id` are also present
+- `pid`, `comm` — the denied process, comm captured in the kernel
+- `inode`, `path` — for file denials; `path` is the registered host path when
+  the denied inode was registered through `RegisterHostPath` (best-effort)
+- `dst_ip`, `dst_port` — for socket denials
+- `what_failed`, `why_it_matters`, `possible_causes` — stable, templated
+  reason fields per (hook, decision)
+- `context` — raw hook-specific value, kept for compatibility
 
 Limitations:
 
-- The event ring buffer is single-consumer. If another client has taken it,
-  `WatchEvents` returns gRPC `Unavailable`.
+- A subscriber that lags behind the broadcast capacity misses events; the gap
+  is counted in `syva_watch_events_dropped_total` and the stream continues.
 - Rich per-denial events are best-effort operational evidence; counters remain
   the low-cardinality monitoring signal.

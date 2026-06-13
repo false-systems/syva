@@ -222,20 +222,44 @@ message HookStatus {
 // --- Events ---
 
 message WatchEventsRequest {
-    // If true, stream all future deny events.
-    // If false, return immediately after draining current buffer.
+    // If true, stream all future deny events. If false, the stream closes
+    // immediately: the core's event pump owns the ring buffer, so there is no
+    // drainable backlog outside the live stream.
     bool follow = 1;
 }
 
 message DenyEvent {
+    // Kernel CLOCK_MONOTONIC nanoseconds (bpf_ktime_get_ns), NOT wall clock.
     uint64 timestamp_ns = 1;
     string hook = 2;
     uint32 zone_id = 3;
     uint32 target_zone_id = 4;
     uint32 pid = 5;
+    // Caller task comm captured in the kernel at deny time.
     string comm = 6;
+    // Denied file inode for file_open / bprm_check / mmap_file; 0 otherwise.
     uint64 inode = 7;
+    // Raw hook-specific context value (stringified u64), kept for
+    // compatibility: socket hooks = address family, unix = peer cgroup id,
+    // escape = destination cgroup id.
     string context = 8;
+    // "deny" | "would_deny" (audit mode) | "escape" (cgroup-escape detection).
+    string decision = 9;
+    // Caller zone name ("host" for unzoned id 0, "zone-<id>" if unknown).
+    string zone = 10;
+    // Target zone name, same fallback rules.
+    string target_zone = 11;
+    // Best-effort registered host path for file denials (empty when the
+    // denied inode was not registered through RegisterHostPath).
+    string path = 12;
+    // Destination IP for socket denials, rendered v4/v6; empty otherwise.
+    string dst_ip = 13;
+    // Destination port (host order) for socket denials; 0 otherwise.
+    uint32 dst_port = 14;
+    // FALSE-protocol reason fields: stable per (hook, decision) templates.
+    string what_failed = 15;
+    string why_it_matters = 16;
+    repeated string possible_causes = 17;
 }
 
 // --- Policy ---

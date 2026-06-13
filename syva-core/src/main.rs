@@ -116,6 +116,7 @@ struct LocalCoreServerState {
     ebpf: Arc<Mutex<ebpf::EnforceEbpf>>,
     health: health::SharedHealth,
     start_time: Instant,
+    events: tokio::sync::broadcast::Sender<syva_proto::syva_core::DenyEvent>,
 }
 
 #[tokio::main]
@@ -128,7 +129,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Status) => cmd_status(status_socket).await,
-        Some(Commands::Events { follow, format }) => cmd_events(follow, format).await,
+        Some(Commands::Events { follow, format }) => {
+            cmd_events(status_socket, follow, format).await
+        }
         None => cmd_run(cli).await,
     }
 }
@@ -188,9 +191,6 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         );
     }
 
-    // Do not take the ENFORCEMENT_EVENTS ring buffer here — it is single-consumer
-    // and the gRPC WatchEvents RPC needs to acquire it. Event logging for the core
-    // binary uses the status subcommand or adapter-side streaming instead.
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Attach eBPF hooks — enforcement becomes active.
@@ -291,11 +291,36 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     // we only need open file descriptors (already held by the Bpf struct).
     drop_unnecessary_capabilities();
 
+    // Take the enforcement event ring buffer while the manager is still
+    // exclusively owned. The event pump is its only consumer for the core's
+    // lifetime; events emitted since attach are waiting in the 4MB buffer.
+    let event_ring_buf = mgr.take_event_ring_buf().ok_or_else(|| {
+        anyhow::anyhow!("ENFORCEMENT_EVENTS ring buffer missing from eBPF object")
+    })?;
+    let path_index = mgr.path_index();
+
     // Create zone registry.
     let registry = Arc::new(RwLock::new(zone::ZoneRegistry::new()));
     let memberships = Arc::new(RwLock::new(membership::MembershipService::new()));
     let container_updates = Arc::new(StdMutex::new(HashSet::new()));
     let ebpf = Arc::new(Mutex::new(mgr));
+
+    // The event pump: drain → enrich → fan out to WatchEvents subscribers,
+    // the core log, and per-zone metrics. Always on — deny events are
+    // evidence and flow whether or not anyone is watching.
+    let events_tx = events::event_channel();
+    let sinks: Vec<Box<dyn events::EventSink>> = vec![
+        Box::new(events::BroadcastSink(events_tx.clone())),
+        Box::new(events::LogSink),
+        Box::new(events::MetricsSink(health_state.clone())),
+    ];
+    events::spawn_event_pump(
+        event_ring_buf,
+        registry.clone(),
+        path_index,
+        sinks,
+        cancel.clone(),
+    );
 
     let local_server_state = LocalCoreServerState {
         registry: registry.clone(),
@@ -304,6 +329,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         ebpf: ebpf.clone(),
         health: health_state.clone(),
         start_time,
+        events: events_tx,
     };
     let mut local_server_task = spawn_local_core_server(
         config.socket_path.clone(),
@@ -466,6 +492,7 @@ async fn spawn_local_core_server(
         ebpf: state.ebpf,
         health: state.health,
         start_time: state.start_time,
+        events: state.events,
     };
     let incoming = UnixListenerStream::new(listener);
     let shutdown = cancel.cancelled_owned();
@@ -657,92 +684,86 @@ fn print_grpc_status(status: &syva_core_client::syva_core::StatusResponse) {
     }
 }
 
-async fn cmd_events(follow: bool, format: OutputFormat) -> anyhow::Result<()> {
-    use aya::maps::RingBuf;
-    use syva_ebpf_common::EnforcementEvent;
-
+async fn cmd_events(
+    socket_path: PathBuf,
+    follow: bool,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
     if !follow {
         println!("use --follow to stream events in real time");
         return Ok(());
     }
 
-    let pin_path = std::path::Path::new("/sys/fs/bpf/syva/ENFORCEMENT_EVENTS");
-    if !pin_path.exists() {
-        anyhow::bail!("syva is not running (no pinned ENFORCEMENT_EVENTS map)");
-    }
-
-    let map_data = aya::maps::MapData::from_pin(pin_path)
-        .map_err(|e| anyhow::anyhow!("failed to open pinned ring buffer: {e}"))?;
-    let mut ring_buf = RingBuf::try_from(aya::maps::Map::RingBuf(map_data))?;
+    // Stream the enriched events from the running core. The core's event
+    // pump owns the ring buffer; reading the pinned map directly would
+    // corrupt the pump's consumer position.
+    let mut client = syva_core_client::connect_unix_socket(&socket_path)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot reach syva-core at {} — is it running? ({error})",
+                socket_path.display()
+            )
+        })?;
+    let mut stream = client
+        .watch_events(syva_core_client::syva_core::WatchEventsRequest { follow: true })
+        .await?
+        .into_inner();
     let json_mode = matches!(format, OutputFormat::Json);
 
     eprintln!("streaming enforcement events (Ctrl+C to stop)...");
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                break;
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                const MAX_EVENTS_PER_TICK: usize = 1000;
-                let drained: Vec<EnforcementEvent> = tokio::task::block_in_place(|| {
-                    let mut out = Vec::new();
-                    while let Some(item) = ring_buf.next() {
-                        if item.len() < std::mem::size_of::<EnforcementEvent>() {
-                            continue;
-                        }
-                        let event: EnforcementEvent = unsafe {
-                            std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
-                        };
-                        out.push(event);
-                        if out.len() >= MAX_EVENTS_PER_TICK {
-                            break;
-                        }
+            _ = tokio::signal::ctrl_c() => break,
+            event = stream.message() => {
+                let Some(event) = event? else { break };
+                if json_mode {
+                    let json = serde_json::json!({
+                        "event": match event.decision.as_str() {
+                            "would_deny" => "syva.enforcement.would_deny",
+                            "escape" => "syva.cgroup.escape",
+                            _ => "syva.enforcement.denied",
+                        },
+                        "component": "syva-core",
+                        "timestamp_ns": event.timestamp_ns,
+                        "hook": event.hook,
+                        "result": event.decision,
+                        "errno": if event.decision == "deny" { "EPERM" } else { "" },
+                        "pid": event.pid,
+                        "comm": event.comm,
+                        "zone": event.zone,
+                        "target_zone": event.target_zone,
+                        "inode": event.inode,
+                        "path": event.path,
+                        "dst_ip": event.dst_ip,
+                        "dst_port": event.dst_port,
+                        "what_failed": event.what_failed,
+                        "why_it_matters": event.why_it_matters,
+                        "possible_causes": event.possible_causes,
+                        "context": event.context,
+                    });
+                    if let Ok(line) = serde_json::to_string(&json) {
+                        println!("{line}");
                     }
-                    out
-                });
-                for event in &drained {
-                    let hook = events::hook_label(event.hook);
-                    let decision = match event.decision {
-                        syva_ebpf_common::DECISION_DENY => "deny",
-                        syva_ebpf_common::DECISION_ALLOW => "allow",
-                        // Audit mode: the violation was recorded but the
-                        // operation proceeded — no EPERM was returned.
-                        syva_ebpf_common::DECISION_WOULD_DENY => "would_deny",
-                        // Detection only: a zoned task left its zone; the
-                        // migration was observed, not prevented.
-                        syva_ebpf_common::DECISION_ESCAPE => "escape",
-                        _ => "unknown",
-                    };
-
-                    if json_mode {
-                        let json = serde_json::json!({
-                            "event": match decision {
-                                "deny" => "syva.enforcement.denied",
-                                "would_deny" => "syva.enforcement.would_deny",
-                                "escape" => "syva.cgroup.escape",
-                                _ => "syva.enforcement.observed",
-                            },
-                            "component": "syva-core",
-                            "timestamp_ns": event.timestamp_ns,
-                            "hook": hook,
-                            "result": decision,
-                            "errno": if decision == "deny" { "EPERM" } else { "" },
-                            "pid": event.pid,
-                            "source_zone": event.caller_zone,
-                            "target_zone": event.target_zone,
-                            "context": event.context,
-                        });
-                        if let Ok(line) = serde_json::to_string(&json) {
-                            println!("{line}");
-                        }
+                } else {
+                    let target = if !event.path.is_empty() {
+                        format!("path={}", event.path)
+                    } else if !event.dst_ip.is_empty() {
+                        format!("dst={}:{}", event.dst_ip, event.dst_port)
                     } else {
-                        println!(
-                            "{} hook={} pid={} caller_zone={} target_zone={} context={}",
-                            decision.to_uppercase(), hook, event.pid,
-                            event.caller_zone, event.target_zone, event.context
-                        );
-                    }
+                        format!("context={}", event.context)
+                    };
+                    println!(
+                        "{:<10} {:<22} {} \u{2192} {}  pid={} comm={} {}",
+                        event.decision.to_uppercase(),
+                        event.hook,
+                        event.zone,
+                        event.target_zone,
+                        event.pid,
+                        event.comm,
+                        target
+                    );
                 }
             }
         }
