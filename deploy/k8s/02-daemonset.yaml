@@ -1,4 +1,9 @@
-# syva v0.2 — local core + file adapter deployment
+# Syva — node-local eBPF enforcement: syva-core + syva-k8s adapter per node.
+#
+# The core's Unix socket lives on the host at /run/syva/syva-core.sock so
+# node-local tooling (syvactl, verify-deployment) can reach the same core the
+# adapter uses. Host access required: BPF pins (/sys/fs/bpf), kernel BTF,
+# cgroup v2, host /proc (container PID → cgroup resolution), hostPID.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -26,8 +31,10 @@ spec:
         - effect: NoSchedule
           operator: Exists
       initContainers:
+        # A crashed core can leave stale BPF pins; the new core refuses to
+        # start on them (mutual exclusion), so clear them before startup.
         - name: cleanup-stale-bpf-pins
-          image: ghcr.io/false-systems/syva-core:0.2.0
+          image: ghcr.io/false-systems/syva-core:0.4.0
           command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
           resources:
             requests:
@@ -49,9 +56,9 @@ spec:
               add: ["SYS_ADMIN"]
       containers:
         - name: syva-core
-          image: ghcr.io/false-systems/syva-core:0.2.0
+          image: ghcr.io/false-systems/syva-core:0.4.0
           args:
-            - --core-socket
+            - --socket-path
             - /run/syva/syva-core.sock
           ports:
             - name: health
@@ -89,7 +96,9 @@ spec:
               type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
-              add: ["BPF", "SYS_ADMIN", "PERFMON"]
+              # SYS_ADMIN is dropped by the core itself after BPF load.
+              # CHOWN: the core chowns its Unix socket to root:syva.
+              add: ["BPF", "SYS_ADMIN", "PERFMON", "CHOWN"]
           volumeMounts:
             - name: syva-socket
               mountPath: /run/syva
@@ -101,14 +110,43 @@ spec:
             - name: btf
               mountPath: /sys/kernel/btf
               readOnly: true
+            # The HOST's /tmp (tmpfs), serving two purposes: a writable
+            # location for the startup inode self-test (the root fs is
+            # read-only), and host-path registration for files under /tmp.
+            # A containerized core can only police host paths that are
+            # mounted into it at the SAME path — mount additional policy
+            # directories here as your zones need them.
+            - name: tmp
+              mountPath: /tmp
 
-        - name: syva-adapter-file
-          image: ghcr.io/false-systems/syva-adapter-file:0.2.0
+        - name: syva-adapter-k8s
+          image: ghcr.io/false-systems/syva-adapter-k8s:0.4.0
           args:
-            - --policy-dir
-            - /etc/syva/policies
-            - --socket-path
+            - --core-socket
             - /run/syva/syva-core.sock
+            - --host-proc
+            - /host/proc
+            - --host-cgroup
+            - /sys/fs/cgroup
+            - --metrics-listen
+            - $(POD_IP):9092
+          ports:
+            - name: k8s-metrics
+              containerPort: 9092
+              protocol: TCP
+          env:
+            - name: SYVA_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           resources:
             requests:
               cpu: "20m"
@@ -126,21 +164,21 @@ spec:
           volumeMounts:
             - name: syva-socket
               mountPath: /run/syva
-            - name: containerd-sock
-              mountPath: /run/containerd/containerd.sock
-            - name: containerd-state
-              mountPath: /run/containerd/io.containerd.runtime.v2.task
-              readOnly: true
             - name: cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
-            - name: policies
-              mountPath: /etc/syva/policies
+            - name: host-proc
+              mountPath: /host/proc
               readOnly: true
 
       volumes:
+        # Host path (not emptyDir) so node-local syvactl and the
+        # verify-deployment gate reach the same socket. Root-owned; the
+        # socket itself is 0660 root:syva inside the container.
         - name: syva-socket
-          emptyDir: {}
+          hostPath:
+            path: /run/syva
+            type: DirectoryOrCreate
         - name: bpf
           hostPath:
             path: /sys/fs/bpf
@@ -149,29 +187,15 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
         - name: btf
           hostPath:
             path: /sys/kernel/btf
             type: Directory
-        - name: containerd-sock
+        - name: tmp
           hostPath:
-            path: /run/containerd/containerd.sock
-            type: Socket
-        - name: containerd-state
-          hostPath:
-            path: /run/containerd/io.containerd.runtime.v2.task
-            type: DirectoryOrCreate
-        - name: policies
-          configMap:
-            name: syva-policies
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: syva-system
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: syva
-  namespace: syva-system
+            path: /tmp
+            type: Directory

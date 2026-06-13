@@ -4,6 +4,47 @@ Syva's Kubernetes path is node-local. The DaemonSet runs `syva-core` and
 `syva-k8s` on each node; the adapter talks to the local Unix socket and does not
 introduce a remote control plane.
 
+## Quickstart
+
+```sh
+kubectl apply -f deploy/k8s/
+```
+
+That applies the `SyvaZonePolicy` CRD, the `syva-system` namespace + RBAC, and
+the DaemonSet (core + adapter per node). Then declare zones and annotate
+workloads:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: syva.dev/v1alpha1
+kind: SyvaZonePolicy
+metadata:
+  name: payments
+  namespace: default
+spec: {}
+EOF
+
+kubectl annotate pod my-pod syva.false.systems/zone=payments
+```
+
+Watch denials with names, process, path/destination, and reasons:
+
+```sh
+kubectl exec -n syva-system ds/syva -c syva-core -- \
+  syvactl events --follow
+```
+
+The core's socket is also on each node at `/run/syva/syva-core.sock`, so
+node-local `syvactl` works directly, and `sudo -E make verify-deployment`
+proves the deployed DaemonSet blocks a real container. A file-adapter variant
+(TOML policy instead of CRDs) lives at `deploy/k8s/variants/daemonset-file.yaml`.
+
+One rule of containerized deployment: the core runs in its own mount
+namespace, so `RegisterHostPath` can only resolve host paths that are
+**mounted into the core container at the same path**. The DaemonSet mounts
+the host's `/tmp` by default (it also hosts the startup self-test); add
+volume mounts for the directories your zone policies protect.
+
 ## Container Images
 
 Released images are published to GHCR for `linux/amd64` and `linux/arm64` by
