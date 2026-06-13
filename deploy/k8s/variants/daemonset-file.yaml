@@ -1,4 +1,4 @@
-# syva v0.2 — local core + Kubernetes adapter deployment
+# syva v0.2 — local core + file adapter deployment
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -27,7 +27,7 @@ spec:
           operator: Exists
       initContainers:
         - name: cleanup-stale-bpf-pins
-          image: ghcr.io/false-systems/syva-core:0.3.0
+          image: ghcr.io/false-systems/syva-core:0.4.0
           command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
           resources:
             requests:
@@ -49,9 +49,9 @@ spec:
               add: ["SYS_ADMIN"]
       containers:
         - name: syva-core
-          image: ghcr.io/false-systems/syva-core:0.3.0
+          image: ghcr.io/false-systems/syva-core:0.4.0
           args:
-            - --socket-path
+            - --core-socket
             - /run/syva/syva-core.sock
           ports:
             - name: health
@@ -102,34 +102,13 @@ spec:
               mountPath: /sys/kernel/btf
               readOnly: true
 
-        - name: syva-adapter-k8s
-          image: ghcr.io/false-systems/syva-adapter-k8s:0.3.0
+        - name: syva-adapter-file
+          image: ghcr.io/false-systems/syva-adapter-file:0.4.0
           args:
-            - --core-socket
+            - --policy-dir
+            - /etc/syva/policies
+            - --socket-path
             - /run/syva/syva-core.sock
-            - --host-proc
-            - /host/proc
-            - --host-cgroup
-            - /sys/fs/cgroup
-            - --metrics-listen
-            - $(POD_IP):9092
-          ports:
-            - name: k8s-metrics
-              containerPort: 9092
-              protocol: TCP
-          env:
-            - name: SYVA_K8S_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
           resources:
             requests:
               cpu: "20m"
@@ -147,11 +126,16 @@ spec:
           volumeMounts:
             - name: syva-socket
               mountPath: /run/syva
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: containerd-state
+              mountPath: /run/containerd/io.containerd.runtime.v2.task
+              readOnly: true
             - name: cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
-            - name: host-proc
-              mountPath: /host/proc
+            - name: policies
+              mountPath: /etc/syva/policies
               readOnly: true
 
       volumes:
@@ -165,14 +149,21 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
-        - name: host-proc
-          hostPath:
-            path: /proc
-            type: Directory
         - name: btf
           hostPath:
             path: /sys/kernel/btf
             type: Directory
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: containerd-state
+          hostPath:
+            path: /run/containerd/io.containerd.runtime.v2.task
+            type: DirectoryOrCreate
+        - name: policies
+          configMap:
+            name: syva-policies
 ---
 apiVersion: v1
 kind: Namespace
@@ -184,31 +175,3 @@ kind: ServiceAccount
 metadata:
   name: syva
   namespace: syva-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: syva-k8s
-rules:
-  - apiGroups: ["syva.dev"]
-    resources: ["syvazonepolicies"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["syva.dev"]
-    resources: ["syvazonepolicies/status"]
-    verbs: ["patch", "update"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: syva-k8s
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: syva-k8s
-subjects:
-  - kind: ServiceAccount
-    name: syva
-    namespace: syva-system

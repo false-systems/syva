@@ -135,6 +135,18 @@ Enforcement runs on Linux only:
 macOS works for development through the Lima VM below; building and testing
 are host-safe everywhere.
 
+## Quickstart (Kubernetes)
+
+```sh
+kubectl apply -f deploy/k8s/
+```
+
+One apply installs the CRD, namespace + RBAC, and the per-node DaemonSet
+(`syva-core` + `syva-k8s`). Declare a `SyvaZonePolicy`, annotate pods with
+`syva.false.systems/zone: <zone>`, and watch enriched denials with
+`syvactl events --follow`. See
+[docs/deployment/kubernetes.md](docs/deployment/kubernetes.md).
+
 ## Quickstart (Lima development VM)
 
 A single-node development deployment that deploys `syva-core` as a node-local
