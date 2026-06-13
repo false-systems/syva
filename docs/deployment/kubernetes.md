@@ -39,6 +39,12 @@ node-local `syvactl` works directly, and `sudo -E make verify-deployment`
 proves the deployed DaemonSet blocks a real container. A file-adapter variant
 (TOML policy instead of CRDs) lives at `deploy/k8s/variants/daemonset-file.yaml`.
 
+One rule of containerized deployment: the core runs in its own mount
+namespace, so `RegisterHostPath` can only resolve host paths that are
+**mounted into the core container at the same path**. The DaemonSet mounts
+the host's `/tmp` by default (it also hosts the startup self-test); add
+volume mounts for the directories your zone policies protect.
+
 ## Container Images
 
 Released images are published to GHCR for `linux/amd64` and `linux/arm64` by

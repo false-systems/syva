@@ -97,7 +97,8 @@ spec:
             capabilities:
               drop: ["ALL"]
               # SYS_ADMIN is dropped by the core itself after BPF load.
-              add: ["BPF", "SYS_ADMIN", "PERFMON"]
+              # CHOWN: the core chowns its Unix socket to root:syva.
+              add: ["BPF", "SYS_ADMIN", "PERFMON", "CHOWN"]
           volumeMounts:
             - name: syva-socket
               mountPath: /run/syva
@@ -109,6 +110,14 @@ spec:
             - name: btf
               mountPath: /sys/kernel/btf
               readOnly: true
+            # The HOST's /tmp (tmpfs), serving two purposes: a writable
+            # location for the startup inode self-test (the root fs is
+            # read-only), and host-path registration for files under /tmp.
+            # A containerized core can only police host paths that are
+            # mounted into it at the SAME path — mount additional policy
+            # directories here as your zones need them.
+            - name: tmp
+              mountPath: /tmp
 
         - name: syva-adapter-k8s
           image: ghcr.io/false-systems/syva-adapter-k8s:0.4.0
@@ -185,4 +194,8 @@ spec:
         - name: btf
           hostPath:
             path: /sys/kernel/btf
+            type: Directory
+        - name: tmp
+          hostPath:
+            path: /tmp
             type: Directory
