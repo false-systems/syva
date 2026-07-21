@@ -22,9 +22,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: arc-amd64
             arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: arc-arm64
             arch: arm64
     runs-on: ${{ matrix.runner }}
     permissions:
