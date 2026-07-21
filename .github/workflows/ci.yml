@@ -157,5 +157,10 @@ jobs:
         run: cargo run -p xtask -- check-release-docs
       - name: Check eBPF artifact policy
         run: cargo run -p xtask -- check-ebpf-artifact-policy
+      # PEP 668: system pip refuses installs on modern Ubuntu; a tool-cache
+      # python (what hosted images used) sidesteps it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Run pre-commit hooks
         uses: pre-commit/action@v3.0.1
