@@ -142,7 +142,7 @@ jobs:
           components: rust-src,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config python3 python3-pip python-is-python3
       - name: Install bpf-linker
         uses: taiki-e/install-action@v2
         with:
