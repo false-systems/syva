@@ -180,15 +180,14 @@ impl ZoneRegistry {
         let (zone_name, cgroup_id) = if let Some(info) = self.container_to_info.remove(container_id)
         {
             info
-        } else if let Some(cid) = cgroup_id_hint {
+        } else {
+            let cid = cgroup_id_hint?;
             if let Some((cont_id, zone_name)) = self.cgroup_to_info.remove(&cid) {
                 self.container_to_info.remove(&cont_id);
                 (zone_name, cid)
             } else {
                 return None;
             }
-        } else {
-            return None;
         };
 
         self.cgroup_to_info.remove(&cgroup_id);
