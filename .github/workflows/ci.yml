@@ -26,7 +26,7 @@ jobs:
       # "vendored-protoc" feature is enabled, so the system binary is required.
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
@@ -55,13 +55,13 @@ jobs:
   # Full workspace — Linux only because aya uses Linux-specific libc.
   linux-full:
     name: build + test (ubuntu-latest, workspace)
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
       - name: Build workspace
         run: cargo build --workspace
       - name: Test workspace
@@ -73,7 +73,7 @@ jobs:
   # Verifier-valid bytecode would require a kernel, so we only check compilation.
   ebpf:
     name: build eBPF (nightly)
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -82,6 +82,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # aya-ebpf links via bpf-linker (wraps LLVM). Not a rustup component —
       # comes from crates.io and takes a minute to compile.
+      - name: Install build deps (minimal arc image)
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang llvm
       - name: Install bpf-linker
         uses: taiki-e/install-action@v2
         with:
@@ -91,18 +93,19 @@ jobs:
 
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: cargo fmt --check
         run: cargo run -p xtask -- fmt
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -110,19 +113,19 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
       - name: cargo clippy
         run: cargo run -p xtask -- lint
 
   eval-build:
     name: build eval crates
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
       - name: Build oracle
         run: cargo build --manifest-path eval/oracle/Cargo.toml
       - name: Build harness
@@ -130,7 +133,7 @@ jobs:
 
   guardrails:
     name: release guardrails
-    runs-on: ubuntu-latest
+    runs-on: arc-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -139,7 +142,7 @@ jobs:
           components: rust-src,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
       - name: Install bpf-linker
         uses: taiki-e/install-action@v2
         with:
