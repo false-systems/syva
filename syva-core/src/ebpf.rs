@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::types::{NetworkMode, ZonePolicy, ZoneType};
 use aya::maps::HashMap as AyaHashMap;
-use aya::maps::{MapData, RingBuf};
+use aya::maps::{MapData, MapInfo, MapType, RingBuf};
 use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
@@ -246,9 +246,21 @@ impl Generation {
 
     fn validate(&self) -> bool {
         self.complete()
-            && MAP_NAMES
-                .iter()
-                .all(|name| aya::maps::MapInfo::from_pin(self.map_path(name)).is_ok())
+            && MAP_NAMES.iter().all(|name| {
+                let Ok(info) = MapInfo::from_pin(self.map_path(name)) else {
+                    return false;
+                };
+                let expected = match *name {
+                    "ZONE_MEMBERSHIP" | "INODE_ZONE_MAP" | "ZONE_ALLOWED_COMMS" | "IP_ZONE_MAP" => {
+                        MapType::Hash
+                    }
+                    "EGRESS_CIDR_MAP" | "EGRESS_CIDR6_MAP" => MapType::LpmTrie,
+                    "ENFORCEMENT_COUNTERS" | "CGROUP_ESCAPE_COUNT" => MapType::PerCpuArray,
+                    "ENFORCEMENT_EVENTS" => MapType::RingBuf,
+                    _ => MapType::Array,
+                };
+                info.map_type().ok() == Some(expected)
+            })
             && LSM_PROGRAMS
                 .iter()
                 .all(|program| PinnedLink::from_pin(self.link_path(program.hook_name)).is_ok())
