@@ -291,9 +291,25 @@ Response:
 - `uptime_secs`
 - `hooks[]`: per-hook `allow`, `deny`, `error`, `lost` counters.
 - `max_zones`
+- `active_generation`: highest complete generation currently enforcing/auditing.
+- `staging_generation`: disabled generation receiving replay, or zero.
+- `lifecycle_state`: `unsafe`, `warming`, `active`, or `disabled`.
+- `enforcement_mode`: effective `disabled`, `enforce`, or `audit` mode.
 
 For full enforcement confidence state, use `/healthz` and `/metrics` on the
 health server.
+
+### ActivateGeneration
+
+Atomically changes the exact disabled staging generation to the configured
+enforce/audit mode after all nine hooks and all three self-tests pass. A zero,
+stale, future, or incomplete generation is rejected with a gRPC status error.
+On success the previous pinned generation is removed only after activation.
+
+### DisableEnforcement
+
+Explicitly disables enforcement, unpins known generation links and maps, and
+returns `ok: true`. Normal core shutdown deliberately does none of this.
 
 ### WatchEvents
 

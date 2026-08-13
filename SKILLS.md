@@ -26,11 +26,11 @@ HTTP requests ─► syva-api ────┘                                   
 
 ## Hard rules — breaking these breaks the security model
 
-1. **Attach happens after zone population.** `attach_programs()` runs after `ZONE_MEMBERSHIP` is populated. The window between the two is a security gap. Never reorder.
-2. **Self-tests are not optional.** All three self-tests (`verify_self_test`, `verify_inode_self_test`, `verify_unix_self_test`) must pass before enforcement begins. Abort startup on failure. Never route around them, never disable "temporarily."
+1. **Attach disabled; activate after replay.** Fresh hooks may overlap the pinned last-known-good generation only with `ENFORCEMENT_MODE=0`. Activate the exact staging generation after authoritative replay. Never clear or repurpose active maps.
+2. **Self-tests are not optional.** All three self-tests (`verify_self_test`, `verify_inode_self_test`, `verify_unix_self_test`) must pass before generation activation. Abort staging on failure. Never route around them, never disable "temporarily."
 3. **Zone 0 is `ZONE_ID_HOST`.** No container ever gets zone_id 0. The `wrapping_add` exhaustion check exists for this — don't change zone-ID assignment without auditing it.
 4. **Fail-open is policy, not a bug.** Every `bpf_probe_read_kernel` failure allows the operation and increments the error counter. Intentional. Don't convert to fail-closed without explicit design discussion.
-5. **Mutual exclusion at `/sys/fs/bpf/syva/`.** Only one syva-core per node. The pin check is the enforcement mechanism. Don't remove it. Don't add `--force`.
+5. **One writer, persistent enforcement.** `/run/syva/core.lock` is the writer lock; `/sys/fs/bpf/syva/gen-v1-*` persists active maps and links across core exit. Cleanup is explicit and exact. Don't add `--force` or recursive bpffs deletion.
 6. **`allowed_zones` symmetry enforced at load time.** One-sided declarations are rejected. Don't weaken to warning-only.
 
 ## Code rules — non-negotiable
@@ -99,4 +99,4 @@ These are not free wins — each one risks turning Syva into a generic policy to
 - New policy fields
 - Anything that reintroduces a remote control plane (`syva-cp`, assignment streams, Postgres)
 
-The current follow-ups (pod/container watchers into `AttachContainer`, `(dev, ino)` file identity, runtime load/attach verification) are tracked in `AGENT.md`.
+Current follow-ups are tracked in `AGENT.md`; do not duplicate them here.

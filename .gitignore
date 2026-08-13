@@ -7,3 +7,6 @@ eval/results/*.json
 # Local AI-assistant session state.
 .claude/
 .codex
+
+# Local Sykli run history; sykli.rs and sykli.lock are the source contract.
+.sykli/

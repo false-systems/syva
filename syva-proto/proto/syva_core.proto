@@ -27,6 +27,10 @@ service SyvaCore {
     // Inode registration
     rpc RegisterHostPath(RegisterHostPathRequest) returns (RegisterHostPathResponse);
 
+    // Enforcement generation lifecycle
+    rpc ActivateGeneration(ActivateGenerationRequest) returns (StatusResponse);
+    rpc DisableEnforcement(DisableEnforcementRequest) returns (DisableEnforcementResponse);
+
     // Status and observability
     rpc Status(StatusRequest) returns (StatusResponse);
     rpc WatchEvents(WatchEventsRequest) returns (stream DenyEvent);
@@ -197,6 +201,19 @@ message RegisterHostPathResponse {
     uint32 inodes_registered = 1;
 }
 
+// --- Enforcement generation lifecycle ---
+
+message ActivateGenerationRequest {
+    // Must match StatusResponse.staging_generation. Stale IDs are rejected.
+    uint64 generation = 1;
+}
+
+message DisableEnforcementRequest {}
+
+message DisableEnforcementResponse {
+    bool ok = 1;
+}
+
 // --- Status ---
 
 message StatusRequest {}
@@ -209,6 +226,14 @@ message StatusResponse {
     repeated HookStatus hooks = 5;
     // BPF Array capacity for ZONE_POLICY — registration fails past this.
     uint32 max_zones = 6;
+    // Highest complete generation currently enforcing or auditing.
+    uint64 active_generation = 7;
+    // Disabled generation accepting authoritative replay; zero when none.
+    uint64 staging_generation = 8;
+    // "unsafe", "warming", "active", or "disabled".
+    string lifecycle_state = 9;
+    // Effective mode: "disabled", "enforce", or "audit".
+    string enforcement_mode = 10;
 }
 
 message HookStatus {

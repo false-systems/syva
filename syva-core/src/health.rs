@@ -181,6 +181,11 @@ pub struct HealthState {
     /// (would-deny recorded, operation proceeds). An operator choice,
     /// not a degradation — it does not affect security_status().
     pub enforcement_mode: &'static str,
+    /// Kernel generation state is independent from controller readiness: an
+    /// older generation may remain active while a replacement warms.
+    pub active_generation: u64,
+    pub staging_generation: u64,
+    pub lifecycle_state: &'static str,
     /// Whether the best-effort cgroup-escape fentry detector is attached.
     /// Detection only; its absence does not affect security_status().
     pub escape_detector_attached: bool,
@@ -214,6 +219,9 @@ impl HealthState {
             degraded_until_unix: None,
             membership_updates: MembershipMetrics::default(),
             enforcement_mode: "enforce",
+            active_generation: 0,
+            staging_generation: 0,
+            lifecycle_state: "unsafe",
             escape_detector_attached: false,
             cgroup_escapes_detected: 0,
             zone_denies: std::collections::HashMap::new(),
@@ -239,6 +247,20 @@ impl HealthState {
 
     pub fn set_enforcement_mode(&mut self, mode: &'static str) {
         self.enforcement_mode = mode;
+    }
+
+    pub fn set_generation_status(&mut self, status: crate::ebpf::GenerationStatus) {
+        self.active_generation = status.active;
+        self.staging_generation = status.staging;
+        self.lifecycle_state = status.lifecycle;
+    }
+
+    pub fn activation_ready(&self) -> bool {
+        self.attached
+            && self.attached_hooks == self.expected_hooks
+            && self.selftests.cgroup == SelfTestStatus::Passed
+            && self.selftests.inode == SelfTestStatus::Passed
+            && self.selftests.unix == SelfTestStatus::Passed
     }
 
     pub fn set_escape_detector(&mut self, attached: bool) {
@@ -337,13 +359,7 @@ impl HealthState {
     }
 
     pub fn security_status(&self) -> SecurityStatus {
-        if !self.ebpf_loaded
-            || !self.attached
-            || self.attached_hooks < self.expected_hooks
-            || self.selftests.cgroup != SelfTestStatus::Passed
-            || self.selftests.inode != SelfTestStatus::Passed
-            || self.selftests.unix != SelfTestStatus::Passed
-        {
+        if self.active_generation == 0 {
             return SecurityStatus::Unsafe;
         }
 
@@ -451,6 +467,9 @@ fn health_json(health: &HealthState, uptime_secs: u64) -> serde_json::Value {
         "state": security_status.as_str(),
         "status": security_status.as_str(),
         "enforcement_mode": health.enforcement_mode,
+        "active_generation": health.active_generation,
+        "staging_generation": health.staging_generation,
+        "lifecycle_state": health.lifecycle_state,
         "escape_detector_attached": health.escape_detector_attached,
         "cgroup_escapes_detected": health.cgroup_escapes_detected,
         "ebpf_loaded": health.ebpf_loaded,
@@ -486,7 +505,7 @@ pub fn render_metrics(health: &HealthState) -> String {
     out.push_str("# TYPE syva_up gauge\n");
     out.push_str(&format!(
         "syva_up {}\n",
-        if health.attached { 1 } else { 0 }
+        if health.active_generation != 0 { 1 } else { 0 }
     ));
 
     out.push_str("# HELP syva_core_up Whether syva-core is running.\n");
@@ -507,6 +526,25 @@ pub fn render_metrics(health: &HealthState) -> String {
         env!("CARGO_PKG_VERSION"),
         option_env!("GIT_SHA").unwrap_or("unknown")
     ));
+
+    out.push_str("# HELP syva_enforcement_generation Current active and staging generation IDs.\n");
+    out.push_str("# TYPE syva_enforcement_generation gauge\n");
+    out.push_str(&format!(
+        "syva_enforcement_generation{{state=\"active\"}} {}\nsyva_enforcement_generation{{state=\"staging\"}} {}\n",
+        health.active_generation, health.staging_generation
+    ));
+    out.push_str("# HELP syva_enforcement_lifecycle Current generation lifecycle state.\n");
+    out.push_str("# TYPE syva_enforcement_lifecycle gauge\n");
+    for state in ["active", "warming", "unsafe", "disabled"] {
+        out.push_str(&format!(
+            "syva_enforcement_lifecycle{{state=\"{state}\"}} {}\n",
+            if health.lifecycle_state == state {
+                1
+            } else {
+                0
+            }
+        ));
+    }
 
     out.push_str("# HELP syva_ebpf_object_loaded Whether the eBPF object loaded successfully.\n");
     out.push_str("# TYPE syva_ebpf_object_loaded gauge\n");
@@ -597,7 +635,7 @@ pub fn render_metrics(health: &HealthState) -> String {
         "# HELP syva_enforcement_mode Global enforcement mode as labeled gauges (audit records would-deny without blocking).\n",
     );
     out.push_str("# TYPE syva_enforcement_mode gauge\n");
-    for mode in ["enforce", "audit"] {
+    for mode in ["enforce", "audit", "disabled"] {
         out.push_str(&format!(
             "syva_enforcement_mode{{mode=\"{mode}\"}} {}\n",
             if mode == health.enforcement_mode {
@@ -835,6 +873,8 @@ mod tests {
         state.zones_loaded = zones;
         state.containers_active = containers;
         if attached {
+            state.active_generation = 1;
+            state.lifecycle_state = "active";
             state.mark_ebpf_loaded();
             state.mark_attached(crate::events::HOOK_NAMES.len());
             state.mark_selftest(SelfTestName::Cgroup, SelfTestStatus::Passed);

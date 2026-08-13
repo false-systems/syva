@@ -11,7 +11,7 @@ use syva_ebpf_common::{
     InodeProbeRequest, InodeProbeResult, InodeZoneKey, SelfTestResult, SelfTestUnixResult,
     ZoneCommKey, ZoneInfoKernel, ZonePolicyKernel, DECISION_DENY, DECISION_WOULD_DENY,
     ENFORCEMENT_COUNTER_ENTRIES, MAX_CGROUPS, MAX_EGRESS_CIDRS, MAX_INODES, MAX_IP_ZONES,
-    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT,
+    MAX_ZONES, MAX_ZONE_COMM_PAIRS, MODE_AUDIT, MODE_ENFORCE,
 };
 
 mod escape_guard;
@@ -24,42 +24,41 @@ mod socket_guard;
 mod unix_guard;
 
 #[map]
-static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::with_max_entries(MAX_CGROUPS, 0);
+static ZONE_MEMBERSHIP: HashMap<u64, ZoneInfoKernel> = HashMap::pinned(MAX_CGROUPS, 0);
 
 #[map]
-static ZONE_POLICY: Array<ZonePolicyKernel> = Array::with_max_entries(MAX_ZONES, 0);
+static ZONE_POLICY: Array<ZonePolicyKernel> = Array::pinned(MAX_ZONES, 0);
 
 #[map]
 // Composite (dev, ino) file identity: dev is the kernel-internal s_dev
 // (MKDEV encoding) read from the superblock, so inode numbers from distinct
 // filesystems can no longer collide. Subvolumes sharing one superblock
 // (btrfs) still share a dev — see the userspace docs.
-static INODE_ZONE_MAP: HashMap<InodeZoneKey, u32> = HashMap::with_max_entries(MAX_INODES, 1); // BPF_F_NO_PREALLOC
+static INODE_ZONE_MAP: HashMap<InodeZoneKey, u32> = HashMap::pinned(MAX_INODES, 1); // BPF_F_NO_PREALLOC
 
 #[map]
-static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> =
-    HashMap::with_max_entries(MAX_ZONE_COMM_PAIRS, 0);
+static ZONE_ALLOWED_COMMS: HashMap<ZoneCommKey, u8> = HashMap::pinned(MAX_ZONE_COMM_PAIRS, 0);
 
 #[map]
 // Exact IPv4 destination IP to zone mapping. Keys are raw network-order
 // `sockaddr_in.sin_addr` values; values are non-zero zone IDs.
-static IP_ZONE_MAP: HashMap<u32, u32> = HashMap::with_max_entries(MAX_IP_ZONES, 0);
+static IP_ZONE_MAP: HashMap<u32, u32> = HashMap::pinned(MAX_IP_ZONES, 0);
 
 #[map]
 // Per-zone egress CIDR allowlist. A network-locked zone may still reach an
 // IPv4 destination whose (zone_id, addr) is covered by an inserted prefix and
 // whose destination port matches the entry value (or value port 0 = any).
 static EGRESS_CIDR_MAP: LpmTrie<EgressCidrKey, EgressCidrValue> =
-    LpmTrie::with_max_entries(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
+    LpmTrie::pinned(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
 
 #[map]
 // IPv6 counterpart to EGRESS_CIDR_MAP. The address is the raw 16-byte
 // network-order sin6_addr.
 static EGRESS_CIDR6_MAP: LpmTrie<EgressCidr6Key, EgressCidrValue> =
-    LpmTrie::with_max_entries(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
+    LpmTrie::pinned(MAX_EGRESS_CIDRS, 1); // BPF_F_NO_PREALLOC
 
 #[map]
-static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
+static SELF_TEST: Array<SelfTestResult> = Array::pinned(1, 0);
 
 #[map]
 // Inode probe request (index 0). Userspace arms it with {target ino, its own
@@ -67,32 +66,31 @@ static SELF_TEST: Array<SelfTestResult> = Array::with_max_entries(1, 0);
 // so a concurrent same-ino open elsewhere never pollutes the result. Serves
 // the startup offset self-test AND kernel-dev resolution at host-path
 // registration time. ino == 0 means disarmed.
-static INODE_PROBE_REQUEST: Array<InodeProbeRequest> = Array::with_max_entries(1, 0);
+static INODE_PROBE_REQUEST: Array<InodeProbeRequest> = Array::pinned(1, 0);
 
 #[map]
 // Inode probe result (index 0), written by file_open when the request matches.
-static INODE_PROBE_RESULT: Array<InodeProbeResult> = Array::with_max_entries(1, 0);
+static INODE_PROBE_RESULT: Array<InodeProbeResult> = Array::pinned(1, 0);
 
 #[map]
-static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::with_max_entries(1, 0);
+static SELF_TEST_UNIX: Array<SelfTestUnixResult> = Array::pinned(1, 0);
 
 #[map]
 static ENFORCEMENT_COUNTERS: PerCpuArray<EnforcementCounters> =
-    PerCpuArray::with_max_entries(ENFORCEMENT_COUNTER_ENTRIES, 0);
+    PerCpuArray::pinned(ENFORCEMENT_COUNTER_ENTRIES, 0);
 
 #[map]
-// Global enforcement mode (index 0): MODE_ENFORCE denies return -1;
-// MODE_AUDIT records the deny decision but lets the operation proceed.
-// Userspace writes it once at startup before the hooks attach.
-static ENFORCEMENT_MODE: Array<u32> = Array::with_max_entries(1, 0);
+// A new generation starts disabled. Userspace activates it only after all
+// links, self-tests, and authoritative policy replay are complete.
+static ENFORCEMENT_MODE: Array<u32> = Array::pinned(1, 0);
 
 #[map]
 // Count of detected cgroup-zone escapes (index 0). The fentry detector bumps
 // it; userspace reads it for the syva_cgroup_escape_detected_total metric.
-static CGROUP_ESCAPE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+static CGROUP_ESCAPE_COUNT: PerCpuArray<u64> = PerCpuArray::pinned(1, 0);
 
 #[map]
-static ENFORCEMENT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0); // 4MB
+static ENFORCEMENT_EVENTS: RingBuf = RingBuf::pinned(1024 * 4096, 0); // 4MB
 
 #[inline(always)]
 fn lookup_caller_zone(_ctx: &LsmContext) -> Option<ZoneInfoKernel> {
@@ -310,8 +308,16 @@ pub(crate) fn egress_cidr6_allows(zone_id: u32, addr: [u8; 16], dst_port: u16) -
     }
 }
 
-/// True when userspace has switched the global mode to audit (observe-only).
-/// Missing map entry means enforce — audit must always be an explicit choice.
+/// True only after userspace has activated this generation.
+#[inline(always)]
+pub(crate) fn enforcement_active() -> bool {
+    matches!(
+        ENFORCEMENT_MODE.get(0),
+        Some(&MODE_ENFORCE) | Some(&MODE_AUDIT)
+    )
+}
+
+/// True when userspace activated this generation in observe-only mode.
 #[inline(always)]
 fn audit_mode_active() -> bool {
     matches!(ENFORCEMENT_MODE.get(0), Some(&MODE_AUDIT))
@@ -529,55 +535,119 @@ fn finish_decision(prog_idx: u32, verdict: Result<i32, i64>) -> i32 {
         0
     } else if audit_mode_active() {
         0
-    } else {
+    } else if matches!(ENFORCEMENT_MODE.get(0), Some(&MODE_ENFORCE)) {
         -1
+    } else {
+        0
     }
+}
+
+#[inline(always)]
+fn prior_lsm_ret(ctx: &LsmContext, index: usize) -> i32 {
+    unsafe { ctx.arg(index) }
 }
 
 // --- LSM hook entry points ---
 
 #[lsm(hook = "file_open")]
 pub fn syva_file_open(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 1);
+    if ret != 0 {
+        return ret;
+    }
     file_guard::file_open(&ctx)
 }
 
 #[lsm(hook = "bprm_check_security")]
 pub fn syva_bprm_check(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 1);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     exec_guard::bprm_check_security(&ctx)
 }
 
 #[lsm(hook = "ptrace_access_check")]
 pub fn syva_ptrace_check(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 2);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     ptrace_guard::ptrace_access_check(&ctx)
 }
 
 #[lsm(hook = "task_kill")]
 pub fn syva_task_kill(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 4);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     signal_guard::task_kill(&ctx)
 }
 
 #[lsm(hook = "mmap_file")]
 pub fn syva_mmap_file(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 4);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     mmap_guard::mmap_file(&ctx)
 }
 
 #[lsm(hook = "unix_stream_connect")]
 pub fn syva_unix_connect(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 3);
+    if ret != 0 {
+        return ret;
+    }
     unix_guard::unix_stream_connect(&ctx)
 }
 
 #[lsm(hook = "socket_connect")]
 pub fn syva_socket_connect(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 3);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     socket_guard::socket_connect(&ctx)
 }
 
 #[lsm(hook = "socket_sendmsg")]
 pub fn syva_socket_sendmsg(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 3);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     socket_guard::socket_sendmsg(&ctx)
 }
 
 #[lsm(hook = "socket_bind")]
 pub fn syva_socket_bind(ctx: LsmContext) -> i32 {
+    let ret = prior_lsm_ret(&ctx, 3);
+    if ret != 0 {
+        return ret;
+    }
+    if !enforcement_active() {
+        return 0;
+    }
     socket_guard::socket_bind(&ctx)
 }
 

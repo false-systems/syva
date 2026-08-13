@@ -257,10 +257,12 @@ pub const DECISION_ESCAPE: u8 = 3;
 pub const HOOK_CGROUP_ESCAPE: u8 = 0xFF;
 
 // ENFORCEMENT_MODE map values (single-entry array, index 0).
+/// Hooks run self-test probes but skip policy evaluation.
+pub const MODE_DISABLED: u32 = 0;
 /// Deny decisions return -1 (surfaced to userspace as EPERM).
-pub const MODE_ENFORCE: u32 = 0;
+pub const MODE_ENFORCE: u32 = 1;
 /// Deny decisions are recorded (counter + event) but the operation proceeds.
-pub const MODE_AUDIT: u32 = 1;
+pub const MODE_AUDIT: u32 = 2;
 
 /// Enforcement event emitted from BPF hooks via ring buffer.
 ///

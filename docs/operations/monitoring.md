@@ -26,9 +26,12 @@ The health response is JSON:
   "state": "healthy",
   "status": "healthy",
   "ebpf_loaded": true,
-  "expected_hooks": 6,
-  "attached_hooks": 6,
+  "expected_hooks": 9,
+  "attached_hooks": 9,
   "attached": true,
+  "active_generation": 41,
+  "staging_generation": 0,
+  "lifecycle_state": "active",
   "selftests": {
     "cgroup": "passed",
     "inode": "passed",
@@ -51,11 +54,12 @@ States:
 - `degraded`: `syva-core` is running but enforcement confidence is reduced.
   Examples include BPF map read/update/delete errors, hook error/lost deltas,
   stale/conflicting membership updates, or failed counter reads.
-- `unsafe`: Syva cannot claim enforcement is active. Examples include eBPF
-  load failure, fewer than nine attached hooks, or failed/pending mandatory
-  self-tests.
+- `unsafe`: Syva cannot claim enforcement is active. Examples include no
+  complete active generation, eBPF load failure, fewer than nine attached
+  hooks, or failed/pending mandatory self-tests. `warming` lifecycle remains
+  protected by the last-known-good generation but is not fully reconciled.
 
-`syva_enforcement_mode{mode="enforce|audit"}` reports the global mode as
+`syva_enforcement_mode{mode="disabled|enforce|audit"}` reports the effective mode as
 labeled gauges. In audit mode the per-hook `deny` counters and deny events
 record would-deny DECISIONS — the operations themselves proceed. Alert on
 `syva_enforcement_mode{mode="audit"} == 1` in any environment that is supposed
@@ -77,6 +81,8 @@ Core metrics:
 syva_core_up
 syva_core_start_time_seconds
 syva_core_build_info{version,git_sha}
+syva_enforcement_generation{state="active|staging"}
+syva_enforcement_lifecycle{state="active|warming|unsafe|disabled"}
 syva_ebpf_object_loaded
 syva_ebpf_expected_hooks
 syva_ebpf_attached_hooks

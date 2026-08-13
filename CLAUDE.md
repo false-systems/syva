@@ -6,9 +6,11 @@ Read `AGENT.md` for working practices and `SKILLS.md` for security-model rules.
 
 ## Current State
 
-Syva v0.2 is the active product line: local `syva-core` + adapters + eBPF
-enforcement. The v0.3 `syva-cp` control-plane experiment has been removed from
-the active workspace. Historical CP notes are archived under `docs/archive/`.
+Syva v0.4.0 is the active product line: local `syva-core` + adapters + eBPF
+enforcement — nine BPF-LSM hooks, the per-zone network lock, egress CIDR
+allowlists, and pod-IP → zone mapping. The v0.3 `syva-cp` control-plane
+experiment has been removed from the active workspace. Historical CP notes are
+archived under `docs/archive/`.
 
 Do not add new code that depends on `syva-cp`, `syva_control.proto`,
 `cp_reconcile`, Postgres, node heartbeats, team ownership, or CP assignment
@@ -30,13 +32,15 @@ make lint
 make test
 make precommit
 make ci
+sykli --filter=ci
 ```
 
 Every `make` target wraps one source of truth: `cargo run -p xtask -- <cmd>`
 (`fmt`, `lint`, `check`, `test`, `proto-check`, `check-release-docs`,
 `check-ebpf-artifact-policy`, `eval-build`, `precommit`, `ci`, `build-ebpf`).
-CI (`.github/workflows/ci.yml`) invokes the same xtask commands, so `make ci`
-reproduces CI locally.
+Sykli owns the locked local CI contract (`sykli.rs`/`sykli.lock`) and delegates
+to `make sykli-ci`: Lima on macOS, the same xtask CI sequence natively on Linux.
+GitHub CI invokes those xtask commands directly.
 
 Run a focused test:
 
@@ -72,6 +76,7 @@ container gate also needs a container runtime). All are `#[ignore]`d in normal
 
 ```bash
 sudo -E make verify-runtime              # load + attach 9 hooks + self-tests
+sudo -E make verify-restart-continuity   # pinned generation survives SIGKILL/replay
 sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
 sudo -E make verify-container-integration # same denial against a real container
 sudo -E make verify-audit-mode           # audit mode records would-deny without blocking
@@ -83,6 +88,9 @@ already running, use `make verify-deployment` (needs `SYVA_SOCKET`, default
 deployment lifecycle is `make lima-bootstrap` → `lima-deploy` →
 `lima-verify-deployment` → `lima-undeploy`, wrapped end to end by
 `make lima-smoke`.
+
+Latest captured privileged runtime evidence:
+`docs/release/v0.4.0-runtime-verification.md`.
 
 ## Release-Doc Drift Guardrail
 
@@ -210,7 +218,7 @@ Maps: `ZONE_MEMBERSHIP`, `ZONE_POLICY`, `INODE_ZONE_MAP` (keyed by composite
 `(dev, ino)` — kernel `s_dev` + `i_ino`), `ZONE_ALLOWED_COMMS`, `IP_ZONE_MAP`
 (exact IPv4 pod IP → zone),
 `EGRESS_CIDR_MAP` / `EGRESS_CIDR6_MAP` (per-zone egress CIDR LPM tries),
-`ENFORCEMENT_MODE` (global enforce/audit switch),
+`ENFORCEMENT_MODE` (disabled/enforce/audit generation switch),
 `ENFORCEMENT_COUNTERS` (per-hook allow/deny/error/lost), `ENFORCEMENT_EVENTS`
 (ring buffer; 64-byte events carrying comm and, for socket hooks, the
 destination addr/port — drained exclusively by the core's event pump, which
@@ -247,11 +255,11 @@ integration tests are under
 `syva-core` always serves the local `syva.core.v1` Unix socket. Startup:
 
 1. Start health server on `:9091`.
-2. Load eBPF object.
-3. Attach LSM hooks.
-4. Run cgroup, inode, and Unix self-tests.
-5. Mark BPF attached.
-6. Start the local gRPC server at `--socket-path`.
+2. Recover the pinned last-known-good generation and create fresh disabled maps.
+3. Attach and pin all nine staging LSM hooks; every hook preserves prior denials.
+4. Run cgroup, inode, and Unix self-tests while staging stays disabled.
+5. Start the local gRPC server at `--socket-path` for authoritative replay.
+6. Let the adapter activate the exact staging generation, then remove old pins.
 7. Monitor hook counters and expose degraded health if fail-open errors appear.
 
 Run on Linux:
@@ -274,9 +282,14 @@ For `DetachContainer`, generation `0` means "no generation guard" and detaches
 regardless of the stored generation; non-zero stale generations are refused with
 a response message.
 
-The adapters currently reconcile zones, host paths, and communication policy.
-Automatic pod/container watcher integration still needs to call
-`AttachContainer`/`DetachContainer` end to end.
+The adapters reconcile zones, host paths, and communication policy. `syva-k8s`
+also reconciles annotated pods end to end: it resolves each container's real
+host cgroup id and issues `AttachContainer`/`DetachContainer`
+(`syva-adapter-k8s/src/membership.rs`), and maintains a cluster-wide pod-IP →
+zone view via `SetIpZone`/`RemoveIpZone` (`syva-adapter-k8s/src/ip_zone.rs`) so
+cross-zone TCP follows the same `ZONE_ALLOWED_COMMS` rule. Known gap: pod-IP
+mapping is IPv4 only, and `SyvaZonePolicy` status/finalizers/leader election are
+not implemented.
 
 ## Health
 

@@ -1,8 +1,8 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone,
-    read_sock_cgroup_id, SELF_TEST_UNIX, ZONE_MEMBERSHIP,
+    emit_deny_event, enforcement_active, finish_decision, is_cross_zone_allowed,
+    lookup_caller_zone, read_sock_cgroup_id, SELF_TEST_UNIX, ZONE_MEMBERSHIP,
 };
 use syva_ebpf_common::{
     SelfTestUnixResult, HOOK_UNIX_CONNECT, PROG_UNIX_CONNECT, ZONE_FLAG_GLOBAL, ZONE_ID_HOST,
@@ -32,6 +32,10 @@ fn try_unix_connect(ctx: &LsmContext) -> Result<i32, i64> {
     // One-shot self-test: write the first resolved peer cgroup_id so
     // userspace can verify the offset chain produces sane values.
     unsafe { maybe_write_self_test(peer_cgroup_id) };
+
+    if !enforcement_active() {
+        return Ok(0);
+    }
 
     let caller = match lookup_caller_zone(ctx) {
         Some(info) => info,

@@ -5,9 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use syva_core_client::syva_core::{
-    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, NetworkMode,
-    RegisterHostPathRequest, RegisterZoneRequest, RemoveZoneRequest, StatusRequest,
-    WatchEventsRequest, ZonePolicy, ZoneType,
+    ActivateGenerationRequest, AllowCommRequest, DenyCommRequest, DisableEnforcementRequest,
+    ListCommsRequest, ListZonesRequest, NetworkMode, RegisterHostPathRequest, RegisterZoneRequest,
+    RemoveZoneRequest, StatusRequest, WatchEventsRequest, ZonePolicy, ZoneType,
 };
 use tonic::Code;
 
@@ -113,6 +113,31 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Enforcement generation commands.
+    Generation {
+        #[command(subcommand)]
+        command: GenerationCommand,
+    },
+    /// Explicit enforcement lifecycle commands.
+    Enforcement {
+        #[command(subcommand)]
+        command: EnforcementCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GenerationCommand {
+    /// Activate the current staging generation after manual policy setup.
+    Activate {
+        /// Exact generation ID; defaults to the current staging generation.
+        generation: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EnforcementCommand {
+    /// Disable enforcement and remove all Syva kernel pins.
+    Disable,
 }
 
 #[derive(Debug, Subcommand)]
@@ -450,6 +475,54 @@ non-follow call returns no events. Run `syvactl events --follow`."
                 }
             }
         }
+        Command::Generation {
+            command: GenerationCommand::Activate { generation },
+        } => {
+            let generation = match generation {
+                Some(generation) => generation,
+                None => match client.status(StatusRequest {}).await {
+                    Ok(response) => response.into_inner().staging_generation,
+                    Err(status) => return print_rpc_error(cli.format, operation, status, &[]),
+                },
+            };
+            if generation == 0 {
+                print_command_error(
+                    cli.format,
+                    operation,
+                    "rejected",
+                    "there is no staging generation to activate",
+                    &[],
+                );
+                return EXIT_DOMAIN;
+            }
+            let status = match client
+                .activate_generation(ActivateGenerationRequest { generation })
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(status) => return print_rpc_error(cli.format, operation, status, &[]),
+            };
+            print_write_result(
+                cli.format,
+                WriteResult::success(operation, "activated")
+                    .field("generation", status.active_generation),
+            );
+        }
+        Command::Enforcement {
+            command: EnforcementCommand::Disable,
+        } => {
+            let response = match client
+                .disable_enforcement(DisableEnforcementRequest {})
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(status) => return print_rpc_error(cli.format, operation, status, &[]),
+            };
+            print_write_result(
+                cli.format,
+                WriteResult::success(operation, "disabled").field("pins_removed", response.ok),
+            );
+        }
     }
 
     EXIT_SUCCESS
@@ -470,6 +543,10 @@ fn print_status(format: OutputFormat, status: &syva_core_client::syva_core::Stat
             println!("  containers_active: {}", status.containers_active);
             println!("  uptime_secs: {}", status.uptime_secs);
             println!("  max_zones: {}", status.max_zones);
+            println!("  lifecycle_state: {}", status.lifecycle_state);
+            println!("  active_generation: {}", status.active_generation);
+            println!("  staging_generation: {}", status.staging_generation);
+            println!("  enforcement_mode: {}", status.enforcement_mode);
             println!("  hooks:");
             for hook in &status.hooks {
                 println!(
@@ -628,6 +705,10 @@ fn status_json(status: &syva_core_client::syva_core::StatusResponse) -> serde_js
             "containers_active": status.containers_active,
             "uptime_secs": status.uptime_secs,
             "max_zones": status.max_zones,
+            "lifecycle_state": status.lifecycle_state,
+            "active_generation": status.active_generation,
+            "staging_generation": status.staging_generation,
+            "enforcement_mode": status.enforcement_mode,
             "hooks": status.hooks.iter().map(hook_json).collect::<Vec<_>>(),
         },
     })
@@ -806,6 +887,8 @@ fn operation_name(command: &Command) -> &'static str {
         },
         Command::HostPaths { .. } => "register_host_path",
         Command::Events { .. } => "watch_events",
+        Command::Generation { .. } => "activate_generation",
+        Command::Enforcement { .. } => "disable_enforcement",
     }
 }
 
@@ -859,6 +942,7 @@ mod tests {
                 lost: 0,
             }],
             max_zones: 64,
+            ..Default::default()
         });
 
         assert_eq!(json["operation"], "status");

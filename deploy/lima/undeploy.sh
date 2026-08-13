@@ -2,8 +2,8 @@
 # Stop the node-local Syvä deployment and clean up runtime state created by
 # deploy.sh. Safe to run when nothing is deployed (best-effort throughout).
 #
-# Sends SIGTERM so syva-core unpins its BPF maps gracefully, leaving the kernel
-# clean for the next deploy.
+# Explicitly disables enforcement before stopping the core. Ordinary SIGTERM
+# preserves the active generation for crash-safe restart and upgrade.
 #
 # Run inside the VM from the repo root:  bash deploy/lima/undeploy.sh
 set -uo pipefail
@@ -17,6 +17,9 @@ RUNTIME="${SYVA_CONTAINER_RUNTIME:-podman}"
 say() { printf '\n=== %s ===\n' "$*"; }
 
 say "Stop syva-core"
+if [ -S "$SYVA_SOCK" ] && command -v syvactl >/dev/null 2>&1; then
+  sudo syvactl --socket "$SYVA_SOCK" enforcement disable || true
+fi
 if [ -f "$SYVA_PID" ]; then
   PID="$(sudo cat "$SYVA_PID" 2>/dev/null || true)"
   if [ -n "${PID:-}" ] && sudo kill -0 "$PID" 2>/dev/null; then
@@ -30,15 +33,13 @@ if [ -f "$SYVA_PID" ]; then
 else
   echo "no pid file; nothing to stop"
 fi
+if command -v syva-core >/dev/null 2>&1; then
+  sudo syva-core cleanup || true
+fi
 
 say "Remove runtime state"
 sudo rm -f "$SYVA_SOCK" "$SYVA_PID"
 sudo rmdir "$SYVA_RUN" 2>/dev/null || true
-# Remove any stale BPF map pins only if the core is gone (graceful exit usually
-# already did this; this is the SIGKILL fallback).
-if ! pgrep -x syva-core >/dev/null 2>&1; then
-  sudo rm -rf /sys/fs/bpf/syva 2>/dev/null || true
-fi
 rm -rf "$SYVA_DEPLOY"
 echo "removed socket, pid file, runtime dir, deploy dir"
 

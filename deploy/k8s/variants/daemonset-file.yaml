@@ -25,28 +25,6 @@ spec:
       tolerations:
         - effect: NoSchedule
           operator: Exists
-      initContainers:
-        - name: cleanup-stale-bpf-pins
-          image: ghcr.io/false-systems/syva-core:0.4.0
-          command: ["sh", "-c", "rm -rf /sys/fs/bpf/syva"]
-          resources:
-            requests:
-              cpu: "10m"
-              memory: "16Mi"
-            limits:
-              cpu: "100m"
-              memory: "32Mi"
-          volumeMounts:
-            - name: bpf
-              mountPath: /sys/fs/bpf
-          securityContext:
-            privileged: false
-            readOnlyRootFilesystem: true
-            seccompProfile:
-              type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
-              add: ["SYS_ADMIN"]
       containers:
         - name: syva-core
           image: ghcr.io/false-systems/syva-core:0.4.0
@@ -63,7 +41,7 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 12
+            failureThreshold: 30
           livenessProbe:
             tcpSocket:
               port: health

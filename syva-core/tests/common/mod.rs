@@ -2,10 +2,20 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use syva_proto::syva_core::syva_core_client::SyvaCoreClient;
+use syva_proto::syva_core::{ActivateGenerationRequest, StatusRequest};
 use tonic::transport::Channel;
 
 pub(crate) struct CoreProcess {
     child: Child,
+}
+
+impl CoreProcess {
+    #[allow(dead_code)]
+    pub(crate) fn crash(mut self) -> anyhow::Result<()> {
+        self.child.kill()?;
+        self.child.wait()?;
+        Ok(())
+    }
 }
 
 impl Drop for CoreProcess {
@@ -69,7 +79,24 @@ pub(crate) async fn connect(
     Ok(SyvaCoreClient::new(channel))
 }
 
+#[allow(dead_code)]
 pub(crate) async fn wait_for_core(
+    socket_path: &std::path::Path,
+) -> anyhow::Result<SyvaCoreClient<Channel>> {
+    let mut client = wait_for_core_without_activation(socket_path).await?;
+    let status = client.status(StatusRequest {}).await?.into_inner();
+    if status.staging_generation != 0 {
+        client
+            .activate_generation(ActivateGenerationRequest {
+                generation: status.staging_generation,
+            })
+            .await?;
+    }
+    Ok(client)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn wait_for_core_without_activation(
     socket_path: &std::path::Path,
 ) -> anyhow::Result<SyvaCoreClient<Channel>> {
     let deadline = Instant::now() + Duration::from_secs(20);

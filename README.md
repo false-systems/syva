@@ -162,6 +162,9 @@ gate a local cluster. Latest evidence:
   streamed live, logged structured, and counted per-zone.
 - **Node-local by design** — one `syva-core` per node behind the `syva.core.v1`
   Unix socket; no control plane. Scale with the Kubernetes primitives you run.
+- **Gapless core restarts** — the last known-good generation remains pinned and
+  enforcing while a replacement replays into fresh disabled maps, self-tests,
+  and activates with one map update.
 - **Adapters for your world** — TOML files (`syva-file`), Kubernetes
   `SyvaZonePolicy` CRDs (`syva-k8s`), or REST (`syva-api`).
 - **Audit mode for rollout** — `--mode audit` records would-deny decisions
@@ -200,6 +203,8 @@ to BPF map updates the kernel reads on the next syscall:
 - `AttachContainer` / `DetachContainer` — bind a cgroup to a zone
 - `RegisterHostPath` — claim files `(dev, ino)` for a zone
 - `SetIpZone` / `RemoveIpZone` — map a pod IP to a zone for cross-zone TCP
+- `ActivateGeneration` — activate the exact fully replayed staging generation
+- `DisableEnforcement` — explicit uninstall; ordinary shutdown preserves pins
 - `Status` / `WatchEvents` — health + the live enriched deny stream
 
 Because the decision data lives in maps, changes take effect with no reload and
@@ -214,6 +219,8 @@ syvactl status                 # health, hooks, self-tests, counters
 syvactl zones list             # registered zones
 syvactl comms list             # allowed cross-zone pairs
 syvactl events --follow        # live, enriched deny stream
+syvactl generation activate    # explicit manual snapshot cutover
+syvactl enforcement disable    # explicit uninstall, not restart
 ```
 
 ## How enforcement works
@@ -229,6 +236,11 @@ permits it).
 
 Kernel struct offsets are resolved from BTF at startup — no hardcoded offsets. A
 caller or target not in any zone is invisible to enforcement (allowed).
+
+Maps and LSM links live in versioned bpffs generations. Fresh hooks attach in
+disabled mode, all nine preserve an earlier LSM denial, and adapters activate
+only after authoritative replay. A core crash therefore leaves the previous
+generation enforcing; stopping the daemon is not an uninstall.
 
 ### Policy → enforcement
 
@@ -285,6 +297,7 @@ cluster-wide pod-IP → zone view for cross-zone TCP.
 make macos-check   # fast host-safe checks (macOS-friendly)
 make ci            # full non-privileged gate: fmt, clippy, tests, doc/proto/
                    # api guardrails, release eBPF object build
+sykli --filter=ci  # locked CI contract; uses Lima on macOS, native CI on Linux
 ```
 
 `cargo run -p xtask -- build-ebpf` builds the release eBPF object (the runtime
@@ -296,6 +309,7 @@ needs a container runtime):
 
 ```sh
 sudo -E make verify-runtime
+sudo -E make verify-restart-continuity # zero successful probes across SIGKILL/replay
 sudo -E make verify-integration
 sudo -E make verify-container-integration
 sudo -E make verify-allow              # the must-not-block contract

@@ -95,6 +95,8 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    /// Explicitly disable and remove all pinned Syva generations while no core runs.
+    Cleanup,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -132,6 +134,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Events { follow, format }) => {
             cmd_events(status_socket, follow, format).await
         }
+        Some(Commands::Cleanup) => {
+            let removed = ebpf::cleanup_all_pins()?;
+            println!("removed {removed} Syva enforcement generation(s)");
+            Ok(())
+        }
         None => cmd_run(cli).await,
     }
 }
@@ -157,6 +164,8 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         "syva-core starting"
     );
     let start_time = Instant::now();
+    let _core_lock = ebpf::acquire_core_lock()?;
+    remove_stale_socket(&config.socket_path)?;
 
     // Health state — shared with the HTTP server. Starts as unhealthy
     // (not attached, zero zones) and transitions as startup progresses.
@@ -173,11 +182,14 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         );
         error
     })?;
-    health_state.write().await.mark_ebpf_loaded();
+    {
+        let mut health = health_state.write().await;
+        health.mark_ebpf_loaded();
+        health.set_generation_status(mgr.generation_status());
+    }
 
-    // Write the global enforcement mode BEFORE attaching hooks, so no hook
-    // ever runs with an ambiguous mode. Audit is an explicit operator choice;
-    // a missing map value means enforce.
+    // Store the operator's desired mode. The map remains disabled until an
+    // authoritative adapter activates this exact generation.
     mgr.set_enforcement_mode(config.mode.is_audit())?;
     health_state
         .write()
@@ -294,9 +306,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     // Take the enforcement event ring buffer while the manager is still
     // exclusively owned. The event pump is its only consumer for the core's
     // lifetime; events emitted since attach are waiting in the 4MB buffer.
-    let event_ring_buf = mgr.take_event_ring_buf().ok_or_else(|| {
-        anyhow::anyhow!("ENFORCEMENT_EVENTS ring buffer missing from eBPF object")
-    })?;
+    let event_ring_bufs = mgr.take_event_ring_bufs()?;
     let path_index = mgr.path_index();
 
     // Create zone registry.
@@ -315,7 +325,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         Box::new(events::MetricsSink(health_state.clone())),
     ];
     events::spawn_event_pump(
-        event_ring_buf,
+        event_ring_bufs,
         registry.clone(),
         path_index,
         sinks,
@@ -338,12 +348,14 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
     )
     .await?;
 
+    let staging_generation = ebpf.lock().await.generation_status().staging;
     tracing::info!(
         event = "syva.startup.ready",
         component = "syva-core",
         expected_hooks = events::HOOK_NAMES.len(),
         attached_hooks,
-        "startup complete — enforcement active"
+        generation = staging_generation,
+        "startup complete — generation ready for authoritative replay"
     );
 
     // Shutdown on SIGINT (ctrl-c) or SIGTERM (Kubernetes pod termination).
@@ -451,7 +463,7 @@ async fn cmd_run(config: Cli) -> anyhow::Result<()> {
         }
     }
 
-    // Drop ebpf manager (cleans up BPF pins).
+    // Active generation pins deliberately survive process shutdown.
     drop(ebpf);
     tracing::info!("syva-core stopped");
     Ok(())
@@ -462,13 +474,6 @@ async fn spawn_local_core_server(
     state: LocalCoreServerState,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
-    if socket_path.exists() {
-        anyhow::bail!(
-            "refusing to replace existing syva-core socket at {}",
-            socket_path.display()
-        );
-    }
-
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -510,6 +515,20 @@ async fn spawn_local_core_server(
     });
 
     Ok(task)
+}
+
+fn remove_stale_socket(socket_path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => cleanup_socket_file(socket_path),
+        Ok(_) => anyhow::bail!(
+            "refusing to replace non-socket path at {}",
+            socket_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn cleanup_socket_file(socket_path: &std::path::Path) -> anyhow::Result<()> {
@@ -585,11 +604,16 @@ async fn cmd_status(socket_path: PathBuf) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let Some((generation, maps_path)) = ebpf::active_pinned_generation()? else {
+        println!("syva: NOT ACTIVE (no active pinned generation)");
+        return Ok(());
+    };
     println!("syva: ACTIVE");
-    println!("  pin path: /sys/fs/bpf/syva");
+    println!("  generation: {generation}");
+    println!("  pin path: {}", maps_path.display());
 
     // Read enforcement counters from pinned maps.
-    let counter_path = pin_path.join("ENFORCEMENT_COUNTERS");
+    let counter_path = maps_path.join("ENFORCEMENT_COUNTERS");
     if counter_path.exists() {
         // aya 0.13 TryFrom impls live on `Map`, not `MapData` — wrap the
         // pinned data in the matching variant before converting.

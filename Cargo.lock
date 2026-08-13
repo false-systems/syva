@@ -2030,6 +2030,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sykli"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a944904412774392775283cc2a7554955ef77916445f9534264e2b187d01712"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2891,6 +2903,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_yaml",
+ "sykli",
 ]
 
 [[package]]
