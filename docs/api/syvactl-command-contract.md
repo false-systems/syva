@@ -181,6 +181,7 @@ Status
 Output includes:
 
 - health or attachment state exposed by the API,
+- active/staging generation IDs, lifecycle state, and effective mode,
 - expected hooks when exposed,
 - attached hooks when exposed,
 - self-test state when exposed,
@@ -199,6 +200,26 @@ Recommended JSON shape:
   "counters": {}
 }
 ```
+
+### 1a. Enforcement lifecycle
+
+Implemented:
+
+```sh
+syvactl generation activate [generation]
+syvactl enforcement disable
+```
+
+RPCs:
+
+```text
+ActivateGeneration
+DisableEnforcement
+```
+
+With no generation argument, activation uses the current non-zero staging ID
+from `Status`. Disable is the explicit uninstall operation; normal core exit
+must preserve the active pinned generation.
 
 ### 2. Zones
 

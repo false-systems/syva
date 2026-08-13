@@ -4,13 +4,16 @@
 //! wrappers for BPF map operations (zone membership, policy, comms).
 
 use std::fs;
+use std::fs::OpenOptions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::types::{NetworkMode, ZonePolicy, ZoneType};
 use aya::maps::HashMap as AyaHashMap;
-use aya::maps::RingBuf;
+use aya::maps::{MapData, MapInfo, MapType, RingBuf};
+use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
 use syva_ebpf_common::{
@@ -20,6 +23,82 @@ use syva_ebpf_common::{
 };
 
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/syva";
+const GENERATION_PREFIX: &str = "gen-v1-";
+const CORE_LOCK_PATH: &str = "/run/syva/core.lock";
+
+pub fn acquire_core_lock() -> anyhow::Result<fs::File> {
+    let path = Path::new(CORE_LOCK_PATH);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        anyhow::bail!(
+            "another syva-core owns {CORE_LOCK_PATH}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(file)
+}
+
+pub fn active_pinned_generation() -> anyhow::Result<Option<(u64, PathBuf)>> {
+    let root = Path::new(BPF_PIN_PATH);
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut active = None;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let Some(id) = parse_generation_name(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        let generation = Generation {
+            id,
+            path: entry.path(),
+        };
+        if generation.validate()
+            && generation_mode(&generation)
+                .map(mode_is_active)
+                .unwrap_or(false)
+            && active.as_ref().is_none_or(|(current, _)| id > *current)
+        {
+            active = Some((id, generation.maps_path()));
+        }
+    }
+    Ok(active)
+}
+
+pub fn cleanup_all_pins() -> anyhow::Result<usize> {
+    let _lock = acquire_core_lock()?;
+    let root = Path::new(BPF_PIN_PATH);
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let Some(id) = parse_generation_name(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        let generation = Generation {
+            id,
+            path: entry.path(),
+        };
+        if generation.map_path("ENFORCEMENT_MODE").exists() {
+            set_pinned_mode(&generation, syva_ebpf_common::MODE_DISABLED)?;
+        }
+        cleanup_generation(&generation)?;
+        removed += 1;
+    }
+    let _ = fs::remove_dir(root);
+    Ok(removed)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct LsmProgram {
@@ -95,7 +174,11 @@ const ESCAPE_ATTACH_FN: &str = "cgroup_attach_task";
 /// eBPF manager for the standalone enforce agent.
 pub struct EnforceEbpf {
     bpf: Ebpf,
-    pin_path: PathBuf,
+    generation: Generation,
+    previous_generations: Vec<Generation>,
+    desired_mode: u32,
+    activated: bool,
+    disabled: bool,
     /// True once the cgroup-escape fentry program has loaded. Detection is
     /// best-effort: a kernel without fentry support leaves this false and the
     /// LSM enforcement path is unaffected.
@@ -118,6 +201,79 @@ pub struct EnforceEbpf {
 pub type InodePathIndex =
     std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(u32, u64), String>>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Generation {
+    id: u64,
+    path: PathBuf,
+}
+
+struct StagingPinGuard {
+    generation: Generation,
+    armed: bool,
+}
+
+impl Drop for StagingPinGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = cleanup_generation(&self.generation);
+        }
+    }
+}
+
+impl Generation {
+    fn maps_path(&self) -> PathBuf {
+        self.path.join("maps")
+    }
+
+    fn links_path(&self) -> PathBuf {
+        self.path.join("links")
+    }
+
+    fn map_path(&self, name: &str) -> PathBuf {
+        self.maps_path().join(name)
+    }
+
+    fn link_path(&self, hook: &str) -> PathBuf {
+        self.links_path().join(hook)
+    }
+
+    fn complete(&self) -> bool {
+        MAP_NAMES.iter().all(|name| self.map_path(name).exists())
+            && LSM_PROGRAMS
+                .iter()
+                .all(|program| self.link_path(program.hook_name).exists())
+    }
+
+    fn validate(&self) -> bool {
+        self.complete()
+            && MAP_NAMES.iter().all(|name| {
+                let Ok(info) = MapInfo::from_pin(self.map_path(name)) else {
+                    return false;
+                };
+                let expected = match *name {
+                    "ZONE_MEMBERSHIP" | "INODE_ZONE_MAP" | "ZONE_ALLOWED_COMMS" | "IP_ZONE_MAP" => {
+                        MapType::Hash
+                    }
+                    "EGRESS_CIDR_MAP" | "EGRESS_CIDR6_MAP" => MapType::LpmTrie,
+                    "ENFORCEMENT_COUNTERS" | "CGROUP_ESCAPE_COUNT" => MapType::PerCpuArray,
+                    "ENFORCEMENT_EVENTS" => MapType::RingBuf,
+                    _ => MapType::Array,
+                };
+                info.map_type().ok() == Some(expected)
+            })
+            && LSM_PROGRAMS
+                .iter()
+                .all(|program| PinnedLink::from_pin(self.link_path(program.hook_name)).is_ok())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationStatus {
+    pub active: u64,
+    pub staging: u64,
+    pub lifecycle: &'static str,
+}
+
 impl EnforceEbpf {
     /// Load and attach eBPF programs.
     pub fn load(ebpf_obj: Option<&Path>) -> anyhow::Result<Self> {
@@ -133,25 +289,15 @@ impl EnforceEbpf {
             "loading eBPF object"
         );
 
-        let pin_path = PathBuf::from(BPF_PIN_PATH);
-
-        // Check for mutual exclusion — if maps are already pinned, another
-        // syva instance may be running. This also covers upgrades across map
-        // layout changes (e.g. the 8→16-byte INODE_ZONE_MAP key): stale pins
-        // from a crashed older core are refused here, before any reuse.
-        if pin_path.exists() {
-            let has_maps = fs::read_dir(&pin_path)
-                .map(|entries| entries.count() > 0)
-                .unwrap_or(false);
-            if has_maps {
-                anyhow::bail!(
-                    "BPF maps already pinned at {BPF_PIN_PATH} — another syva instance \
-                     may be running. Stop it first, or remove stale pins with: rm -rf {BPF_PIN_PATH}"
-                );
-            }
-        }
-
-        fs::create_dir_all(&pin_path)?;
+        let pin_root = PathBuf::from(BPF_PIN_PATH);
+        fs::create_dir_all(&pin_root)?;
+        let (generation, previous_generations) = prepare_generation(&pin_root)?;
+        fs::create_dir_all(generation.maps_path())?;
+        fs::create_dir_all(generation.links_path())?;
+        let mut staging_guard = StagingPinGuard {
+            generation: generation.clone(),
+            armed: true,
+        };
 
         let btf = Btf::from_sys_fs().map_err(|e| {
             anyhow::anyhow!("failed to load BTF: {e} — kernel needs CONFIG_DEBUG_INFO_BTF=y")
@@ -165,15 +311,22 @@ impl EnforceEbpf {
         })?;
 
         let mut loader = EbpfLoader::new();
-        loader.btf(Some(&btf)).map_pin_path(&pin_path);
+        loader.btf(Some(&btf)).map_pin_path(generation.maps_path());
 
         for (name, val) in &offsets {
             loader.set_global(name.as_str(), val, true);
         }
 
-        let mut bpf = loader.load(&obj_data).map_err(|e| {
-            anyhow::anyhow!("failed to load eBPF: {e} — check CONFIG_BPF_LSM=y and lsm=bpf")
-        })?;
+        let mut bpf = match loader.load(&obj_data) {
+            Ok(bpf) => bpf,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to load eBPF: {error} — check CONFIG_BPF_LSM=y and lsm=bpf"
+                ));
+            }
+        };
+
+        set_mode(&mut bpf, syva_ebpf_common::MODE_DISABLED)?;
 
         // Phase 1: Load all LSM programs (validates with kernel verifier).
         // Programs are NOT attached yet — no enforcement until attach_programs().
@@ -221,9 +374,14 @@ impl EnforceEbpf {
             }
         };
 
+        staging_guard.armed = false;
         Ok(Self {
             bpf,
-            pin_path,
+            generation,
+            previous_generations,
+            desired_mode: syva_ebpf_common::MODE_ENFORCE,
+            activated: false,
+            disabled: false,
             escape_detector_loaded,
             dev_cache: std::collections::HashMap::new(),
             path_index: InodePathIndex::default(),
@@ -269,9 +427,7 @@ impl EnforceEbpf {
         Ok(per_cpu.iter().copied().sum())
     }
 
-    /// Attach all loaded LSM programs. Call this AFTER zone membership is
-    /// populated to eliminate the startup race window where hooks are active
-    /// but ZONE_MEMBERSHIP is empty (all containers would appear unzoned).
+    /// Attach and pin all loaded LSM programs while the generation is disabled.
     pub fn attach_programs(&mut self) -> anyhow::Result<usize> {
         tracing::info!(
             event = "syva.ebpf.attach.begin",
@@ -286,7 +442,24 @@ impl EnforceEbpf {
                 .program_mut(program.program_name)
                 .ok_or_else(|| anyhow::anyhow!("LSM program '{}' not found", program.program_name))?
                 .try_into()?;
-            if let Err(error) = prog.attach() {
+            let link_id = match prog.attach() {
+                Ok(link_id) => link_id,
+                Err(error) => {
+                    tracing::error!(
+                        event = "syva.ebpf.attach.failed",
+                        component = "syva-core",
+                        program = program.program_name,
+                        hook = program.hook_name,
+                        result = "error",
+                        %error,
+                        "failed to attach LSM program"
+                    );
+                    return Err(error.into());
+                }
+            };
+            let link = prog.take_link(link_id)?;
+            let fd_link: FdLink = link.into();
+            if let Err(error) = fd_link.pin(self.generation.link_path(program.hook_name)) {
                 tracing::error!(
                     event = "syva.ebpf.attach.failed",
                     component = "syva-core",
@@ -311,16 +484,33 @@ impl EnforceEbpf {
         tracing::info!(
             attached_hooks = attached,
             expected_hooks = LSM_PROGRAMS.len(),
-            "all LSM programs attached — enforcement active"
+            generation = self.generation.id,
+            "all LSM programs attached and pinned — generation remains disabled"
         );
         Ok(attached)
     }
 
     /// Take ownership of the ring buffer for event streaming.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn take_event_ring_buf(&mut self) -> Option<RingBuf<aya::maps::MapData>> {
-        let map = self.bpf.take_map("ENFORCEMENT_EVENTS")?;
-        RingBuf::try_from(map).ok()
+    pub fn take_event_ring_bufs(&mut self) -> anyhow::Result<Vec<RingBuf<MapData>>> {
+        let mut rings = Vec::new();
+        for generation in &self.previous_generations {
+            if !generation.validate() || generation_mode(generation).is_err() {
+                tracing::warn!(
+                    generation = generation.id,
+                    "preserved generation layout is not readable; event drain skipped"
+                );
+                continue;
+            }
+            let map = MapData::from_pin(generation.map_path("ENFORCEMENT_EVENTS"))?;
+            rings.push(RingBuf::try_from(aya::maps::Map::RingBuf(map))?);
+        }
+        let map = self
+            .bpf
+            .take_map("ENFORCEMENT_EVENTS")
+            .ok_or_else(|| anyhow::anyhow!("ENFORCEMENT_EVENTS map missing"))?;
+        rings.push(RingBuf::try_from(map)?);
+        Ok(rings)
     }
 
     /// Register a cgroup as belonging to a zone.
@@ -363,19 +553,116 @@ impl EnforceEbpf {
         Ok(())
     }
 
-    /// Write the global enforcement mode into the ENFORCEMENT_MODE map.
-    /// Called once at startup, before the hooks attach. In audit mode the
-    /// hooks record would-deny decisions (counter + event) without blocking.
+    /// Remember the mode used by the activation barrier. Loading and attaching
+    /// never writes an active value.
     pub fn set_enforcement_mode(&mut self, audit: bool) -> anyhow::Result<()> {
-        use aya::maps::Array;
         use syva_ebpf_common::{MODE_AUDIT, MODE_ENFORCE};
+        self.desired_mode = if audit { MODE_AUDIT } else { MODE_ENFORCE };
+        Ok(())
+    }
 
-        let mut map = Array::<_, u32>::try_from(
-            self.bpf
-                .map_mut("ENFORCEMENT_MODE")
-                .ok_or_else(|| anyhow::anyhow!("ENFORCEMENT_MODE map not found"))?,
-        )?;
-        map.set(0, if audit { MODE_AUDIT } else { MODE_ENFORCE }, 0)?;
+    pub fn generation_status(&self) -> GenerationStatus {
+        if self.disabled {
+            return GenerationStatus {
+                active: 0,
+                staging: 0,
+                lifecycle: "disabled",
+            };
+        }
+        let old_active = self
+            .previous_generations
+            .iter()
+            .filter(|generation| generation.validate())
+            .filter_map(|generation| {
+                generation_mode(generation)
+                    .ok()
+                    .map(|mode| (generation, mode))
+            })
+            .filter(|(_, mode)| mode_is_active(*mode))
+            .map(|(generation, _)| generation.id)
+            .max()
+            .unwrap_or(0);
+        if self.activated {
+            GenerationStatus {
+                active: self.generation.id,
+                staging: 0,
+                lifecycle: "active",
+            }
+        } else if old_active == 0 {
+            GenerationStatus {
+                active: 0,
+                staging: self.generation.id,
+                lifecycle: "unsafe",
+            }
+        } else {
+            GenerationStatus {
+                active: old_active,
+                staging: self.generation.id,
+                lifecycle: "warming",
+            }
+        }
+    }
+
+    pub fn effective_mode(&self) -> &'static str {
+        let mode = if self.disabled {
+            syva_ebpf_common::MODE_DISABLED
+        } else if self.activated {
+            self.desired_mode
+        } else {
+            self.previous_generations
+                .iter()
+                .filter_map(|generation| {
+                    generation_mode(generation)
+                        .ok()
+                        .filter(|mode| mode_is_active(*mode))
+                        .map(|mode| (generation.id, mode))
+                })
+                .max_by_key(|(id, _)| *id)
+                .map(|(_, mode)| mode)
+                .unwrap_or(syva_ebpf_common::MODE_DISABLED)
+        };
+        match mode {
+            syva_ebpf_common::MODE_ENFORCE => "enforce",
+            syva_ebpf_common::MODE_AUDIT => "audit",
+            _ => "disabled",
+        }
+    }
+
+    pub fn activate(&mut self, generation: u64) -> anyhow::Result<GenerationStatus> {
+        anyhow::ensure!(!self.disabled, "enforcement was explicitly disabled");
+        anyhow::ensure!(
+            generation == self.generation.id,
+            "stale generation {generation}; current staging generation is {}",
+            self.generation.id
+        );
+        anyhow::ensure!(
+            self.generation.validate(),
+            "generation {generation} is incomplete"
+        );
+
+        set_mode(&mut self.bpf, self.desired_mode)?;
+        self.activated = true;
+
+        let mut cleanup_error = None;
+        for old in self.previous_generations.drain(..) {
+            if let Err(error) = cleanup_generation(&old) {
+                cleanup_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = cleanup_error {
+            tracing::warn!(%error, "new generation active; old generation cleanup is pending");
+        }
+        Ok(self.generation_status())
+    }
+
+    pub fn disable_enforcement(&mut self) -> anyhow::Result<()> {
+        set_mode(&mut self.bpf, syva_ebpf_common::MODE_DISABLED)?;
+        for old in self.previous_generations.drain(..) {
+            cleanup_generation(&old)?;
+        }
+        cleanup_generation(&self.generation)?;
+        self.activated = false;
+        self.disabled = true;
         Ok(())
     }
 
@@ -1215,16 +1502,125 @@ impl EnforceEbpf {
 
 impl Drop for EnforceEbpf {
     fn drop(&mut self) {
-        for &name in MAP_NAMES {
-            let path = self.pin_path.join(name);
-            if path.exists() {
-                let _ = fs::remove_file(&path);
+        if !self.activated {
+            let _ = cleanup_generation(&self.generation);
+        }
+    }
+}
+
+fn set_mode(bpf: &mut Ebpf, mode: u32) -> anyhow::Result<()> {
+    use aya::maps::Array;
+    let mut map = Array::<_, u32>::try_from(
+        bpf.map_mut("ENFORCEMENT_MODE")
+            .ok_or_else(|| anyhow::anyhow!("ENFORCEMENT_MODE map not found"))?,
+    )?;
+    map.set(0, mode, 0)?;
+    Ok(())
+}
+
+fn generation_mode(generation: &Generation) -> anyhow::Result<u32> {
+    use aya::maps::{Array, Map, MapData};
+    let data = MapData::from_pin(generation.map_path("ENFORCEMENT_MODE"))?;
+    let map = Array::<_, u32>::try_from(Map::Array(data))?;
+    Ok(map.get(&0, 0)?)
+}
+
+fn set_pinned_mode(generation: &Generation, mode: u32) -> anyhow::Result<()> {
+    use aya::maps::{Array, Map, MapData};
+    let data = MapData::from_pin(generation.map_path("ENFORCEMENT_MODE"))?;
+    let mut map = Array::<_, u32>::try_from(Map::Array(data))?;
+    map.set(0, mode, 0)?;
+    Ok(())
+}
+
+fn mode_is_active(mode: u32) -> bool {
+    matches!(
+        mode,
+        syva_ebpf_common::MODE_ENFORCE | syva_ebpf_common::MODE_AUDIT
+    )
+}
+
+fn prepare_generation(root: &Path) -> anyhow::Result<(Generation, Vec<Generation>)> {
+    let mut existing = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let Some(id) = parse_generation_name(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        existing.push(Generation {
+            id,
+            path: entry.path(),
+        });
+    }
+    existing.sort_by_key(|generation| generation.id);
+
+    let next_id = match existing.last() {
+        Some(generation) => generation
+            .id
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("generation ID space exhausted"))?,
+        None => 1,
+    };
+
+    let mut preserved = Vec::new();
+    for generation in existing {
+        match generation_mode(&generation) {
+            Ok(syva_ebpf_common::MODE_DISABLED) => cleanup_generation(&generation)?,
+            // Unknown or unreadable state is preserved until a validated new
+            // generation is active. Deleting it during recovery could create
+            // the exact enforcement gap generations are meant to prevent.
+            Ok(_) | Err(_) => preserved.push(generation),
+        }
+    }
+
+    Ok((
+        Generation {
+            id: next_id,
+            path: root.join(format!("{GENERATION_PREFIX}{next_id}")),
+        },
+        preserved,
+    ))
+}
+
+fn parse_generation_name(name: &str) -> Option<u64> {
+    let id = name.strip_prefix(GENERATION_PREFIX)?.parse().ok()?;
+    (id != 0).then_some(id)
+}
+
+fn cleanup_generation(generation: &Generation) -> anyhow::Result<()> {
+    let mut first_error = None;
+    for program in LSM_PROGRAMS {
+        let path = generation.link_path(program.hook_name);
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                first_error.get_or_insert_with(|| anyhow::anyhow!(error));
             }
         }
-        if self.pin_path.exists() {
-            let _ = fs::remove_dir(&self.pin_path);
+    }
+    for name in MAP_NAMES {
+        let path = generation.map_path(name);
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                first_error.get_or_insert_with(|| anyhow::anyhow!(error));
+            }
         }
-        tracing::info!("syva: BPF pins cleaned up");
+    }
+    for path in [
+        generation.links_path(),
+        generation.maps_path(),
+        generation.path.clone(),
+    ] {
+        if let Err(error) = fs::remove_dir(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound
+                && error.kind() != std::io::ErrorKind::DirectoryNotEmpty
+            {
+                first_error.get_or_insert_with(|| anyhow::anyhow!(error));
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -1524,6 +1920,15 @@ mod tests {
         assert!(!LSM_PROGRAMS
             .iter()
             .any(|program| program.hook_name == "cgroup_attach_task"));
+    }
+
+    #[test]
+    fn generation_names_are_strict_and_monotonic() {
+        assert_eq!(parse_generation_name("gen-v1-1"), Some(1));
+        assert_eq!(parse_generation_name("gen-v1-42"), Some(42));
+        assert_eq!(parse_generation_name("gen-v1-0"), None);
+        assert_eq!(parse_generation_name("gen-v2-1"), None);
+        assert_eq!(parse_generation_name("gen-v1-1.tmp"), None);
     }
 
     #[test]

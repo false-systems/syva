@@ -43,6 +43,9 @@ pub(crate) enum MembershipIntent {
         container_id: String,
         zone: String,
         cgroup_id: u64,
+        pod_namespace: String,
+        pod_name: String,
+        pod_uid: String,
         generation: u64,
     },
     Detach {
@@ -74,6 +77,7 @@ pub(crate) struct MembershipReconciler {
     metrics: Metrics,
     applied: BTreeMap<String, AppliedMembership>,
     pod_containers: BTreeMap<String, BTreeSet<String>>,
+    pending_attaches: BTreeMap<String, MembershipIntent>,
     pending_detaches: BTreeMap<String, u64>,
     next_generation: u64,
 }
@@ -95,6 +99,7 @@ impl MembershipReconciler {
             metrics,
             applied: BTreeMap::new(),
             pod_containers: BTreeMap::new(),
+            pending_attaches: BTreeMap::new(),
             pending_detaches: BTreeMap::new(),
             next_generation: start_generation.max(1),
         }
@@ -175,18 +180,26 @@ impl MembershipReconciler {
                 AppliedMembership {
                     zone: wanted.zone.clone(),
                     cgroup_id: wanted.cgroup_id,
-                    pod_namespace: wanted.pod_namespace,
-                    pod_name: wanted.pod_name,
-                    pod_uid: wanted.pod_uid,
+                    pod_namespace: wanted.pod_namespace.clone(),
+                    pod_name: wanted.pod_name.clone(),
+                    pod_uid: wanted.pod_uid.clone(),
                     generation,
                 },
             );
-            intents.push(MembershipIntent::Attach {
+            let intent = MembershipIntent::Attach {
                 container_id,
                 zone: wanted.zone,
                 cgroup_id: wanted.cgroup_id,
+                pod_namespace: wanted.pod_namespace,
+                pod_name: wanted.pod_name,
+                pod_uid: wanted.pod_uid,
                 generation,
-            });
+            };
+            if let MembershipIntent::Attach { container_id, .. } = &intent {
+                self.pending_attaches
+                    .insert(container_id.clone(), intent.clone());
+            }
+            intents.push(intent);
         }
 
         if retained_ids.is_empty() {
@@ -221,6 +234,7 @@ impl MembershipReconciler {
     }
 
     fn detach_intent(&mut self, container_id: &str) -> Option<MembershipIntent> {
+        self.pending_attaches.remove(container_id);
         self.applied.remove(container_id)?;
         let generation = self.next_generation();
         self.pending_detaches
@@ -231,22 +245,30 @@ impl MembershipReconciler {
         })
     }
 
-    /// Detaches the core has not yet confirmed. Re-emit these with every event
-    /// batch until the core acknowledges them, so a failed detach RPC cannot
-    /// leave a membership enforced forever.
-    pub(crate) fn pending_detach_intents(&self) -> Vec<MembershipIntent> {
-        self.pending_detaches
-            .iter()
-            .map(|(container_id, generation)| MembershipIntent::Detach {
-                container_id: container_id.clone(),
-                generation: *generation,
-            })
+    /// Changes the core has not yet confirmed. Re-emit them until acknowledged;
+    /// bootstrap activation is blocked while this set is non-empty.
+    pub(crate) fn pending_intents(&self) -> Vec<MembershipIntent> {
+        self.pending_attaches
+            .values()
+            .cloned()
+            .chain(
+                self.pending_detaches
+                    .iter()
+                    .map(|(container_id, generation)| MembershipIntent::Detach {
+                        container_id: container_id.clone(),
+                        generation: *generation,
+                    }),
+            )
             .collect()
     }
 
-    /// Feed apply results back into reconciler state. A failed attach is rolled
-    /// back so the next pod event regenerates it instead of being suppressed by
-    /// the idempotency check; a confirmed detach leaves the retry queue.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending_attaches.is_empty() || !self.pending_detaches.is_empty()
+    }
+
+    /// Feed apply results back into reconciler state. Both attach and detach
+    /// failures stay queued; waiting for a future pod event is not sufficient
+    /// during an activation barrier.
     pub(crate) fn absorb_outcomes(&mut self, outcomes: &[IntentOutcome]) {
         for outcome in outcomes {
             match &outcome.intent {
@@ -254,13 +276,13 @@ impl MembershipReconciler {
                     container_id,
                     generation,
                     ..
-                } if !outcome.ok
+                } if outcome.ok
                     && self
-                        .applied
+                        .pending_attaches
                         .get(container_id)
-                        .is_some_and(|current| current.generation == *generation) =>
+                        .is_some_and(|pending| matches!(pending, MembershipIntent::Attach { generation: pending_generation, .. } if pending_generation == generation)) =>
                 {
-                    self.applied.remove(container_id);
+                    self.pending_attaches.remove(container_id);
                 }
                 MembershipIntent::Detach {
                     container_id,
@@ -308,7 +330,6 @@ impl PodReconcileError {
 pub(crate) async fn apply_intents(
     core: &mut syva_core_client::SyvaCoreClient,
     metrics: &Metrics,
-    pod: &Pod,
     intents: Vec<MembershipIntent>,
 ) -> Vec<IntentOutcome> {
     let mut outcomes = Vec::with_capacity(intents.len());
@@ -318,6 +339,9 @@ pub(crate) async fn apply_intents(
                 container_id,
                 zone,
                 cgroup_id,
+                pod_namespace,
+                pod_name,
+                pod_uid,
                 generation,
             } => {
                 let response = core
@@ -325,9 +349,9 @@ pub(crate) async fn apply_intents(
                         container_id: container_id.clone(),
                         zone_name: zone.clone(),
                         cgroup_id: *cgroup_id,
-                        pod_namespace: pod.namespace().unwrap_or_default(),
-                        pod_name: pod.name_any(),
-                        pod_uid: pod.uid().unwrap_or_default(),
+                        pod_namespace: pod_namespace.clone(),
+                        pod_name: pod_name.clone(),
+                        pod_uid: pod_uid.clone(),
                         source: "syva-k8s".to_string(),
                         generation: *generation,
                     })
@@ -696,7 +720,7 @@ mod tests {
         assert!(errors.is_empty());
         assert!(matches!(
             intents.as_slice(),
-            [MembershipIntent::Attach { container_id, zone, cgroup_id, generation }]
+            [MembershipIntent::Attach { container_id, zone, cgroup_id, generation, .. }]
                 if container_id == "abcdef123456" && zone == "zone-a" && *cgroup_id != 0 && *generation == 1
         ));
     }
@@ -811,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_attach_is_rolled_back_and_retried_on_next_event() {
+    fn failed_attach_stays_pending_until_core_confirms() {
         let (_temp, resolver) = resolver_for("abcdef123456");
         let mut r = reconciler(resolver);
         let p = pod(
@@ -822,8 +846,6 @@ mod tests {
         );
         let (intents, _) = r.reconcile_pod_intents(&p);
         assert_eq!(intents.len(), 1);
-        let first_generation = intent_generation(&intents[0]);
-
         r.absorb_outcomes(&[IntentOutcome {
             intent: intents[0].clone(),
             ok: false,
@@ -831,11 +853,14 @@ mod tests {
 
         let (retried, errors) = r.reconcile_pod_intents(&p);
         assert!(errors.is_empty());
-        assert!(matches!(
-            retried.as_slice(),
-            [MembershipIntent::Attach { container_id, generation, .. }]
-                if container_id == "abcdef123456" && *generation > first_generation
-        ));
+        assert!(retried.is_empty());
+        assert_eq!(r.pending_intents(), intents);
+
+        r.absorb_outcomes(&[IntentOutcome {
+            intent: intents[0].clone(),
+            ok: true,
+        }]);
+        assert!(r.pending_intents().is_empty());
     }
 
     #[test]
@@ -877,13 +902,13 @@ mod tests {
             intent: detach[0].clone(),
             ok: false,
         }]);
-        assert_eq!(r.pending_detach_intents(), detach);
+        assert_eq!(r.pending_intents(), detach);
 
         r.absorb_outcomes(&[IntentOutcome {
             intent: detach[0].clone(),
             ok: true,
         }]);
-        assert!(r.pending_detach_intents().is_empty());
+        assert!(r.pending_intents().is_empty());
     }
 
     #[test]

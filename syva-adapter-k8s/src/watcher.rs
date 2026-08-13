@@ -13,7 +13,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use syva_core_client::syva_core::{
-    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RemoveZoneRequest,
+    ActivateGenerationRequest, AllowCommRequest, DenyCommRequest, ListCommsRequest,
+    ListZonesRequest, RemoveZoneRequest, StatusRequest,
 };
 use tracing::{info, warn};
 
@@ -33,8 +34,6 @@ pub async fn run(config: Config) -> Result<()> {
 }
 
 async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolicy>) -> Result<()> {
-    let mut core =
-        syva_core_client::connect_unix_socket_with_retry(config.core_socket.clone()).await;
     let metrics = Metrics::default();
     spawn_metrics_server(config.metrics_listen, metrics.clone()).await?;
 
@@ -46,72 +45,139 @@ async fn run_core_mode(config: Config, kube: KubeClient, crds: Api<SyvaZonePolic
         "syva-k8s starting"
     );
 
+    loop {
+        run_generation(&config, kube.clone(), crds.clone(), metrics.clone()).await?;
+        info!("core staging generation changed; replaying authoritative snapshot");
+    }
+}
+
+async fn run_generation(
+    config: &Config,
+    kube: KubeClient,
+    crds: Api<SyvaZonePolicy>,
+    metrics: Metrics,
+) -> Result<()> {
+    let mut core =
+        syva_core_client::connect_unix_socket_with_retry(config.core_socket.clone()).await;
+    let staging_generation = core
+        .status(StatusRequest {})
+        .await?
+        .into_inner()
+        .staging_generation;
+
+    // Membership and IP mappings cannot reference zones until this completes.
     initial_reconcile_core(&mut core, &crds).await?;
-    let pod_api: Api<Pod> = Api::all(kube.clone());
+
+    let pods: Api<Pod> = Api::all(kube);
+    let (crd_ready_tx, crd_ready_rx) = tokio::sync::oneshot::channel();
+    let (membership_ready_tx, membership_ready_rx) = tokio::sync::oneshot::channel();
+    let (ip_ready_tx, ip_ready_rx) = tokio::sync::oneshot::channel();
+
+    let mut crd_task = tokio::spawn(run_crd_watcher(
+        config.core_socket.clone(),
+        crds,
+        crd_ready_tx,
+    ));
     let mut pod_task = tokio::spawn(run_pod_membership_watcher(
         config.core_socket.clone(),
-        pod_api.clone(),
+        pods.clone(),
         config.node_name.clone(),
         ResolverConfig {
             host_proc: config.host_proc.clone(),
             host_cgroup: config.host_cgroup.clone(),
         },
         metrics.clone(),
+        membership_ready_tx,
     ));
-    let mut ip_zone_task = tokio::spawn(run_pod_ip_zone_watcher(
+    let mut ip_task = tokio::spawn(run_pod_ip_zone_watcher(
         config.core_socket.clone(),
-        pod_api,
-        metrics.clone(),
+        pods,
+        metrics,
+        ip_ready_tx,
     ));
 
-    let crd_loop = async {
-        let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(Event::Apply(crd)) => {
-                    if let Err(error) = handle_apply_core(&mut core, &crd).await {
-                        warn!(name = ?crd.metadata.name, error = %error, "apply failed");
-                    } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
-                        warn!(error = %error, "communication reconcile failed");
-                    }
-                }
-                Ok(Event::Delete(crd)) => {
-                    if let Err(error) = handle_delete_core(&mut core, &crd).await {
-                        warn!(name = ?crd.metadata.name, error = %error, "delete failed");
-                    } else if let Err(error) = reconcile_core_comms(&mut core, &crds).await {
-                        warn!(error = %error, "communication reconcile failed");
-                    }
-                }
-                Ok(Event::Init) | Ok(Event::InitDone) | Ok(Event::InitApply(_)) => {}
-                Err(error) => warn!("watcher error: {error}"),
-            }
-        }
-        anyhow::bail!("SyvaZonePolicy watch stream ended unexpectedly");
-    };
+    tokio::time::timeout(Duration::from_secs(120), async {
+        crd_ready_rx.await.context("CRD initial replay ended")?;
+        membership_ready_rx
+            .await
+            .context("membership initial replay ended")?;
+        ip_ready_rx.await.context("IP-zone initial replay ended")?;
+        anyhow::Ok(())
+    })
+    .await
+    .context("authoritative replay timed out")??;
 
-    // Membership watching IS the enforcement feed. If that task dies, this
-    // adapter must die with it so the DaemonSet restarts both, instead of
-    // keeping a half-alive adapter that silently stops attaching pods.
-    let result = tokio::select! {
-        result = crd_loop => result,
-        joined = &mut pod_task => match joined {
-            Ok(Ok(())) => Err(anyhow::anyhow!("pod membership watcher exited unexpectedly")),
-            Ok(Err(error)) => Err(error.context("pod membership watcher failed")),
-            Err(join_error) => {
-                Err(anyhow::anyhow!(join_error).context("pod membership watcher panicked"))
-            }
-        },
-        joined = &mut ip_zone_task => match joined {
-            Ok(Ok(())) => Err(anyhow::anyhow!("pod IP-zone watcher exited unexpectedly")),
-            Ok(Err(error)) => Err(error.context("pod IP-zone watcher failed")),
-            Err(join_error) => {
-                Err(anyhow::anyhow!(join_error).context("pod IP-zone watcher panicked"))
-            }
-        },
+    if staging_generation != 0 {
+        core.activate_generation(ActivateGenerationRequest {
+            generation: staging_generation,
+        })
+        .await?;
+        info!(
+            generation = staging_generation,
+            "Kubernetes snapshot activated"
+        );
+    }
+
+    let mut poll = tokio::time::interval(Duration::from_secs(5));
+    let result = loop {
+        tokio::select! {
+            _ = poll.tick() => match core.status(StatusRequest {}).await {
+                Ok(response) => {
+                    let generation = response.into_inner().staging_generation;
+                    if generation != 0 && generation != staging_generation {
+                        break Ok(());
+                    }
+                }
+                Err(error) => warn!(%error, "core status unavailable; waiting for reconnect"),
+            },
+            joined = &mut crd_task => break join_watcher("CRD", joined),
+            joined = &mut pod_task => break join_watcher("pod membership", joined),
+            joined = &mut ip_task => break join_watcher("pod IP-zone", joined),
+        }
     };
+    crd_task.abort();
     pod_task.abort();
-    ip_zone_task.abort();
+    ip_task.abort();
     result
+}
+
+fn join_watcher(name: &str, joined: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    match joined {
+        Ok(Ok(())) => anyhow::bail!("{name} watcher exited unexpectedly"),
+        Ok(Err(error)) => Err(error.context(format!("{name} watcher failed"))),
+        Err(error) => Err(anyhow::anyhow!(error).context(format!("{name} watcher panicked"))),
+    }
+}
+
+async fn run_crd_watcher(
+    core_socket: PathBuf,
+    crds: Api<SyvaZonePolicy>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<()> {
+    let mut core = syva_core_client::connect_unix_socket_with_retry(core_socket).await;
+    let mut ready = Some(ready);
+    let mut stream = watcher(crds.clone(), WatcherConfig::default()).boxed();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Apply(crd)) | Ok(Event::InitApply(crd)) => {
+                handle_apply_core(&mut core, &crd).await?;
+                reconcile_core_comms(&mut core, &crds).await?;
+            }
+            Ok(Event::Delete(crd)) => {
+                handle_delete_core(&mut core, &crd).await?;
+                reconcile_core_comms(&mut core, &crds).await?;
+            }
+            Ok(Event::InitDone) => {
+                initial_reconcile_core(&mut core, &crds).await?;
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(());
+                }
+            }
+            Ok(Event::Init) => {}
+            Err(error) => warn!(%error, "CRD watcher error"),
+        }
+    }
+    anyhow::bail!("SyvaZonePolicy watch stream ended unexpectedly")
 }
 
 async fn run_pod_membership_watcher(
@@ -120,6 +186,7 @@ async fn run_pod_membership_watcher(
     node_name: String,
     resolver: ResolverConfig,
     metrics: Metrics,
+    ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut core = syva_core_client::connect_unix_socket_with_retry(core_socket).await;
     let mut reconciler = MembershipReconciler::new(node_name.clone(), resolver, metrics.clone());
@@ -133,38 +200,74 @@ async fn run_pod_membership_watcher(
     // field selector keeps the watch node-local instead of cluster-wide.
     let watch_config = WatcherConfig::default().fields(&format!("spec.nodeName={node_name}"));
     let mut stream = watcher(pods, watch_config).boxed();
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(Event::Apply(pod)) | Ok(Event::InitApply(pod)) => {
-                let mut intents = reconciler.pending_detach_intents();
+    let mut retry = tokio::time::interval(Duration::from_secs(5));
+    let mut ready = Some(ready);
+    let mut init_done = false;
+    let mut unresolved = HashMap::<String, Pod>::new();
+    loop {
+        tokio::select! {
+            event = stream.next() => match event {
+            Some(Ok(Event::Apply(pod)) | Ok(Event::InitApply(pod))) => {
+                let mut intents = reconciler.pending_intents();
                 let (new_intents, errors) = reconciler.reconcile_pod_intents(&pod);
                 intents.extend(new_intents);
+                let key = pod.metadata.uid.clone().unwrap_or_default();
+                if errors.is_empty() {
+                    unresolved.remove(&key);
+                } else {
+                    unresolved.insert(key, pod);
+                }
                 for error in errors {
                     warn!(?error, "pod membership reconcile error");
                 }
-                let outcomes = apply_intents(&mut core, &metrics, &pod, intents).await;
+                let outcomes = apply_intents(&mut core, &metrics, intents).await;
                 reconciler.absorb_outcomes(&outcomes);
             }
-            Ok(Event::Delete(pod)) => {
-                let mut intents = reconciler.pending_detach_intents();
+            Some(Ok(Event::Delete(pod))) => {
+                unresolved.remove(&pod.metadata.uid.clone().unwrap_or_default());
+                let mut intents = reconciler.pending_intents();
                 intents.extend(reconciler.delete_pod_intents(&pod));
-                let outcomes = apply_intents(&mut core, &metrics, &pod, intents).await;
+                let outcomes = apply_intents(&mut core, &metrics, intents).await;
                 reconciler.absorb_outcomes(&outcomes);
             }
-            Ok(Event::Init) | Ok(Event::InitDone) => {}
-            Err(error) => {
+            Some(Ok(Event::InitDone)) => init_done = true,
+            Some(Ok(Event::Init)) => {}
+            Some(Err(error)) => {
                 metrics.record_error("pod_watch");
                 warn!(%error, "pod watcher error");
             }
+            None => anyhow::bail!("pod watch stream ended unexpectedly"),
+        },
+            _ = retry.tick() => {
+                let mut intents = reconciler.pending_intents();
+                for pod in unresolved.values().cloned().collect::<Vec<_>>() {
+                    let key = pod.metadata.uid.clone().unwrap_or_default();
+                    let (new_intents, errors) = reconciler.reconcile_pod_intents(&pod);
+                    intents.extend(new_intents);
+                    if errors.is_empty() {
+                        unresolved.remove(&key);
+                    }
+                    for error in errors {
+                        warn!(?error, "pod membership retry error");
+                    }
+                }
+                let outcomes = apply_intents(&mut core, &metrics, intents).await;
+                reconciler.absorb_outcomes(&outcomes);
+            }
+        }
+        if init_done && unresolved.is_empty() && !reconciler.has_pending() {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(());
+            }
         }
     }
-    anyhow::bail!("pod watch stream ended unexpectedly");
 }
 
 async fn run_pod_ip_zone_watcher(
     core_socket: PathBuf,
     pods: Api<Pod>,
     metrics: Metrics,
+    ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut core = syva_core_client::connect_unix_socket_with_retry(core_socket).await;
     let mut reconciler = IpZoneReconciler::new();
@@ -177,6 +280,8 @@ async fn run_pod_ip_zone_watcher(
     // another node, so every node needs the same eventual IP-to-zone view.
     let mut stream = watcher(pods, WatcherConfig::default()).boxed();
     let mut retry = tokio::time::interval(Duration::from_secs(5));
+    let mut ready = Some(ready);
+    let mut init_done = false;
     loop {
         tokio::select! {
             event = stream.next() => match event {
@@ -192,7 +297,8 @@ async fn run_pod_ip_zone_watcher(
                     let outcomes = apply_ip_zone_intents(&mut core, &metrics, intents).await;
                     reconciler.absorb_outcomes(&outcomes);
                 }
-                Some(Ok(Event::Init) | Ok(Event::InitDone)) => {}
+                Some(Ok(Event::InitDone)) => init_done = true,
+                Some(Ok(Event::Init)) => {}
                 Some(Err(error)) => {
                     metrics.record_error("pod_ip_zone_watch");
                     warn!(%error, "pod IP-zone watcher error");
@@ -203,6 +309,11 @@ async fn run_pod_ip_zone_watcher(
                 let intents = reconciler.pending_intents();
                 let outcomes = apply_ip_zone_intents(&mut core, &metrics, intents).await;
                 reconciler.absorb_outcomes(&outcomes);
+            }
+        }
+        if init_done && !reconciler.has_pending() {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(());
             }
         }
     }

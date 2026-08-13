@@ -91,11 +91,11 @@ RUST_LOG=aya=debug cargo run --bin syva-core 2>&1 | grep -A 20 verifier
 
 ## Current Follow-Ups
 
-- Wire file/k8s pod/container watchers into `AttachContainer` and
-  `DetachContainer`.
-- Add privileged Linux runtime load/attach blackbox verification.
-- Implement cgroup movement / zone escape protection through a valid kernel
-  mechanism; `cgroup_attach_task` is not a BPF-LSM hook on supported kernels.
+- Run kernel-enforcement contract gates per commit on self-hosted runners with
+  a small kernel matrix.
+- Broaden Kubernetes runtime resolver coverage and add IPv6 pod-IP mapping.
+- Implement `SyvaZonePolicy` status, finalizers, and leader election.
+- Expand privileged runtime blackbox coverage.
 - Continue CO-RE migration one offset chain at a time while keeping self-tests.
 
 ## Git Hygiene

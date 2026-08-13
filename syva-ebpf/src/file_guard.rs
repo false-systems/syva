@@ -1,13 +1,16 @@
 use aya_ebpf::programs::LsmContext;
 
 use crate::{
-    emit_deny_event, finish_decision, is_cross_zone_allowed, lookup_caller_zone,
-    maybe_run_self_test, read_file_key, INODE_ZONE_MAP,
+    emit_deny_event, enforcement_active, finish_decision, is_cross_zone_allowed,
+    lookup_caller_zone, maybe_run_self_test, read_file_key, INODE_ZONE_MAP,
 };
 use syva_ebpf_common::{HOOK_FILE_OPEN, PROG_FILE_OPEN, ZONE_FLAG_GLOBAL};
 
 pub fn file_open(ctx: &LsmContext) -> i32 {
     unsafe { maybe_run_self_test(ctx) };
+    if !enforcement_active() {
+        return 0;
+    }
     finish_decision(PROG_FILE_OPEN, try_file_open(ctx))
 }
 

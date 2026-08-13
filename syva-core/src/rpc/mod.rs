@@ -7,13 +7,14 @@ use std::time::{Duration, Instant};
 
 use syva_proto::syva_core::syva_core_server::SyvaCore;
 use syva_proto::syva_core::{
-    AllowCommRequest, AllowCommResponse, AttachContainerRequest, AttachContainerResponse, CommPair,
-    DenyCommRequest, DenyCommResponse, DenyEvent, DetachContainerRequest, DetachContainerResponse,
-    HookStatus, ListCommsRequest, ListCommsResponse, ListZonesRequest, ListZonesResponse,
-    RegisterHostPathRequest, RegisterHostPathResponse, RegisterZoneRequest, RegisterZoneResponse,
-    RemoveIpZoneRequest, RemoveIpZoneResponse, RemoveZoneRequest, RemoveZoneResponse,
-    SetIpZoneRequest, SetIpZoneResponse, StatusRequest, StatusResponse, WatchEventsRequest,
-    ZoneSummary,
+    ActivateGenerationRequest, AllowCommRequest, AllowCommResponse, AttachContainerRequest,
+    AttachContainerResponse, CommPair, DenyCommRequest, DenyCommResponse, DenyEvent,
+    DetachContainerRequest, DetachContainerResponse, DisableEnforcementRequest,
+    DisableEnforcementResponse, HookStatus, ListCommsRequest, ListCommsResponse, ListZonesRequest,
+    ListZonesResponse, RegisterHostPathRequest, RegisterHostPathResponse, RegisterZoneRequest,
+    RegisterZoneResponse, RemoveIpZoneRequest, RemoveIpZoneResponse, RemoveZoneRequest,
+    RemoveZoneResponse, SetIpZoneRequest, SetIpZoneResponse, StatusRequest, StatusResponse,
+    WatchEventsRequest, ZoneSummary,
 };
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -701,16 +702,62 @@ impl SyvaCore for SyvaCoreService {
         }))
     }
 
+    async fn activate_generation(
+        &self,
+        request: Request<ActivateGenerationRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        let generation = request.into_inner().generation;
+        if generation == 0 {
+            return Err(Status::invalid_argument("generation must be non-zero"));
+        }
+        if !self.health.read().await.activation_ready() {
+            return Err(Status::failed_precondition(
+                "all nine hooks and all three self-tests must pass before activation",
+            ));
+        }
+
+        let generation_status = self
+            .ebpf
+            .lock()
+            .await
+            .activate(generation)
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        self.health
+            .write()
+            .await
+            .set_generation_status(generation_status);
+        tracing::info!(generation, "enforcement generation activated");
+        self.status(Request::new(StatusRequest {})).await
+    }
+
+    async fn disable_enforcement(
+        &self,
+        _request: Request<DisableEnforcementRequest>,
+    ) -> Result<Response<DisableEnforcementResponse>, Status> {
+        let generation_status = {
+            let mut ebpf = self.ebpf.lock().await;
+            ebpf.disable_enforcement().map_err(|error| {
+                Status::internal(format!("failed to disable enforcement: {error}"))
+            })?;
+            ebpf.generation_status()
+        };
+        self.health
+            .write()
+            .await
+            .set_generation_status(generation_status);
+        tracing::warn!("enforcement explicitly disabled and kernel pins removed");
+        Ok(Response::new(DisableEnforcementResponse { ok: true }))
+    }
+
     async fn status(
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let (attached, uptime_secs) = {
-            let health = self.health.read().await;
-            (health.attached, self.start_time.elapsed().as_secs())
-        };
+        let uptime_secs = self.start_time.elapsed().as_secs();
         let mut hooks = Vec::new();
         let ebpf = self.ebpf.lock().await;
+        let generation = ebpf.generation_status();
+        let enforcement_mode = ebpf.effective_mode();
         match ebpf.read_counters() {
             Ok(counters) => {
                 for (idx, (_, totals)) in counters.iter().enumerate() {
@@ -746,12 +793,16 @@ impl SyvaCore for SyvaCoreService {
         let registry = self.registry.read().await;
 
         Ok(Response::new(StatusResponse {
-            attached,
+            attached: generation.active != 0,
             zones_active: registry.zone_count() as u32,
             containers_active: registry.container_count() as u32,
             uptime_secs,
             hooks,
             max_zones: syva_ebpf_common::MAX_ZONES,
+            active_generation: generation.active,
+            staging_generation: generation.staging,
+            lifecycle_state: generation.lifecycle.to_string(),
+            enforcement_mode: enforcement_mode.to_string(),
         }))
     }
 

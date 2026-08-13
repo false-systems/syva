@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 use syva_core_client::syva_core::{
-    AllowCommRequest, DenyCommRequest, ListCommsRequest, ListZonesRequest, RegisterHostPathRequest,
-    RemoveZoneRequest,
+    ActivateGenerationRequest, AllowCommRequest, DenyCommRequest, ListCommsRequest,
+    ListZonesRequest, RegisterHostPathRequest, RemoveZoneRequest, StatusRequest,
 };
 use tracing::{debug, info, warn};
 
@@ -20,6 +20,7 @@ pub async fn run(config: Config) -> Result<()> {
     let mut core =
         syva_core_client::connect_unix_socket_with_retry(config.core_socket.clone()).await;
     let mut last_applied = HashMap::new();
+    let mut last_staging_generation = 0;
 
     info!(
         policy_dir = %config.policy_dir.display(),
@@ -36,7 +37,13 @@ pub async fn run(config: Config) -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match reconcile_once_core(&mut core, &config, &mut last_applied).await {
+                let result = reconcile_and_activate(
+                    &mut core,
+                    &config,
+                    &mut last_applied,
+                    &mut last_staging_generation,
+                ).await;
+                match result {
                     Ok(stats) if stats.changed > 0 => {
                         info!(
                             created = stats.created,
@@ -56,6 +63,32 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
     }
+}
+
+async fn reconcile_and_activate(
+    core: &mut syva_core_client::SyvaCoreClient,
+    config: &Config,
+    last_applied: &mut HashMap<String, serde_json::Value>,
+    last_staging_generation: &mut u64,
+) -> Result<ReconcileStats> {
+    let status = core.status(StatusRequest {}).await?.into_inner();
+    if status.staging_generation != 0 && status.staging_generation != *last_staging_generation {
+        last_applied.clear();
+    }
+
+    let stats = reconcile_once_core(core, config, last_applied).await?;
+    if status.staging_generation != 0 {
+        core.activate_generation(ActivateGenerationRequest {
+            generation: status.staging_generation,
+        })
+        .await?;
+        info!(
+            generation = status.staging_generation,
+            "file policy snapshot activated"
+        );
+    }
+    *last_staging_generation = status.staging_generation;
+    Ok(stats)
 }
 
 #[derive(Default)]

@@ -54,14 +54,15 @@ make lima-smoke
 ```
 
 `make lima-deploy` prints the kernel, BPF LSM status, release eBPF object path,
-core PID, health JSON, attached hook count (6), and self-test results.
+core PID, health JSON, attached hook count (nine), and self-test results.
 
 ## What this proves
 
 - Syvä can be **deployed as a node-local agent** (build → install → start → healthy).
 - The release eBPF object loads and the **nine BPF-LSM hooks attach**
   (`file_open`, `bprm_check_security`, `ptrace_access_check`, `task_kill`,
-  `mmap_file`, `unix_stream_connect`).
+  `mmap_file`, `unix_stream_connect`, `socket_connect`, `socket_sendmsg`,
+  `socket_bind`).
 - The cgroup, inode, and Unix **self-tests pass**.
 - `make lima-verify-deployment` runs a **real container** against the *deployed*
   core (via `verify-deployment`, which targets `SYVA_SOCKET` and does not start
@@ -96,10 +97,10 @@ processes — and is not workload-specific.
 
 ## Rerun safety
 
-The deploy lifecycle is rerun-safe. `make lima-undeploy` stops the core with
-SIGTERM (so it unpins its BPF maps), removes the socket/PID/runtime dirs, and
-removes test containers and temp files. A redeploy starts from a clean state
-(fresh maps, `zones_loaded=0`). `make lima-verify-deployment` uses a unique
+The deploy lifecycle is rerun-safe. Ordinary SIGTERM preserves the active
+generation. `make lima-undeploy` first calls `syvactl enforcement disable`,
+then stops the core and runs exact offline cleanup before removing runtime and
+test files. A redeploy starts from a clean state. `make lima-verify-deployment` uses a unique
 container/zone/dir per run and detaches its membership on success, so repeated
 runs against a long-lived deployed core stay correct — only the per-run
 `deny_delta` is asserted, not the global counter.

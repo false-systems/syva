@@ -123,6 +123,10 @@ impl IpZoneReconciler {
             }
         }
     }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -120,12 +120,18 @@ Pods without the annotation are ignored.
 
 Reconciliation is generation-aware and outcome-checked:
 
+- A replacement core attaches a fresh disabled generation. The adapter waits
+  for the CRD, node-membership, and cluster pod-IP initial watches to reach
+  `InitDone` with no pending writes, then activates the exact staging ID.
+- A core-only restart is detected from a new staging ID and triggers a full
+  authoritative replay while the previous pinned generation keeps enforcing.
+
 - Generations are seeded from the clock at adapter start, so a restarted
   adapter keeps issuing generations above anything a previous instance sent and
   the core's stale-generation fencing keeps working across restarts.
-- An attach the core did not confirm (RPC error, stale, or conflict) is rolled
-  back in the adapter and retried on the next pod event instead of being
-  treated as applied.
+- An attach the core did not confirm (RPC error, stale, conflict, or cgroup
+  resolution failure) remains pending and is retried on a timer; activation
+  never depends on another pod event arriving.
 - A detach the core did not confirm stays in a pending queue and is re-sent
   with every subsequent event batch until the core acknowledges it.
 - The pod watch is scoped to the local node with a `spec.nodeName` field

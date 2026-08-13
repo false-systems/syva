@@ -4,7 +4,7 @@
 # This is a single-node DEVELOPMENT deployment (managed background process),
 # not a production install. It builds the release binary and eBPF object,
 # installs them, starts syva-core under sudo, and proves it is healthy with all
-# six BPF-LSM hooks attached.
+# nine BPF-LSM hooks attached.
 #
 # Run inside the VM from the repo root:  bash deploy/lima/deploy.sh
 set -euo pipefail
@@ -12,6 +12,7 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
 SYVA_BIN=/usr/local/bin/syva-core
+SYVACTL_BIN=/usr/local/bin/syvactl
 SYVA_EBPF=/usr/lib/syva/syva-ebpf
 SYVA_RUN=/run/syva
 SYVA_SOCK="$SYVA_RUN/syva-core.sock"
@@ -37,13 +38,14 @@ printf '%s' "$LSM" | tr ',' '\n' | grep -qx bpf || {
 echo "kernel: $(uname -r)   lsm: $LSM"
 
 say "Build release artifacts"
-cargo build --release -p syva-core
+cargo build --release -p syva-core -p syvactl
 cargo run -p xtask -- build-ebpf
 REL_EBPF="$(pwd)/syva-ebpf/target/bpfel-unknown-none/release/syva-ebpf"
 [ -f "$REL_EBPF" ] || { echo "release eBPF object not found at $REL_EBPF" >&2; exit 1; }
 
 say "Install"
 sudo install -m 0755 target/release/syva-core "$SYVA_BIN"
+sudo install -m 0755 target/release/syvactl "$SYVACTL_BIN"
 sudo install -D -m 0644 "$REL_EBPF" "$SYVA_EBPF"
 sudo mkdir -p "$SYVA_RUN"
 mkdir -p "$SYVA_DEPLOY/logs" "$SYVA_DEPLOY/policies" "$SYVA_DEPLOY/integration"
@@ -54,6 +56,14 @@ say "Start syva-core"
 sudo bash -c "nohup '$SYVA_BIN' --socket-path '$SYVA_SOCK' --health-port $HEALTH_PORT \
   >'$SYVA_LOG' 2>&1 & echo \$! >'$SYVA_PID'"
 sleep 1
+
+# Standalone Lima has no authoritative adapter. Activate its empty initial
+# snapshot explicitly; later verification populates the live maps.
+for _ in $(seq 1 30); do
+  [ -S "$SYVA_SOCK" ] && break
+  sleep 0.5
+done
+sudo "$SYVACTL_BIN" --socket "$SYVA_SOCK" generation activate
 
 # Wait for health: /healthz returns 200 once attached (degraded/healthy), 503 unsafe.
 ready=0

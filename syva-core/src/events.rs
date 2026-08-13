@@ -296,19 +296,20 @@ pub fn enrich(
 /// Spawn the always-on event pump. Owns the ring buffer for the core's
 /// lifetime; every enforcement event flows through here exactly once.
 pub fn spawn_event_pump(
-    ring_buf: RingBuf<MapData>,
+    ring_bufs: Vec<RingBuf<MapData>>,
     registry: Arc<RwLock<ZoneRegistry>>,
     paths: InodePathIndex,
     sinks: Vec<Box<dyn EventSink>>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut ring_buf = ring_buf;
+        let mut ring_bufs = ring_bufs;
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         tracing::info!(
             event = "syva.events.pump_started",
             component = "syva-core",
             sinks = sinks.len(),
+            rings = ring_bufs.len(),
             "enforcement event pump started"
         );
 
@@ -325,16 +326,18 @@ pub fn spawn_event_pump(
                 _ = interval.tick() => {
                     let raw_events = tokio::task::block_in_place(|| {
                         let mut out = Vec::new();
-                        while let Some(item) = ring_buf.next() {
-                            if item.len() < std::mem::size_of::<EnforcementEvent>() {
-                                continue;
-                            }
-                            let event: EnforcementEvent = unsafe {
-                                std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
-                            };
-                            out.push(event);
-                            if out.len() >= MAX_EVENTS_PER_TICK {
-                                break;
+                        'rings: for ring_buf in &mut ring_bufs {
+                            while let Some(item) = ring_buf.next() {
+                                if item.len() < std::mem::size_of::<EnforcementEvent>() {
+                                    continue;
+                                }
+                                let event: EnforcementEvent = unsafe {
+                                    std::ptr::read_unaligned(item.as_ptr() as *const EnforcementEvent)
+                                };
+                                out.push(event);
+                                if out.len() >= MAX_EVENTS_PER_TICK {
+                                    break 'rings;
+                                }
                             }
                         }
                         out

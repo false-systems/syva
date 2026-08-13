@@ -37,7 +37,27 @@ syvactl status --format json
 ```
 
 Shows attachment state, zone count, active memberships, uptime, max zone
-capacity, and per-hook counters.
+capacity, active/staging generation IDs, lifecycle, effective mode, and
+per-hook counters.
+
+### syvactl generation activate
+
+Calls gRPC `ActivateGeneration`. With no ID it activates the current staging
+generation; an explicit ID is useful for guarded automation.
+
+```sh
+syvactl generation activate
+syvactl generation activate 42
+```
+
+### syvactl enforcement disable
+
+Calls gRPC `DisableEnforcement`. This is the explicit uninstall path; stopping
+or restarting `syva-core` preserves the active generation.
+
+```sh
+syvactl enforcement disable
+```
 
 ### syvactl zones list
 
@@ -156,6 +176,8 @@ host-paths register
 comms list
 comms allow
 comms deny
+generation activate
+enforcement disable
 events --follow
 ```
 

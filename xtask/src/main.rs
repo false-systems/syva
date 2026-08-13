@@ -44,6 +44,8 @@ enum Cli {
     Precommit,
     /// Run ignored privileged runtime verification tests.
     VerifyRuntime,
+    /// Prove active pinned enforcement survives a core crash and replacement.
+    VerifyRestartContinuity,
     /// Run the privileged BPF-LSM integration test that proves the kernel
     /// blocks a forbidden cross-zone action.
     VerifyIntegration,
@@ -104,6 +106,7 @@ fn main() -> Result<()> {
         Cli::CheckEbpfArtifactPolicy => check_ebpf_artifact_policy(),
         Cli::Precommit => precommit(),
         Cli::VerifyRuntime => verify_runtime(),
+        Cli::VerifyRestartContinuity => verify_restart_continuity(),
         Cli::VerifyIntegration => verify_integration(),
         Cli::VerifyContainerIntegration => verify_container_integration(),
         Cli::VerifyK8sMembership => verify_k8s_membership(),
@@ -146,9 +149,10 @@ fn build_ebpf(release: bool) -> Result<()> {
             "build",
             "--target",
             "bpfel-unknown-none",
-            "-Z",
-            "build-std=core",
-        ]);
+            "--target-dir",
+        ])
+        .arg(ebpf_dir.join("target"))
+        .args(["-Z", "build-std=core"]);
 
     if release {
         cmd.arg("--release");
@@ -229,6 +233,8 @@ fn check_api_docs() -> Result<()> {
         "DenyComm",
         "ListComms",
         "RegisterHostPath",
+        "ActivateGeneration",
+        "DisableEnforcement",
         "Status",
         "WatchEvents",
         "generation `0`",
@@ -897,6 +903,24 @@ fn verify_runtime() -> Result<()> {
             "syva-core",
             "--test",
             "local_mode_register_then_list",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+fn verify_restart_continuity() -> Result<()> {
+    privileged_runtime_preflight("restart continuity verification")?;
+    build_ebpf(true)?;
+    run_root_command(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "syva-core",
+            "--test",
+            "integration_restart_continuity",
             "--",
             "--ignored",
             "--nocapture",
