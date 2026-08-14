@@ -9,7 +9,25 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+  # Upstream False Systems Sykli revision used by the repository gate.
+  SYKLI_REV: 71d264367852c9f5df737f2233be3b6efbf791ca8
+
 jobs:
+  sykli-gate:
+    name: sykli contract gate
+    runs-on: arc-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential pkg-config
+      - name: Install Sykli
+        run: cargo install --git https://github.com/false-systems/sykli --rev "$SYKLI_REV" --locked --root "$RUNNER_TEMP/sykli"
+      - name: Validate locked contract
+        run: "$RUNNER_TEMP/sykli/bin/sykli validate sykli.json"
+      - name: Run locked contract
+        run: "$RUNNER_TEMP/sykli/bin/sykli run sykli.json --json"
+
   # Cross-platform crates only — no aya, no containerd-client.
   cross-platform:
     name: check (${{ matrix.os }}, cross-platform crates)
