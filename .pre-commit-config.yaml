@@ -35,3 +35,8 @@ repos:
         entry: make check-openapi
         language: system
         pass_filenames: false
+      - id: syva-sykli
+        name: syva locked CI contract
+        entry: make sykli-commit
+        language: system
+        pass_filenames: false
