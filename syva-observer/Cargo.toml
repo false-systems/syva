@@ -1,0 +1,14 @@
+[package]
+name = "syva-observer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+syva-core-client = { path = "../syva-core-client" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+
+[[bin]]
+name = "syva-observer"
+path = "src/main.rs"
