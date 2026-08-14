@@ -11,7 +11,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = env::var("SYVA_CORE_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.into());
     loop {
         let mut client = connect_unix_socket_with_retry(socket.clone().into()).await;
-        let status = client.status(StatusRequest {}).await?.into_inner();
+        let status = match client.status(StatusRequest {}).await {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                eprintln!("syva-core status failed; reconnecting: {error}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
         let mut state = ObserverState::from_status(status);
         println!(
             "posture={:?} generation={}",

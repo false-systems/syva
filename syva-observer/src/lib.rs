@@ -29,12 +29,16 @@ pub struct HookState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObservationEvent {
     pub kind: String,
+    pub timestamp_ns: u64,
     pub decision: String,
     pub hook: String,
     pub zone: String,
     pub target_zone: String,
     pub path: String,
     pub destination: String,
+    pub what_failed: String,
+    pub why_it_matters: String,
+    pub possible_causes: Vec<String>,
 }
 
 impl ObserverState {
@@ -65,13 +69,22 @@ impl ObserverState {
 
     pub fn push_event(&mut self, event: DenyEvent) {
         self.recent_events.push(ObservationEvent {
-            kind: "operation.denied".into(),
+            kind: match event.decision.as_str() {
+                "would_deny" => "operation.would_deny",
+                "escape" => "operation.escape",
+                _ => "operation.denied",
+            }
+            .into(),
+            timestamp_ns: event.timestamp_ns,
             decision: event.decision,
             hook: event.hook,
             zone: event.zone,
             target_zone: event.target_zone,
             path: event.path,
             destination: event.dst_ip,
+            what_failed: event.what_failed,
+            why_it_matters: event.why_it_matters,
+            possible_causes: event.possible_causes,
         });
         if self.recent_events.len() > Self::MAX_RECENT_EVENTS {
             self.recent_events.remove(0);
