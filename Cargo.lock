@@ -2173,6 +2173,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "syva-observer"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "syva-core-client",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "syva-proto"
 version = "0.4.0"
 dependencies = [

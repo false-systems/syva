@@ -8,6 +8,7 @@ members = [
     "syva-adapter-file",
     "syva-adapter-k8s",
     "syva-adapter-api",
+    "syva-observer",
     "syva-ebpf-common",
     "xtask",
 ]
