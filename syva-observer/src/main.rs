@@ -1,6 +1,6 @@
 use std::env;
 
-use syva_core::{StatusRequest, WatchEventsRequest};
+use syva_core::{ListZonesRequest, StatusRequest, WatchEventsRequest};
 use syva_core_client::{connect_unix_socket_with_retry, syva_core};
 use syva_observer::ObserverState;
 
@@ -20,6 +20,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let mut state = ObserverState::from_status(status);
+        match client.list_zones(ListZonesRequest {}).await {
+            Ok(response) => state.apply_zones(response.into_inner()),
+            Err(error) => {
+                eprintln!("syva-core zone snapshot failed; reconnecting: {error}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        }
         println!(
             "posture={:?} generation={}",
             state.posture(),
