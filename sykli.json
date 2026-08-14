@@ -2,19 +2,36 @@
   "schema": "sykli-contract.v1",
   "tasks": [
     {
-      "name": "ci",
-      "run": "make sykli-ci",
+      "name": "fmt",
+      "run": "cargo fmt --check",
       "inputs": [
-        "**/*.rs",
-        "**/*.proto",
-        "**/*.toml",
-        "**/*.yaml",
-        "**/*.yml",
-        "Cargo.lock",
-        "Makefile",
-        "sykli.json",
-        "sykli.lock"
+        "Cargo.toml",
+        "**/*.rs"
       ]
+    },
+    {
+      "name": "lint",
+      "run": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "after": ["fmt"],
+      "inputs": ["Cargo.toml", "Cargo.lock", "**/*.rs"]
+    },
+    {
+      "name": "test",
+      "run": "cargo test --workspace --locked",
+      "after": ["fmt"],
+      "inputs": ["Cargo.toml", "Cargo.lock", "**/*.rs", "**/*.proto"]
+    },
+    {
+      "name": "build",
+      "run": "cargo build --workspace --locked",
+      "after": ["fmt"],
+      "inputs": ["Cargo.toml", "Cargo.lock", "**/*.rs", "**/*.proto"]
+    },
+    {
+      "name": "full",
+      "run": "make sykli-ci",
+      "after": ["fmt", "lint", "test", "build"],
+      "inputs": ["Makefile", "deploy/**/*", "scripts/**/*", "sykli.json", "sykli.lock"]
     }
   ]
 }
