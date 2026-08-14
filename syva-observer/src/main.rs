@@ -26,12 +26,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.enforcement.generation
         );
 
-        let mut events = client
+        let mut events = match client
             .watch_events(WatchEventsRequest { follow: true })
-            .await?
-            .into_inner();
-        while let Some(event) = events.message().await? {
-            state.push_event(event);
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                eprintln!("syva-core event stream failed; reconnecting: {error}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        loop {
+            match events.message().await {
+                Ok(Some(event)) => state.push_event(event),
+                Ok(None) => break,
+                Err(error) => {
+                    eprintln!("syva-core event stream read failed; reconnecting: {error}");
+                    break;
+                }
+            }
         }
         eprintln!("syva-core event stream ended; reconnecting");
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
