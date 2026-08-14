@@ -1,0 +1,20 @@
+{
+  "schema": "sykli-contract.v1",
+  "tasks": [
+    {
+      "name": "ci",
+      "run": "make sykli-ci",
+      "inputs": [
+        "**/*.rs",
+        "**/*.proto",
+        "**/*.toml",
+        "**/*.yaml",
+        "**/*.yml",
+        "Cargo.lock",
+        "Makefile",
+        "sykli.json",
+        "sykli.lock"
+      ]
+    }
+  ]
+}

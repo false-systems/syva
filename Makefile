@@ -38,7 +38,7 @@ ci:
 
 # Commit gate: Sykli runs the locked contract and selects Lima on macOS.
 sykli-commit:
-	cargo run -p xtask --bin sykli -- --filter=ci
+	sykli run --json
 
 ifeq ($(shell uname -s),Darwin)
 sykli-ci:

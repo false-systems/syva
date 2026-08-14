@@ -1,1 +1,4 @@
-{"contract":{"tasks":[{"command":"make sykli-ci","inputs":["**/*.rs","**/*.proto","**/*.toml","**/*.yaml","**/*.yml","Cargo.lock","Makefile"],"name":"ci"}],"version":"1"},"contract_hash":"sha256:7896f8834a3ccdcf68a9ee7ebc724204ee11cbdf43a698919c7e70290f90ef95","schema_version":"1","sdk_file":"sykli.rs","version":"1"}
+{
+  "schema": "sykli-lock.v1",
+  "contract_hash": "2ededce47c819c9f6a568f301d5fce4804eb0be1a394fe2d732c452ee8217e6d"
+}
