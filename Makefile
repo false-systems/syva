@@ -1,6 +1,7 @@
 LIMA_NAME ?= syva-dev
 LIMA_CONFIG ?= ./lima/syva.yaml
 REPO_DIR := $(shell pwd)
+SYKLI_REV ?= 71d264367852c9f5df737f2233be3b6efbf791ca8
 
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
@@ -39,7 +40,7 @@ ci:
 # Commit gate: run the locked contract in Linux on macOS, natively elsewhere.
 ifeq ($(shell uname -s),Darwin)
 sykli-commit:
-	limactl shell $(LIMA_NAME) bash -lc 'cd "$(REPO_DIR)"; sykli run sykli.json --json'
+	limactl shell $(LIMA_NAME) bash -lc 'set -euo pipefail; command -v sykli >/dev/null 2>&1 || cargo install --git https://github.com/false-systems/sykli --rev $(SYKLI_REV) --locked --root "$$HOME/.local"; cd "$(REPO_DIR)"; sykli run sykli.json --json'
 else
 sykli-commit:
 	sykli run sykli.json --json
