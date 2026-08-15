@@ -36,9 +36,14 @@ precommit:
 ci:
 	cargo run -p xtask -- ci
 
-# Commit gate: Sykli runs the locked contract and selects Lima on macOS.
+# Commit gate: run the locked contract in Linux on macOS, natively elsewhere.
+ifeq ($(shell uname -s),Darwin)
 sykli-commit:
-	sykli run --json
+	limactl shell $(LIMA_NAME) bash -lc 'cd "$(REPO_DIR)"; sykli run sykli.json --json'
+else
+sykli-commit:
+	sykli run sykli.json --json
+endif
 
 ifeq ($(shell uname -s),Darwin)
 sykli-ci:
