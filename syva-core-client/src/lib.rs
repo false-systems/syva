@@ -1,5 +1,12 @@
 //! Unix-socket client for the node-local `syva.core.v1` API.
 
+// `CoreClientError` carries `tonic::Status` (176 bytes), which puts every
+// `Result<_, CoreClientError>` past clippy's `result_large_err` threshold —
+// the same root cause as the allow in `syva-proto`'s generated module. Boxing
+// the `Grpc` variant would fix it properly but changes this crate's public
+// error API, so that is a deliberate decision rather than a CI side effect.
+#![allow(clippy::result_large_err)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
