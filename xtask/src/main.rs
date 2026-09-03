@@ -198,6 +198,15 @@ fn lint() -> Result<()> {
             "--",
             "-D",
             "warnings",
+            // `result_large_err` is not actionable in this workspace: it fires
+            // on `tonic::Status` (176 bytes), which is the error type of every
+            // generated RPC method and of `CoreClientError`. Silencing it
+            // properly would mean boxing `Status` across the whole gRPC
+            // surface, including code regenerated from the .proto on every
+            // build. Allowed after `-D warnings` so the deny-by-default posture
+            // is otherwise untouched.
+            "-A",
+            "clippy::result_large_err",
         ],
     )
 }
