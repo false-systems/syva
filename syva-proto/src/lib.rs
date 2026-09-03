@@ -1,4 +1,11 @@
 pub mod syva_core {
+    // tonic generates one `Result<_, tonic::Status>` per RPC method, and
+    // `Status` is 176 bytes — past clippy's `result_large_err` threshold. The
+    // lint fires ~30 times on code we neither wrote nor can edit: it is
+    // regenerated from the .proto on every build. Scoped to this module so it
+    // can never hide an oversized `Err` in a crate we do own.
+    #![allow(clippy::result_large_err)]
+
     tonic::include_proto!("syva.core.v1");
 }
 
