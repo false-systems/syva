@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [arc-arm64, macos-latest]
+        os: [ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +54,8 @@ jobs:
 
   # Full workspace — Linux only because aya uses Linux-specific libc.
   linux-full:
-    name: build + test (arc-arm64, workspace)
-    runs-on: arc-arm64
+    name: build + test (ubuntu-24.04-arm, workspace)
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,7 +73,7 @@ jobs:
   # Verifier-valid bytecode would require a kernel, so we only check compilation.
   ebpf:
     name: build eBPF (nightly)
-    runs-on: arc-arm64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -93,7 +93,7 @@ jobs:
 
   fmt:
     name: rustfmt
-    runs-on: arc-arm64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -105,7 +105,7 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: arc-arm64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -119,7 +119,7 @@ jobs:
 
   eval-build:
     name: build eval crates
-    runs-on: arc-arm64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -133,7 +133,7 @@ jobs:
 
   guardrails:
     name: release guardrails
-    runs-on: arc-arm64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
