@@ -8,5 +8,5 @@ eval/results/*.json
 .claude/
 .codex
 
-# Local Sykli run history; sykli.rs and sykli.lock are the source contract.
+# Local Sykli run history; sykli.json and sykli.lock are the source contract.
 .sykli/
