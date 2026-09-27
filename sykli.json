@@ -12,6 +12,7 @@
         ".github/workflows/release-images.yml",
         ".pre-commit-config.yaml",
         "AGENT.md",
+        "AGENTS.md",
         "CHANGELOG.md",
         "CLAUDE.md",
         "Cargo.lock",
