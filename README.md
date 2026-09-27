@@ -297,7 +297,7 @@ cluster-wide pod-IP → zone view for cross-zone TCP.
 make macos-check   # fast host-safe checks (macOS-friendly)
 make ci            # full non-privileged gate: fmt, clippy, tests, doc/proto/
                    # api guardrails, release eBPF object build
-sykli --filter=ci  # locked CI contract; uses Lima on macOS, native CI on Linux
+sykli run          # locked CI contract (sykli.json); Lima on macOS, native on Linux
 ```
 
 `cargo run -p xtask -- build-ebpf` builds the release eBPF object (the runtime

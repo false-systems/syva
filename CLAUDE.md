@@ -32,13 +32,13 @@ make lint
 make test
 make precommit
 make ci
-sykli --filter=ci
+sykli run
 ```
 
 Every `make` target wraps one source of truth: `cargo run -p xtask -- <cmd>`
 (`fmt`, `lint`, `check`, `test`, `proto-check`, `check-release-docs`,
 `check-ebpf-artifact-policy`, `eval-build`, `precommit`, `ci`, `build-ebpf`).
-Sykli owns the locked local CI contract (`sykli.rs`/`sykli.lock`) and delegates
+Sykli owns the locked local CI contract (`sykli.json`/`sykli.lock`) and delegates
 to `make sykli-ci`: Lima on macOS, the same xtask CI sequence natively on Linux.
 GitHub CI invokes those xtask commands directly.
 

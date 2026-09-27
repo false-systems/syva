@@ -5,12 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 default-run = "xtask"
 
-[[bin]]
-name = "sykli"
-path = "../sykli.rs"
-
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = "0.9"
-sykli = "=0.5.3"
