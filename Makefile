@@ -3,6 +3,14 @@ LIMA_CONFIG ?= ./lima/syva.yaml
 REPO_DIR := $(shell pwd)
 
 LIMA_SH = limactl shell $(LIMA_NAME) bash -lc
+# Cargo for the Lima check targets: the guest user's rustup, and a target dir
+# on the guest's own disk. The checkout is reached through the writable mount of
+# the Mac home, so cargo's config search walks up from it through
+# /Users/<you>/.cargo/config.toml; a `build.target-dir` there (a shared Mac
+# target dir) would otherwise receive these Linux builds over virtiofs, beside
+# the Mac's own artifacts. CARGO_TARGET_DIR outranks every config file. The
+# eBPF object still lands in syva-ebpf/target (xtask passes --target-dir).
+LIMA_CARGO_ENV = export PATH="$$HOME/.cargo/bin:$$PATH" CARGO_TARGET_DIR="$$HOME/.cache/syva/target"
 LIMA_SUDO = export PATH="$$HOME/.cargo/bin:$$PATH"; cd "$(REPO_DIR)"; sudo -E env PATH="$$PATH"
 
 # Privileged verify targets run under `sudo`, which resets HOME to /root
@@ -75,13 +83,13 @@ lima-shell:
 	limactl shell $(LIMA_NAME)
 
 lima-check:
-	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; export PATH="$$HOME/.cargo/bin:$$PATH"; cargo run -p xtask -- ci'
+	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; $(LIMA_CARGO_ENV); cargo run -p xtask -- ci'
 
 lima-test:
-	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; export PATH="$$HOME/.cargo/bin:$$PATH"; cargo run -p xtask -- test'
+	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; $(LIMA_CARGO_ENV); cargo run -p xtask -- test'
 
 lima-ebpf-build:
-	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; export PATH="$$HOME/.cargo/bin:$$PATH"; cargo run -p xtask -- build-ebpf'
+	limactl shell $(LIMA_NAME) bash -lc 'set -euxo pipefail; cd "$(REPO_DIR)"; $(LIMA_CARGO_ENV); cargo run -p xtask -- build-ebpf'
 
 verify-runtime:
 	$(VERIFY_ENV); cargo run -p xtask -- verify-runtime

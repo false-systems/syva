@@ -94,6 +94,7 @@
         "eval/oracle/src/main.rs",
         "lima/syva.yaml",
         "policies/standard.toml",
+        "rust-toolchain.toml",
         "syva-adapter-api/Cargo.toml",
         "syva-adapter-api/README.md",
         "syva-adapter-api/src/main.rs",

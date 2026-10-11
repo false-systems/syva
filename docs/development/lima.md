@@ -51,6 +51,14 @@ cargo run -p xtask -- ci
 tests, eval crate builds, and eBPF object compilation. No Postgres service is
 required.
 
+The userspace crates build with the toolchain pinned in `rust-toolchain.toml`,
+which the guest's rustup installs on first use. Their build output goes to
+`~/.cache/syva/target` on the guest's own disk (`LIMA_CARGO_ENV` in the
+Makefile). The checkout itself sits on the mount of your Mac home, so cargo's
+config search walks up through `~/.cargo/config.toml` on the Mac, and a shared
+`build.target-dir` set there would otherwise collect these Linux builds. The
+eBPF object still lands in `syva-ebpf/target`.
+
 ## Local Guardrails
 
 Use the Makefile hierarchy for ordinary development:

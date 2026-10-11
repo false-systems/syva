@@ -1,0 +1,14 @@
+# The one place the userspace toolchain is named. Unpinned, CI and the Lima VM
+# each ran whatever `stable` was current: 1.99.0 added `clippy::double_must_use`,
+# which fires on the tonic-generated code in syva-proto, and main went red with
+# no change in this repository. sykli's cache key also sees the compiler only
+# through declared inputs, so this file is one of them (sykli.json).
+#
+# The patch level floats: `1.98` takes 1.98.1 and any later patch. Raise the
+# channel deliberately, in a pull request that carries what the new lints ask.
+#
+# The eBPF crate is unaffected: xtask builds it with `cargo +nightly`, which
+# overrides this file.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]
