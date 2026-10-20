@@ -35,12 +35,34 @@ make ci
 sykli run
 ```
 
-Every `make` target wraps one source of truth: `cargo run -p xtask -- <cmd>`
-(`fmt`, `lint`, `check`, `test`, `proto-check`, `check-release-docs`,
-`check-ebpf-artifact-policy`, `eval-build`, `precommit`, `ci`, `build-ebpf`).
-Sykli owns the locked local CI contract (`sykli.json`/`sykli.lock`) and delegates
-to `make sykli-ci`: Lima on macOS, the same xtask CI sequence natively on Linux.
-GitHub CI invokes those xtask commands directly.
+Most `make` targets wrap `cargo run -p xtask -- <cmd>`, though the names can
+differ (`make proto-check` runs `xtask check-proto`). `macos-check`, `check`
+and the `lima-*` targets call cargo, make or limactl directly.
+
+- `make ci`: fmt (workspace and `syva-ebpf`), clippy with `-D warnings` (only
+  `clippy::result_large_err` is allowed, for `tonic::Status`), `cargo check`,
+  workspace tests, eval crate builds, the proto/API-doc/OpenAPI/release-doc
+  checks, and `check-ebpf-artifact-policy`, which builds the release eBPF
+  object and checks that `syva-core/src/ebpf.rs` prefers it.
+- `make precommit`: the same without `cargo check` and the eval builds.
+- Both build the eBPF object, so they need Linux with nightly, `rust-src` and
+  `bpf-linker`. On macOS use `make macos-check` (fmt plus a host-safe subset
+  of crates) or `make lima-check`.
+
+`rust-toolchain.toml` pins the userspace toolchain. `syva-ebpf` is a separate
+workspace that xtask builds with `cargo +nightly` for `bpfel-unknown-none`
+(`-Z build-std=core`) into `syva-ebpf/target/`.
+
+`sykli.json` has one task, `ci`, which runs `make sykli-ci`: `make lima-check`
+on macOS, `make ci` on Linux. Its `inputs` name every tracked file by path.
+When you add a source, test, doc or eval case, add it to `inputs` and run
+`sykli lock sykli.json`; otherwise sykli serves the old cached result as a
+pass.
+
+GitHub CI (`.github/workflows/ci.yml`) runs the same xtask commands as
+separate jobs. The privileged gates are in `privileged-runtime.yml`, which is
+`workflow_dispatch` only on a self-hosted `bpf-lsm` runner, so ordinary CI
+never exercises kernel enforcement.
 
 Run a focused test:
 
@@ -49,12 +71,25 @@ cargo test -p syva-core zone::tests::register_zone_is_idempotent  # one unit tes
 cargo test -p <crate> <name-substring>                           # by name
 ```
 
-The eval suites live outside the workspace (own manifests, run via `--manifest-path`):
+The eval suites live outside the workspace (own manifests, run via
+`--manifest-path`). The oracle is blackbox against a live core named by
+`SYVA_SOCKET`. With no reachable core every case prints `SKIP:` and passes, so
+a green run proves nothing unless a core was up:
 
 ```bash
-cargo test --manifest-path eval/oracle/Cargo.toml -- case_003 --exact --nocapture
-cargo run  --manifest-path eval/harness/Cargo.toml               # spec harness
+SYVA_SOCKET=/tmp/syva-oracle.sock \
+  cargo run -p syva-core -- --socket-path /tmp/syva-oracle.sock
+SYVA_SOCKET=/tmp/syva-oracle.sock \
+  cargo test --manifest-path eval/oracle/Cargo.toml -- case_003 --nocapture
+SYVA_SOCKET=/tmp/syva-oracle.sock \
+  cargo run --manifest-path eval/harness/Cargo.toml   # every spec
 ```
+
+`--exact` needs the full name (`case_003_list_zones_returns_registered_zones`);
+with `case_003` alone it selects zero tests. A case is a pair: a prose spec in
+`eval/harness/cases/case_NNN_*.yaml` and a `#[tokio::test] async fn case_NNN_*`
+in `eval/oracle/src/main.rs` that uses only `syva-proto` types. Numbers are
+stable; never renumber.
 
 `build-ebpf` builds the release eBPF object by default because that is the
 runtime artifact. Use `--debug` only for development.
@@ -67,19 +102,32 @@ make lima-check
 make lima-shell
 ```
 
-`make lima-check` runs format check, clippy, workspace check, workspace tests,
-eval crate builds, and eBPF object compilation in the `syva-dev` Lima VM.
+`make lima-check` runs `xtask ci` (format check, clippy, workspace check and
+tests, eval crate builds, eBPF object compilation) in the Lima VM named by
+`LIMA_NAME`. It defaults to `syva-dev`, which `make lima-up` creates from
+`lima/syva.yaml`; pass `LIMA_NAME=<vm>` to use another VM. Builds go to a
+guest-local `CARGO_TARGET_DIR` (`~/.cache/syva/target`), not to a target dir
+shared with the host.
 
-Privileged runtime evidence is separate (privileged Linux / BPF-LSM only; the
-container gate also needs a container runtime). All are `#[ignore]`d in normal
-`cargo test`:
+Privileged runtime evidence is separate (privileged Linux / BPF-LSM only). The
+gates are `#[ignore]`d integration tests in `syva-core/tests/`, run through
+xtask. Each first checks for Linux, root, a `syva` group (for the core socket)
+and `bpf` in `/sys/kernel/security/lsm`:
 
 ```bash
 sudo -E make verify-runtime              # load + attach 9 hooks + self-tests
 sudo -E make verify-restart-continuity   # pinned generation survives SIGKILL/replay
 sudo -E make verify-integration          # process/cgroup file_open denial (EPERM)
-sudo -E make verify-container-integration # same denial against a real container
+sudo -E make verify-container-integration # same denial in a real container (docker/nerdctl/podman)
+sudo -E make verify-allow                # must-not-block contract: same-zone, loopback, AllowComm
+sudo -E make verify-events               # enriched deny-event stream
 sudo -E make verify-audit-mode           # audit mode records would-deny without blocking
+sudo -E make verify-network-lock         # Isolated zone locked, Bridged zone open
+sudo -E make verify-egress-cidr          # egress CIDR allowlist
+sudo -E make verify-cross-zone-tcp       # pod-IP -> zone rule on socket_connect
+sudo -E make verify-inode-identity       # composite (dev, ino) identity
+sudo -E make verify-cgroup-escape        # escape is detected (counter + degraded), not blocked
+sudo -E make verify-k8s-membership       # needs a single-node cluster on this host
 ```
 
 The gates above each start their own core. To verify a core that is
@@ -101,12 +149,15 @@ the v0.2 contract. It scans tracked `*.md`/`*.rs`/`*.proto`/`*.toml`/`*.yaml`
 fences, rejects:
 
 ```text
-- stale hook counts: "7 hooks" / "seven hooks" / "8 hooks"  (v0.4 has nine)
+- any hook count but nine: "7"/"8"/"10" or "seven"/"eight"/"ten" + "hooks",
+  and "7"/"8"/"seven"/"eight" + "lsm"
 - "syva_cgroup_attach"
-- "cgroup_attach_task" UNLESS nearby text marks it a known gap
-  ("not a bpf-lsm hook", "out of v0.2 scope", "do not reintroduce", assert!)
+- "cgroup_attach_task" UNLESS a line within two of it marks it a known gap or
+  detection-only ("not a bpf-lsm hook", "known gap", "do not reintroduce",
+  "detection only", "detected", "best-effort", "cannot block", assert!, ...)
 - "lima proves/verifies runtime|enforcement" without a "not"/"unless" caveat
-- "debug ebpf" called the "default"/"runtime artifact" (release is the default)
+- "debug ebpf" called the "default"/"runtime artifact", unless "development"
+  is within a line of it (release is the default)
 ```
 
 It also requires `README.md`, `CLAUDE.md`, `AGENT.md`, `SKILLS.md`, and
@@ -127,12 +178,16 @@ because it stores the trigger strings as literals.
 | `syva-adapter-file` | `syva-file` | TOML policy reconciler |
 | `syva-adapter-k8s` | `syva-k8s` | `SyvaZonePolicy` CRD reconciler |
 | `syva-adapter-api` | `syva-api` | REST proxy to local core |
+| `syva-observer` | `syva-observer` | Read-only observer (stage 1): `Status` + `WatchEvents` into a bounded view |
 | `syva-ebpf-common` | - | Shared userspace/eBPF C-layout types |
 | `syva-ebpf` | - | Separate nightly eBPF workspace |
 | `xtask` | - | Build/check helper |
 
 Eval crates under `eval/` are outside the workspace and use their own
-manifests.
+manifests. The adapters and `syva-observer` find the core through
+`SYVA_CORE_SOCKET`; the eval oracle and `verify-deployment` use `SYVA_SOCKET`.
+`syva-observer` only reads from the core and never writes to it; its
+boundaries are in `docs/design/syva-observer.md`.
 
 API docs live under `docs/api/`. The protobuf/gRPC API (`syva.core.v1`) is the
 source of truth; OpenAPI documents only the partial REST API; `syvactl` is a
@@ -249,6 +304,32 @@ reason templates), `btf.rs` (offset resolution),
 `container_id.rs` (ID validation), `types.rs` (shared core types). Privileged
 integration tests are under
 `syva-core/tests/` (all `#[ignore]`d; driven by the `verify-*` gates).
+`syva-ebpf/src/main.rs` defines the BPF maps and program entry points;
+`syva-ebpf-common/src/types.rs` holds the `#[repr(C)]` key/value types, size
+limits and flag bits both sides share.
+
+## Changes That Span Crates
+
+- **Hook identity.** A hook's index is its `PROG_*` constant in
+  `syva-ebpf-common/src/types.rs`. `HOOK_NAMES` in `syva-core/src/events.rs`
+  must list the hooks in the same order: events, `/healthz` and metrics index
+  counters by it. `LSM_PROGRAMS` in `syva-core/src/ebpf.rs` is the attach list.
+  The count nine is also fixed in `HOOK_NAMES`'s type and test, in
+  `syva-observer`'s `EXPECTED_HOOKS`, in the release-doc checker and in the
+  docs. A new hook needs an explicit decision first (`SKILLS.md`).
+- **Policy fields** flow from `syva-proto/proto/syva_core.proto` through
+  `syva-core` (`rpc/mod.rs`, `ingest.rs`, `types.rs`) to every adapter:
+  `syva-adapter-file` (`types.rs`, `translate.rs`), `syva-adapter-k8s`
+  (`crd.rs`, `mapper.rs`) and `syva-adapter-api` (`routes.rs`), then to
+  `docs/api/grpc.md`. The CRD manifest (`deploy/k8s/00-crd.yaml`) keeps an open
+  schema (`x-kubernetes-preserve-unknown-fields`), so `crd.rs` is the real
+  `SyvaZonePolicy` schema.
+- **RPCs and CLI commands** are pinned by `check-api-docs`, which requires
+  `docs/api/grpc.md`, `docs/api/cli.md` and
+  `docs/api/syvactl-command-contract.md` to name the RPCs and `syvactl`
+  commands listed in `xtask/src/main.rs`. That list is not derived from the
+  proto (`SetIpZone`/`RemoveIpZone` are not on it), so a new RPC is checked
+  only if you add it there.
 
 ## Core Startup
 
