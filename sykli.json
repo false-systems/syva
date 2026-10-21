@@ -4,6 +4,7 @@
     {
       "name": "ci",
       "run": "make sykli-ci",
+      "inherit": ["LIMA_NAME"],
       "inputs": [
         ".cargo/config.toml",
         ".github/workflows/builder-image.yml",
