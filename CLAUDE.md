@@ -57,7 +57,9 @@ workspace that xtask builds with `cargo +nightly` for `bpfel-unknown-none`
 on macOS, `make ci` on Linux. Its `inputs` name every tracked file by path.
 When you add a source, test, doc or eval case, add it to `inputs` and run
 `sykli lock sykli.json`; otherwise sykli serves the old cached result as a
-pass.
+pass. sykli hands tasks only `PATH`, `HOME`, `TMPDIR` and what a task names in
+`inherit`; the `ci` task inherits `LIMA_NAME`, so on macOS
+`LIMA_NAME=<vm> sykli run sykli.json` runs the gate in another Lima VM.
 
 GitHub CI (`.github/workflows/ci.yml`) runs the same xtask commands as
 separate jobs. The privileged gates are in `privileged-runtime.yml`, which is
