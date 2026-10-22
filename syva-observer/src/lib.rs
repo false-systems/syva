@@ -1,12 +1,21 @@
 //! Read-only, bounded materialized view of Syvä enforcement.
 
 use serde::{Deserialize, Serialize};
-use syva_core_client::syva_core::{DenyEvent, StatusResponse};
+use syva_core_client::syva_core::{DenyEvent, ListZonesResponse, StatusResponse};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObserverState {
     pub enforcement: EnforcementState,
+    pub zones: Vec<ZoneState>,
     pub recent_events: Vec<ObservationEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ZoneState {
+    pub name: String,
+    pub id: u32,
+    pub lifecycle: String,
+    pub containers: u32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,8 +72,22 @@ impl ObserverState {
                     })
                     .collect(),
             },
+            zones: Vec::new(),
             recent_events: Vec::new(),
         }
+    }
+
+    pub fn apply_zones(&mut self, response: ListZonesResponse) {
+        self.zones = response
+            .zones
+            .into_iter()
+            .map(|zone| ZoneState {
+                name: zone.name,
+                id: zone.zone_id,
+                lifecycle: zone.state,
+                containers: zone.containers_active,
+            })
+            .collect();
     }
 
     pub fn push_event(&mut self, event: DenyEvent) {
